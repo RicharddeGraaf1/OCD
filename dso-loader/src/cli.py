@@ -213,6 +213,14 @@ def load_wro_teksten(gemeente):
     _load(codes)
 
 
+@cli.command("adres")
+@click.argument("adres", nargs=-1)
+def adres(adres):
+    """What Ow rules and Wro bestemmingen apply at an address? E.g.: adres Keizersgracht 100 Amsterdam"""
+    from src.query import wat_geldt_op_adres
+    wat_geldt_op_adres(" ".join(adres))
+
+
 @cli.command("wat-geldt-hier")
 @click.argument("x", type=float)
 @click.argument("y", type=float)

@@ -6,6 +6,7 @@ Natural-language-style queries on the 1.6M row database.
 import json
 import sys
 
+import httpx
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -13,6 +14,37 @@ from rich.panel import Panel
 from src.db import get_conn
 
 console = Console()
+
+
+LOCATIESERVER = "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free"
+
+
+def adres_naar_rd(adres: str) -> tuple[float, float, str]:
+    """Resolve a freeform address to RD coordinates via PDOK Locatieserver."""
+    resp = httpx.get(LOCATIESERVER, params={"q": adres, "rows": 1, "fq": "type:adres"}, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    docs = data.get("response", {}).get("docs", [])
+    if not docs:
+        resp2 = httpx.get(LOCATIESERVER, params={"q": adres, "rows": 1}, timeout=10)
+        resp2.raise_for_status()
+        docs = resp2.json().get("response", {}).get("docs", [])
+    if not docs:
+        raise ValueError(f"Adres niet gevonden: {adres}")
+    doc = docs[0]
+    centroid = doc.get("centroide_rd", "")
+    # Format: "POINT(x y)"
+    coords = centroid.replace("POINT(", "").replace(")", "").split()
+    x, y = float(coords[0]), float(coords[1])
+    label = doc.get("weergavenaam", adres)
+    return x, y, label
+
+
+def wat_geldt_op_adres(adres: str):
+    """What rules apply at a given address?"""
+    x, y, label = adres_naar_rd(adres)
+    console.print(f"[dim]{label} -> RD {x:.0f}, {y:.0f}[/dim]")
+    wat_geldt_hier(x, y)
 
 
 def wat_geldt_hier(x: float, y: float):
