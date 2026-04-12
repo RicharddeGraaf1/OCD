@@ -208,46 +208,67 @@ def pons_status(gemeente: str):
     console.print(f"Wro-instrumenten: {wro['total']} totaal, {wro['vastgesteld']} vastgesteld")
 
 
+def _snippet(tekst: str, zoekterm: str, width: int = 80) -> str:
+    """Extract a snippet around the search term."""
+    if not tekst:
+        return ""
+    idx = tekst.lower().find(zoekterm.lower())
+    if idx >= 0:
+        start = max(0, idx - 30)
+        end = min(len(tekst), idx + len(zoekterm) + width - 30)
+        return ("..." if start > 0 else "") + tekst[start:end] + ("..." if end < len(tekst) else "")
+    return tekst[:width]
+
+
 def zoek_tekst(zoekterm: str):
-    """Full-text search across all tekst_elementen."""
+    """Full-text search across Ow tekst_elementen and Wro planteksten."""
     conn = get_conn()
     with conn.cursor() as cur:
+        # Ow teksten
         cur.execute("""
             SELECT te.nummer, te.opschrift, te.element_type,
-                   r.opschrift as regeling, r.bronhouder, r.documenttype,
+                   r.opschrift as regeling, 'Ow' as regime,
                    regexp_replace(te.inhoud, '<[^>]+>', '', 'g') as platte_tekst
             FROM dso.tekst_element te
             JOIN dso.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE te.inhoud ILIKE %s
             ORDER BY r.opschrift, te.nummer
-            LIMIT 30
+            LIMIT 20
         """, (f"%{zoekterm}%",))
-        rows = cur.fetchall()
+        ow_rows = cur.fetchall()
+
+        # Wro teksten
+        cur.execute("""
+            SELECT wt.nummer, wt.naam as opschrift, wt.object_type as element_type,
+                   ri.naam as regeling, 'Wro' as regime,
+                   wt.inhoud as platte_tekst
+            FROM dso.wro_tekst_object wt
+            JOIN dso.ruimtelijk_instrument ri ON ri.idn = wt.instrument_idn
+            WHERE wt.inhoud ILIKE %s
+            ORDER BY ri.naam, wt.volgnummer
+            LIMIT 20
+        """, (f"%{zoekterm}%",))
+        wro_rows = cur.fetchall()
     conn.close()
 
-    if not rows:
+    all_rows = ow_rows + wro_rows
+    if not all_rows:
         console.print(f"[yellow]Geen resultaten voor '{zoekterm}'[/yellow]")
         return
 
-    tbl = Table(title=f"Zoekresultaten: {zoekterm} ({len(rows)} hits)")
-    tbl.add_column("Regeling", max_width=35)
+    tbl = Table(title=f"Zoekresultaten: {zoekterm} ({len(ow_rows)} Ow + {len(wro_rows)} Wro)")
+    tbl.add_column("Regime", width=4)
+    tbl.add_column("Regeling/Plan", max_width=30)
     tbl.add_column("Type")
-    tbl.add_column("Artikel", max_width=25)
-    tbl.add_column("Tekstfragment", max_width=60)
-    for r in rows:
-        tekst = (r["platte_tekst"] or "")[:200]
-        idx = tekst.lower().find(zoekterm.lower())
-        if idx >= 0:
-            start = max(0, idx - 30)
-            end = min(len(tekst), idx + len(zoekterm) + 30)
-            fragment = ("..." if start > 0 else "") + tekst[start:end] + ("..." if end < len(tekst) else "")
-        else:
-            fragment = tekst[:60]
+    tbl.add_column("Artikel", max_width=20)
+    tbl.add_column("Fragment", max_width=55)
+    for r in all_rows:
         tbl.add_row(
-            r["regeling"][:35],
+            r["regime"],
+            (r["regeling"] or "")[:30],
             r["element_type"],
-            f"{r['nummer'] or ''} {r['opschrift'] or ''}".strip()[:25],
-            fragment,
+            f"{r['nummer'] or ''} {r['opschrift'] or ''}".strip()[:20],
+            _snippet(r["platte_tekst"] or "", zoekterm, 55),
         )
     console.print(tbl)
 
