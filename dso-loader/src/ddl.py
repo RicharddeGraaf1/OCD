@@ -90,7 +90,16 @@ CREATE TABLE IF NOT EXISTS waardelijst (
 
 CREATE TABLE IF NOT EXISTS bronhouder (
     overheidscode   TEXT PRIMARY KEY,
-    naam            TEXT NOT NULL
+    naam            TEXT NOT NULL,
+    oin             TEXT NULL,
+    bestuurslaag    TEXT NULL,
+    ow_geladen      BOOLEAN NOT NULL DEFAULT FALSE,
+    imtr_geladen    BOOLEAN NOT NULL DEFAULT FALSE,
+    wro_geladen     BOOLEAN NOT NULL DEFAULT FALSE,
+    wro_teksten_geladen BOOLEAN NOT NULL DEFAULT FALSE,
+    ow_regelingen   INT NOT NULL DEFAULT 0,
+    wro_instrumenten INT NOT NULL DEFAULT 0,
+    laatst_geladen  TIMESTAMP NULL
 );
 
 -- =============================================================

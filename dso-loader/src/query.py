@@ -305,6 +305,49 @@ def zoek_tekst(zoekterm: str):
     console.print(tbl)
 
 
+def bevoegde_gezagen():
+    """Show all bevoegde gezagen with load status."""
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT overheidscode, naam, oin, bestuurslaag,
+                   ow_geladen, imtr_geladen, wro_geladen, wro_teksten_geladen,
+                   ow_regelingen, wro_instrumenten
+            FROM dso.bronhouder
+            ORDER BY bestuurslaag, naam
+        """)
+        rows = cur.fetchall()
+    conn.close()
+
+    tbl = Table(title=f"Bevoegde gezagen ({len(rows)})")
+    tbl.add_column("Code", width=6)
+    tbl.add_column("Naam", max_width=28)
+    tbl.add_column("Laag", width=10)
+    tbl.add_column("OIN", max_width=12)
+    tbl.add_column("Ow", justify="center", width=4)
+    tbl.add_column("IMTR", justify="center", width=4)
+    tbl.add_column("Wro", justify="center", width=4)
+    tbl.add_column("Tekst", justify="center", width=5)
+    tbl.add_column("Reg", justify="right", width=4)
+    tbl.add_column("Plan", justify="right", width=5)
+    for r in rows:
+        check = lambda v: "[green]Y[/green]" if v else "[dim]-[/dim]"
+        oin_short = (r["oin"] or "")[-6:] if r["oin"] else ""
+        tbl.add_row(
+            r["overheidscode"],
+            (r["naam"] or "")[:28],
+            r["bestuurslaag"] or "",
+            f"...{oin_short}" if oin_short else "",
+            check(r["ow_geladen"]),
+            check(r["imtr_geladen"]),
+            check(r["wro_geladen"]),
+            check(r["wro_teksten_geladen"]),
+            str(r["ow_regelingen"]),
+            str(r["wro_instrumenten"]),
+        )
+    console.print(tbl)
+
+
 def overzicht():
     """Show database overview."""
     conn = get_conn()

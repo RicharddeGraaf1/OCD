@@ -270,6 +270,13 @@ def zoek(zoekterm):
     zoek_tekst(zoekterm)
 
 
+@cli.command("gezagen")
+def gezagen():
+    """Show all bevoegde gezagen with load status (Ow/IMTR/Wro/Tekst)."""
+    from src.query import bevoegde_gezagen
+    bevoegde_gezagen()
+
+
 @cli.command("overzicht")
 def overzicht():
     """Show database overview."""
