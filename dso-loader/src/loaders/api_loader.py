@@ -542,6 +542,17 @@ def load_regeling_expand(conn, regeling_uri: str, expression_id: str):
     embedded = data.get("_embedded", {})
 
     with conn.cursor() as cur:
+        # ── TijdelijkDeelVan ──
+        tdv_link = data.get("_links", {}).get("tijdelijkDeelVan", {}).get("href", "")
+        if tdv_link:
+            # Extract the work-id from the href: .../regelingen/_akn_nl_act_...?...
+            tdv_part = tdv_link.split("/regelingen/")[-1].split("?")[0]
+            tdv_work = tdv_part.replace("_", "/")
+            cur.execute(
+                "UPDATE dso.regeling SET is_tijdelijkdeel_van = %s WHERE frbr_expression = %s",
+                (tdv_work, expression_id),
+            )
+
         # ── Regelingsgebied ──
         rg = embedded.get("regelingsgebied")
         if rg:
