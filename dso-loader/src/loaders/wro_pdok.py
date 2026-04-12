@@ -277,6 +277,11 @@ def load_wro_plans(cbs_codes: dict[str, str] | None = None):
         ]:
             _load_planobjecten(conn, feature, obj_type, code_set)
 
+        # Step 3: Load planteksten via IHR API
+        from src.loaders.ihr_loader import load_wro_teksten
+        code_list = list(cbs_codes.keys()) if cbs_codes else None
+        load_wro_teksten(code_list)
+
         console.print("[bold green]Wro loading complete![/bold green]")
     finally:
         conn.close()

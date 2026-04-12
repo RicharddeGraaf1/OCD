@@ -21,6 +21,10 @@ class Config:
     RTR_BASE = "https://service.omgevingswet.overheid.nl/publiek/toepasbare-regels/api/rtrgegevens/v2"
     STTR_BASE = "https://service.omgevingswet.overheid.nl/publiek/toepasbare-regels/api/toepasbareregelsuitvoerengegevens/v1"
 
+    # IHR (Informatiehuis Ruimte) for Wro planteksten
+    IHR_BASE = "https://ruimte.omgevingswet.overheid.nl/ruimtelijke-plannen/api/opvragen/v4"
+    IHR_API_KEY: str = os.getenv("IHR_API_KEY", "")
+
     # PDOK
     PDOK_ATOM_BASE = "https://service.pdok.nl/kadaster/ruimtelijke-plannen/atom/downloads"
 

@@ -204,5 +204,70 @@ def restore(dump_file):
         console.print("[yellow]Restore finished with warnings (usually harmless for pg_restore)[/yellow]")
 
 
+@cli.command("load-wro-teksten")
+@click.option("--gemeente", "-g", default=None, help="CBS code(s), comma-separated. Default: all loaded.")
+def load_wro_teksten(gemeente):
+    """Load Wro planteksten via IHR API."""
+    from src.loaders.ihr_loader import load_wro_teksten as _load
+    codes = [c.strip() for c in gemeente.split(",")] if gemeente else None
+    _load(codes)
+
+
+@cli.command("wat-geldt-hier")
+@click.argument("x", type=float)
+@click.argument("y", type=float)
+def wat_geldt_hier(x, y):
+    """What Ow rules and Wro bestemmingen apply at coordinate X Y (RD/EPSG:28992)?"""
+    from src.query import wat_geldt_hier as _q
+    _q(x, y)
+
+
+@cli.command("activiteiten")
+@click.argument("gemeente")
+def activiteiten(gemeente):
+    """List all activities for a municipality (CBS code, e.g. 0363)."""
+    from src.query import welke_activiteiten
+    welke_activiteiten(gemeente)
+
+
+@cli.command("normen")
+@click.argument("gemeente")
+def normen(gemeente):
+    """List all norms for a municipality (CBS code)."""
+    from src.query import normen_gemeente
+    normen_gemeente(gemeente)
+
+
+@cli.command("werkzaamheid")
+@click.argument("zoekterm")
+def werkzaamheid(zoekterm):
+    """Trace a werkzaamheid through the full chain to artikelen."""
+    from src.query import werkzaamheid_keten
+    werkzaamheid_keten(zoekterm)
+
+
+@cli.command("pons")
+@click.argument("gemeente")
+def pons_cmd(gemeente):
+    """Show pons status for a municipality."""
+    from src.query import pons_status
+    pons_status(gemeente)
+
+
+@cli.command("zoek")
+@click.argument("zoekterm")
+def zoek(zoekterm):
+    """Full-text search across all article texts."""
+    from src.query import zoek_tekst
+    zoek_tekst(zoekterm)
+
+
+@cli.command("overzicht")
+def overzicht():
+    """Show database overview."""
+    from src.query import overzicht as _o
+    _o()
+
+
 if __name__ == "__main__":
     cli()
