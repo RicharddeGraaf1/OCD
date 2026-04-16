@@ -112,7 +112,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
         if kw:
             cur.execute(
                 """
-                SELECT DISTINCT r.frbr_expression, r.opschrift, r.documenttype, r.bronhouder
+                SELECT DISTINCT r.frbr_work, r.opschrift, r.documenttype, r.bronhouder
                 FROM p2p.activiteit_locatieaanduiding ala
                 JOIN p2p.locatie l ON l.identificatie = ala.locatie_id
                 JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
@@ -125,12 +125,14 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
             )
             local_regs = cur.fetchall()
 
-            # For top 3 local regelingen, search tekst_elementen by opschrift
+            # For top 3 local regelingen, search tekst_elementen by opschrift + FTS
+            # Join via frbr_work (version-independent) to handle expression mismatches
             opschrift_filter, opschrift_params = _build_keyword_filter(kw, "te.opschrift")
+            fts_query = _build_fts_query(kw)
             seen_wids = {r["artikel"] for r in ow if r.get("artikel")}
 
             for reg in local_regs[:3]:
-                expr = reg["frbr_expression"]
+                work = reg["frbr_work"]
 
                 # A) Opschrift ILIKE (precise article title match)
                 if opschrift_filter:
@@ -140,23 +142,21 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                                te.opschrift AS artikel, te.inhoud
                         FROM p2p.tekst_element te
                         JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
-                        WHERE r.frbr_expression = %s
+                        WHERE r.frbr_work = %s
                           AND te.inhoud IS NOT NULL AND length(te.inhoud) > 30
                         {opschrift_filter}
                         ORDER BY length(te.inhoud) DESC
                         LIMIT 15
                         """,
-                        (expr, *opschrift_params),
+                        (work, *opschrift_params),
                     )
                     for row in cur.fetchall():
                         if row["artikel"] not in seen_wids:
                             seen_wids.add(row["artikel"])
                             ow.append(row)
 
-            # B) FTS on inhoud_plain (ranked, finds content matches)
-            fts_query = _build_fts_query(kw)
-            if fts_query:
-                for reg in local_regs[:3]:
+                # B) FTS on inhoud_plain (ranked, finds content matches)
+                if fts_query:
                     cur.execute(
                         """
                         SELECT r.opschrift AS regeling, r.documenttype,
@@ -167,14 +167,14 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                                ) AS fts_rank
                         FROM p2p.tekst_element te
                         JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
-                        WHERE r.frbr_expression = %s
+                        WHERE r.frbr_work = %s
                           AND te.inhoud_plain IS NOT NULL AND length(te.inhoud_plain) > 30
                           AND to_tsvector('dutch', coalesce(te.inhoud_plain, ''))
                               @@ to_tsquery('dutch', %s)
                         ORDER BY fts_rank DESC
                         LIMIT 10
                         """,
-                        (fts_query, reg["frbr_expression"], fts_query),
+                        (fts_query, work, fts_query),
                     )
                     for row in cur.fetchall():
                         if row["artikel"] not in seen_wids:
