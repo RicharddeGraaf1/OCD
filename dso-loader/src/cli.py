@@ -395,6 +395,14 @@ def convert_gemeente_cmd(code):
     console.print(f"\n[bold]Conversie klaar: {ok} gelukt, {err} fouten[/bold]")
 
 
+@convert.command("annotate")
+@click.argument("regeling_expression")
+def convert_annotate(regeling_expression):
+    """Stap 2: LLM-annotatievoorstel voor een geconverteerd plan."""
+    from src.converter.stap2 import annotate_bestemmingsplan
+    annotate_bestemmingsplan(regeling_expression)
+
+
 @convert.command("clear")
 @click.argument("code")
 @click.confirmation_option(prompt="Alle conversie-data voor deze gemeente wissen?")

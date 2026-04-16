@@ -58,6 +58,14 @@ def _build_keyword_filter(keywords: list[str], text_col: str) -> tuple[str, list
     return f"AND ({' OR '.join(conditions)})", params
 
 
+def _build_fts_query(keywords: list[str]) -> str | None:
+    """Build a PostgreSQL tsquery string from keywords (OR-joined)."""
+    if not keywords:
+        return None
+    safe = [kw.replace("'", "''") for kw in keywords if kw.strip()]
+    return " | ".join(f"'{kw}'" for kw in safe) if safe else None
+
+
 def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
     """Hybrid query: activiteit-based + per-regeling enrichment.
 
@@ -122,26 +130,56 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
             seen_wids = {r["artikel"] for r in ow if r.get("artikel")}
 
             for reg in local_regs[:3]:
-                if not opschrift_filter:
-                    break
-                cur.execute(
-                    f"""
-                    SELECT r.opschrift AS regeling, r.documenttype,
-                           te.opschrift AS artikel, te.inhoud
-                    FROM p2p.tekst_element te
-                    JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
-                    WHERE r.frbr_expression = %s
-                      AND te.inhoud IS NOT NULL AND length(te.inhoud) > 30
-                    {opschrift_filter}
-                    ORDER BY length(te.inhoud) DESC
-                    LIMIT 15
-                    """,
-                    (reg["frbr_expression"], *opschrift_params),
-                )
-                for row in cur.fetchall():
-                    if row["artikel"] not in seen_wids:
-                        seen_wids.add(row["artikel"])
-                        ow.append(row)
+                expr = reg["frbr_expression"]
+
+                # A) Opschrift ILIKE (precise article title match)
+                if opschrift_filter:
+                    cur.execute(
+                        f"""
+                        SELECT r.opschrift AS regeling, r.documenttype,
+                               te.opschrift AS artikel, te.inhoud
+                        FROM p2p.tekst_element te
+                        JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+                        WHERE r.frbr_expression = %s
+                          AND te.inhoud IS NOT NULL AND length(te.inhoud) > 30
+                        {opschrift_filter}
+                        ORDER BY length(te.inhoud) DESC
+                        LIMIT 15
+                        """,
+                        (expr, *opschrift_params),
+                    )
+                    for row in cur.fetchall():
+                        if row["artikel"] not in seen_wids:
+                            seen_wids.add(row["artikel"])
+                            ow.append(row)
+
+            # B) FTS on inhoud_plain (ranked, finds content matches)
+            fts_query = _build_fts_query(kw)
+            if fts_query:
+                for reg in local_regs[:3]:
+                    cur.execute(
+                        """
+                        SELECT r.opschrift AS regeling, r.documenttype,
+                               te.opschrift AS artikel, te.inhoud,
+                               ts_rank(
+                                 to_tsvector('dutch', coalesce(te.inhoud_plain, '')),
+                                 to_tsquery('dutch', %s)
+                               ) AS fts_rank
+                        FROM p2p.tekst_element te
+                        JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+                        WHERE r.frbr_expression = %s
+                          AND te.inhoud_plain IS NOT NULL AND length(te.inhoud_plain) > 30
+                          AND to_tsvector('dutch', coalesce(te.inhoud_plain, ''))
+                              @@ to_tsquery('dutch', %s)
+                        ORDER BY fts_rank DESC
+                        LIMIT 10
+                        """,
+                        (fts_query, reg["frbr_expression"], fts_query),
+                    )
+                    for row in cur.fetchall():
+                        if row["artikel"] not in seen_wids:
+                            seen_wids.add(row["artikel"])
+                            ow.append(row)
 
         # ── Query 3: Visie/Programma teksten ──
         visie_kw_filter, visie_kw_params = _build_keyword_filter(kw, "te.inhoud")
