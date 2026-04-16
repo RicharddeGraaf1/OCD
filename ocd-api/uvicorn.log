@@ -1,0 +1,26 @@
+INFO:     Started server process [42296]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8080 (Press CTRL+C to quit)
+INFO:     127.0.0.1:58078 - "GET /v1/zoek?q=bestemming&limit=2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56256 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56257 - "GET /v1/adres?q=Kapittelweg%2029%20Nijmegen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57164 - "GET /v1/adres?q=Kapittelweg+29+Nijmegen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63956 - "GET /v1/adres?q=Kapittelweg+29+Nijmegen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61398 - "GET /v1/adres?q=Kievitlaan+16,+2396JC+Koudekerk+aan+den+Rijn HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55677 - "GET /v1/adres?q=Reigerlaan+6,+2396JD+Koudekerk+aan+den+Rijn HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60702 - "GET /v1/adres?q=Reigerlaan+6,+2396JD+Koudekerk+aan+den+Rijn HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55184 - "GET /v1/adres?q=Leidsevaartlaan+27,+2465BD+Rijnsaterwoude HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62014 - "GET /v1/adres?q=Amsterdam,+Middenweg+400 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62014 - "GET /v1/adres?q=Amsterdam,+Prinsengracht+123 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62014 - "GET /v1/adres?q=Oudegracht+100,+3511AE+Utrecht HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62014 - "GET /v1/adres?q=Pitrus+57,+Amersfoort HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62014 - "GET /v1/adres?q=Coolsingel,+Rotterdam HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62014 - "GET /v1/adres?q=Elektronweg+10A,+Utrecht HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62014 - "GET /v1/adres?q=Elektronweg+10A,+Utrecht HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62014 - "GET /v1/adres?q=Elektronweg+10A,+Utrecht HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62014 - "GET /v1/adres?q=Tractieweg+198,+Utrecht HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62014 - "GET /v1/adres?q=gemeente+Amsterdam HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57119 - "GET /v1/adres?q=Pastoor+Hanraetstraat,+Roggel HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57119 - "GET /v1/adres?q=Kapittelweg+29,+Nijmegen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61880 - "GET /v1/adres?q=Elektronweg+10A+Utrecht HTTP/1.1" 200 OK

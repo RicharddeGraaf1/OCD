@@ -102,7 +102,7 @@ def load_teksten_for_plan(conn, plan_idn: str) -> int:
             naam = titel
 
             cur.execute(
-                """INSERT INTO dso.wro_tekst_object
+                """INSERT INTO wro.wro_tekst_object
                    (identificatie, instrument_idn, volgnummer, niveau, parent_id,
                     object_type, label, nummer, naam, inhoud)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -129,10 +129,10 @@ def load_wro_teksten(cbs_codes: list[str] | None = None):
         with conn.cursor() as cur:
             if cbs_codes:
                 cur.execute(
-                    "SELECT idn, naam FROM dso.ruimtelijk_instrument WHERE bronhouder = ANY(%s) ORDER BY idn",
+                    "SELECT idn, naam FROM wro.ruimtelijk_instrument WHERE bronhouder = ANY(%s) ORDER BY idn",
                     (cbs_codes,))
             else:
-                cur.execute("SELECT idn, naam FROM dso.ruimtelijk_instrument ORDER BY idn")
+                cur.execute("SELECT idn, naam FROM wro.ruimtelijk_instrument ORDER BY idn")
             instruments = cur.fetchall()
 
         console.print(f"Loading teksten for {len(instruments)} instruments...")

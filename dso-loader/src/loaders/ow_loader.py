@@ -13,6 +13,8 @@ import zipfile
 from pathlib import Path
 
 import httpx
+
+from utils import strip_xml
 from lxml import etree
 from rich.console import Console
 
@@ -186,7 +188,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
     with conn.cursor() as cur:
         # --- Regeling metadata ---
         cur.execute(
-            """INSERT INTO dso.regeling
+            """INSERT INTO p2p.regeling
                (frbr_expression, frbr_work, regelingmodel, opschrift, citeertitel, bronhouder, documenttype)
                VALUES (%s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (frbr_expression) DO NOTHING""",
@@ -208,13 +210,14 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
             eid_to_id = {}
             for elem in elements:
                 cur.execute(
-                    """INSERT INTO dso.tekst_element
-                       (regeling_expression, eid, wid, element_type, nummer, opschrift, inhoud, volgorde)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """INSERT INTO p2p.tekst_element
+                       (regeling_expression, eid, wid, element_type, nummer, opschrift, inhoud, inhoud_plain, volgorde)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (regeling_expression, eid) DO NOTHING
                        RETURNING id""",
                     (expression_id, elem["eid"], elem["wid"], elem["element_type"],
-                     elem["nummer"], elem["opschrift"], elem["inhoud"], elem["volgorde"]),
+                     elem["nummer"], elem["opschrift"], elem["inhoud"],
+                     strip_xml(elem["inhoud"]), elem["volgorde"]),
                 )
                 row = cur.fetchone()
                 if row:
@@ -224,7 +227,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
             for elem in elements:
                 if elem["parent_eid"] and elem["eid"] in eid_to_id and elem["parent_eid"] in eid_to_id:
                     cur.execute(
-                        "UPDATE dso.tekst_element SET parent_id = %s WHERE id = %s",
+                        "UPDATE p2p.tekst_element SET parent_id = %s WHERE id = %s",
                         (eid_to_id[elem["parent_eid"]], eid_to_id[elem["eid"]]),
                     )
 
@@ -236,7 +239,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
             # First pass: insert without bovenliggende (to avoid FK issues)
             for act in acts:
                 cur.execute(
-                    """INSERT INTO dso.activiteit (identificatie, naam, groep, is_tophaak)
+                    """INSERT INTO p2p.activiteit (identificatie, naam, groep, is_tophaak)
                        VALUES (%s, %s, %s, false)
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (act["identificatie"], act["naam"], act["groep"]),
@@ -245,9 +248,9 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
             for act in acts:
                 if act["bovenliggende"]:
                     cur.execute(
-                        """UPDATE dso.activiteit SET bovenliggende = %s
+                        """UPDATE p2p.activiteit SET bovenliggende = %s
                            WHERE identificatie = %s AND EXISTS
-                           (SELECT 1 FROM dso.activiteit WHERE identificatie = %s)""",
+                           (SELECT 1 FROM p2p.activiteit WHERE identificatie = %s)""",
                         (act["bovenliggende"], act["identificatie"], act["bovenliggende"]),
                     )
             console.print(f"      [green]{len(acts)} activiteiten geladen[/green]")
@@ -258,7 +261,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
             gebieden_parsed = parse_gebieden(z.read("OW-bestanden/gebieden.xml"))
             for g in gebieden_parsed:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, noemer, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
                        VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992))
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (g["identificatie"], g["locatie_type"], g["noemer"]),
@@ -270,7 +273,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
             groepen = parse_gebiedengroepen(z.read("OW-bestanden/gebiedengroepen.xml"))
             for g in groepen:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, noemer, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
                        VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992))
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (g["identificatie"], g["locatie_type"], g["noemer"]),
@@ -278,7 +281,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                 # Insert groep-lid relations
                 for lid_id in g.get("leden", []):
                     cur.execute(
-                        """INSERT INTO dso.locatiegroep_lid (groep_identificatie, lid_identificatie)
+                        """INSERT INTO p2p.locatiegroep_lid (groep_identificatie, lid_identificatie)
                            VALUES (%s, %s)
                            ON CONFLICT DO NOTHING""",
                         (g["identificatie"], lid_id),
@@ -293,13 +296,13 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                 if loc_id:
                     # Ensure locatie exists
                     cur.execute(
-                        """INSERT INTO dso.locatie (identificatie, locatie_type, geometrie)
+                        """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
                            VALUES (%s, 'Gebied', ST_SetSRID(ST_MakePoint(0, 0), 28992))
                            ON CONFLICT DO NOTHING""",
                         (loc_id,),
                     )
                 cur.execute(
-                    """INSERT INTO dso.gebiedsaanwijzing (identificatie, type, naam, groep, locatie_id)
+                    """INSERT INTO p2p.gebiedsaanwijzing (identificatie, type, naam, groep, locatie_id)
                        VALUES (%s, %s, %s, %s, %s)
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (ga["identificatie"], ga["type"], ga["naam"], ga["groep"], loc_id),
@@ -311,7 +314,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
             regels = parse_juridische_regels(z.read("OW-bestanden/regelsvooriedereen.xml"))
             for regel in regels:
                 cur.execute(
-                    """INSERT INTO dso.juridische_regel
+                    """INSERT INTO p2p.juridische_regel
                        (identificatie, regel_type, idealisatie, regeltekst_wid)
                        VALUES (%s, %s, %s, %s)
                        ON CONFLICT (identificatie) DO NOTHING""",
@@ -322,19 +325,19 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                 for ala in regel.get("activiteit_locatie_aanduidingen", []):
                     # Ensure locatie and activiteit exist
                     cur.execute(
-                        """INSERT INTO dso.locatie (identificatie, locatie_type, geometrie)
+                        """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
                            VALUES (%s, 'Gebied', ST_SetSRID(ST_MakePoint(0, 0), 28992))
                            ON CONFLICT DO NOTHING""",
                         (ala["locatie_id"],),
                     )
                     cur.execute(
-                        """INSERT INTO dso.activiteit (identificatie, naam, is_tophaak)
+                        """INSERT INTO p2p.activiteit (identificatie, naam, is_tophaak)
                            VALUES (%s, '', false) ON CONFLICT DO NOTHING""",
                         (ala["activiteit_id"],),
                     )
                     try:
                         cur.execute(
-                            """INSERT INTO dso.activiteit_locatieaanduiding
+                            """INSERT INTO p2p.activiteit_locatieaanduiding
                                (juridische_regel_id, activiteit_id, locatie_id, kwalificatie)
                                VALUES (%s, %s, %s, %s)""",
                             (regel["identificatie"], ala["activiteit_id"],
@@ -349,7 +352,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                 for ga_ref in regel.get("gebiedsaanwijzing_refs", []):
                     try:
                         cur.execute(
-                            """INSERT INTO dso.juridische_regel_gebiedsaanwijzing
+                            """INSERT INTO p2p.juridische_regel_gebiedsaanwijzing
                                (juridische_regel_id, gebiedsaanwijzing_id)
                                VALUES (%s, %s) ON CONFLICT DO NOTHING""",
                             (regel["identificatie"], ga_ref),
@@ -360,7 +363,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                 for norm_ref in regel.get("norm_refs", []):
                     try:
                         cur.execute(
-                            """INSERT INTO dso.juridische_regel_norm
+                            """INSERT INTO p2p.juridische_regel_norm
                                (juridische_regel_id, norm_id)
                                VALUES (%s, %s) ON CONFLICT DO NOTHING""",
                             (regel["identificatie"], norm_ref),
@@ -378,13 +381,13 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                 loc_id = p.get("locatie_id")
                 if loc_id:
                     cur.execute(
-                        """INSERT INTO dso.locatie (identificatie, locatie_type, geometrie)
+                        """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
                            VALUES (%s, 'Gebied', ST_SetSRID(ST_MakePoint(0, 0), 28992))
                            ON CONFLICT DO NOTHING""",
                         (loc_id,),
                     )
                 cur.execute(
-                    """INSERT INTO dso.pons (identificatie, locatie_id)
+                    """INSERT INTO p2p.pons (identificatie, locatie_id)
                        VALUES (%s, %s)
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (p["identificatie"], loc_id),
@@ -397,7 +400,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
             nw_count = 0
             for n in normen:
                 cur.execute(
-                    """INSERT INTO dso.norm
+                    """INSERT INTO p2p.norm
                        (identificatie, norm_type, naam, type_norm, groep)
                        VALUES (%s, %s, %s, %s, %s)
                        ON CONFLICT (identificatie) DO NOTHING""",
@@ -408,19 +411,20 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                     loc_id = nw.get("locatie_id")
                     if loc_id:
                         cur.execute(
-                            """INSERT INTO dso.locatie (identificatie, locatie_type, geometrie)
+                            """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
                                VALUES (%s, 'Gebied', ST_SetSRID(ST_MakePoint(0, 0), 28992))
                                ON CONFLICT DO NOTHING""",
                             (loc_id,),
                         )
                     try:
                         cur.execute(
-                            """INSERT INTO dso.normwaarde
-                               (norm_id, locatie_id, kwalitatieve_waarde, kwantitatieve_waarde)
-                               VALUES (%s, %s, %s, %s)""",
+                            """INSERT INTO p2p.normwaarde
+                               (norm_id, locatie_id, kwalitatieve_waarde, kwantitatieve_waarde, waarde_in_regeltekst)
+                               VALUES (%s, %s, %s, %s, %s)""",
                             (n["identificatie"], loc_id,
                              nw.get("kwalitatieve_waarde"),
-                             float(nw["kwantitatieve_waarde"]) if nw.get("kwantitatieve_waarde") else None),
+                             float(nw["kwantitatieve_waarde"]) if nw.get("kwantitatieve_waarde") else None,
+                             nw.get("waarde_in_regeltekst")),
                         )
                         nw_count += 1
                     except Exception:
@@ -436,14 +440,14 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                 loc_id = td.get("locatie_id")
                 if loc_id:
                     cur.execute(
-                        """INSERT INTO dso.locatie (identificatie, locatie_type, geometrie)
+                        """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
                            VALUES (%s, 'Gebied', ST_SetSRID(ST_MakePoint(0, 0), 28992))
                            ON CONFLICT DO NOTHING""",
                         (loc_id,),
                     )
                 try:
                     cur.execute(
-                        """INSERT INTO dso.tekstdeel
+                        """INSERT INTO p2p.tekstdeel
                            (identificatie, divisie_wid, thema, locatie_id)
                            VALUES (%s, %s, %s, %s)
                            ON CONFLICT (identificatie) DO NOTHING""",
@@ -457,7 +461,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                 for hl_ref in td.get("hoofdlijn_refs", []):
                     try:
                         cur.execute(
-                            """INSERT INTO dso.tekstdeel_hoofdlijn
+                            """INSERT INTO p2p.tekstdeel_hoofdlijn
                                (tekstdeel_id, hoofdlijn_id)
                                VALUES (%s, %s) ON CONFLICT DO NOTHING""",
                             (td["identificatie"], hl_ref),
@@ -475,7 +479,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
             hoofdlijnen = parse_hoofdlijnen(z.read("OW-bestanden/hoofdlijnen.xml"))
             for hl in hoofdlijnen:
                 cur.execute(
-                    """INSERT INTO dso.hoofdlijn (identificatie, soort, naam)
+                    """INSERT INTO p2p.hoofdlijn (identificatie, soort, naam)
                        VALUES (%s, %s, %s)
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (hl["identificatie"], hl["soort"], hl["naam"]),
@@ -507,7 +511,7 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
         # Step 2: Match gebieden via their geometrie_ref → basisgeo_id
         gml_count = 0
         cur.execute(
-            """SELECT identificatie FROM dso.locatie
+            """SELECT identificatie FROM p2p.locatie
                WHERE locatie_type IN ('Gebied', 'Punt')
                AND ST_Equals(geometrie, ST_SetSRID(ST_MakePoint(0, 0), 28992))
                AND identificatie LIKE %s""",
@@ -526,11 +530,11 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
         # Step 3: Compute Gebiedengroep geometries as ST_Union of leden
         if gml_count:
             cur.execute(
-                """UPDATE dso.locatie SET geometrie = sub.geom
+                """UPDATE p2p.locatie SET geometrie = sub.geom
                    FROM (
                      SELECT gl.groep_identificatie, ST_Union(l2.geometrie) as geom
-                     FROM dso.locatiegroep_lid gl
-                     JOIN dso.locatie l2 ON l2.identificatie = gl.lid_identificatie
+                     FROM p2p.locatiegroep_lid gl
+                     JOIN p2p.locatie l2 ON l2.identificatie = gl.lid_identificatie
                      WHERE NOT ST_Equals(l2.geometrie, ST_SetSRID(ST_MakePoint(0,0), 28992))
                      GROUP BY gl.groep_identificatie
                    ) sub
@@ -568,7 +572,7 @@ def _update_locatie_geom(cur, identificatie: str, gml_str: str) -> int:
     """Update a locatie's geometry from GML string. Returns 1 if updated."""
     try:
         cur.execute(
-            """UPDATE dso.locatie
+            """UPDATE p2p.locatie
                SET geometrie = ST_GeomFromGML(%s, 28992),
                    gml_source = %s
                WHERE identificatie = %s""",
@@ -604,7 +608,7 @@ def load_ow_overheid(overheid_code: str, naam: str, bronhouder_code: str,
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO dso.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                "INSERT INTO core.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (bronhouder_code, naam),
             )
         conn.commit()
@@ -639,7 +643,7 @@ def load_ow_from_zip(zip_path: str, cbs_code: str, naam: str):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO dso.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                "INSERT INTO core.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (cbs_code, naam),
             )
         conn.commit()

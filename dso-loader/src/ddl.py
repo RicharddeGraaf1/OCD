@@ -2,80 +2,100 @@
 
 Based on analysis/Datamodel v1.0 DDL.md in the vault.
 Scope: ABCE, snapshot-only, read-only, all bronhouders.
+
+Keten-gedreven schema-indeling (zie OCD/SCHEMA-INDELING.md):
+  core — referentiegegevens (waardelijsten, bronhouder)
+  p2p  — plan-tot-publicatie (STOP + CIM-OW, Ow-regime)
+  wro  — oud regime (Wro/IMRO, sunset 2032)
+  i2a  — idee-tot-afhandeling (IMTR, werkzaamheden)
+  v2a  — vraag-tot-antwoord (gereserveerd; nu leeg)
 """
 
 DDL = """
 -- =============================================================
 -- DSO Datamodel v1.0 — Postgres + PostGIS
 -- Scope: ABCE (Ow + IMTR + Wro + waardelijsten)
+-- Keten-gedreven schema-indeling: core / p2p / wro / i2a / v2a
 -- =============================================================
 
 CREATE EXTENSION IF NOT EXISTS postgis;
-CREATE SCHEMA IF NOT EXISTS dso;
-SET search_path TO dso, public;
+
+CREATE SCHEMA IF NOT EXISTS core;
+CREATE SCHEMA IF NOT EXISTS p2p;
+CREATE SCHEMA IF NOT EXISTS wro;
+CREATE SCHEMA IF NOT EXISTS i2a;
+CREATE SCHEMA IF NOT EXISTS v2a;
+
+COMMENT ON SCHEMA core IS 'Referentiegegevens: waardelijsten, bronhouder';
+COMMENT ON SCHEMA p2p IS 'Plan-tot-publicatie (Ow): STOP-regelingen, besluiten, CIM-OW objecten';
+COMMENT ON SCHEMA wro IS 'Oud regime: Wro/IMRO bestemmingsplannen (sunset 2032)';
+COMMENT ON SCHEMA i2a IS 'Idee-tot-afhandeling: IMTR toepasbare regels, werkzaamheden';
+COMMENT ON SCHEMA v2a IS 'Vraag-tot-antwoord: viewer-data, vergunningen (gereserveerd)';
+
+SET search_path TO p2p, wro, i2a, v2a, core, public;
 
 -- =============================================================
--- 1. Lookup-tabellen
+-- core.* — Lookup-tabellen en stamgegevens
 -- =============================================================
 
-CREATE TABLE IF NOT EXISTS bestemmingshoofdgroep (
+CREATE TABLE IF NOT EXISTS core.bestemmingshoofdgroep (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS dubbelbestemmingshoofdgroep (
+CREATE TABLE IF NOT EXISTS core.dubbelbestemmingshoofdgroep (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS bouwaanduidingtype (
+CREATE TABLE IF NOT EXISTS core.bouwaanduidingtype (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS maatvoeringsaanduiding (
+CREATE TABLE IF NOT EXISTS core.maatvoeringsaanduiding (
     code TEXT PRIMARY KEY,
     eenheid TEXT NULL
 );
 
-CREATE TABLE IF NOT EXISTS figuurtype (
+CREATE TABLE IF NOT EXISTS core.figuurtype (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS gebiedsaanduidinghoofdgroep (
+CREATE TABLE IF NOT EXISTS core.gebiedsaanduidinghoofdgroep (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS dossierstatus (
+CREATE TABLE IF NOT EXISTS core.dossierstatus (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS planstatus (
+CREATE TABLE IF NOT EXISTS core.planstatus (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS regelingmodel (
+CREATE TABLE IF NOT EXISTS core.regelingmodel (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS besluitmodel (
+CREATE TABLE IF NOT EXISTS core.besluitmodel (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS publicatiebladtype (
+CREATE TABLE IF NOT EXISTS core.publicatiebladtype (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS idealisatie (
+CREATE TABLE IF NOT EXISTS core.idealisatie (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS toestemmingstype (
+CREATE TABLE IF NOT EXISTS core.toestemmingstype (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS documenttype (
+CREATE TABLE IF NOT EXISTS core.documenttype (
     code TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS waardelijst (
+CREATE TABLE IF NOT EXISTS core.waardelijst (
     uri             TEXT PRIMARY KEY,
     waardelijst     TEXT NOT NULL,
     label           TEXT NOT NULL,
@@ -84,11 +104,7 @@ CREATE TABLE IF NOT EXISTS waardelijst (
     geldig_tot      DATE NULL
 );
 
--- =============================================================
--- 2. Bronhouder
--- =============================================================
-
-CREATE TABLE IF NOT EXISTS bronhouder (
+CREATE TABLE IF NOT EXISTS core.bronhouder (
     overheidscode   TEXT PRIMARY KEY,
     naam            TEXT NOT NULL,
     oin             TEXT NULL,
@@ -103,73 +119,76 @@ CREATE TABLE IF NOT EXISTS bronhouder (
 );
 
 -- =============================================================
--- 3. STOP — Regelingen en Besluiten
+-- p2p.* — STOP: Regelingen en Besluiten
 -- =============================================================
 
-CREATE TABLE IF NOT EXISTS regeling (
+CREATE TABLE IF NOT EXISTS p2p.regeling (
     frbr_expression     TEXT PRIMARY KEY,
     frbr_work           TEXT NOT NULL,
-    regelingmodel       TEXT NOT NULL REFERENCES regelingmodel(code),
+    regelingmodel       TEXT NOT NULL REFERENCES core.regelingmodel(code),
     opschrift           TEXT NOT NULL,
     soort_regeling      TEXT NULL,
     citeertitel         TEXT NULL,
     opvolger_van        TEXT NULL,
     is_tijdelijkdeel_van TEXT NULL,
     conditie            TEXT NULL,
-    bronhouder          TEXT NULL REFERENCES bronhouder(overheidscode),
-    documenttype        TEXT NULL REFERENCES documenttype(code),
+    bronhouder          TEXT NULL REFERENCES core.bronhouder(overheidscode),
+    documenttype        TEXT NULL REFERENCES core.documenttype(code),
     regelingsgebied_id  TEXT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_regeling_work ON regeling(frbr_work);
-CREATE INDEX IF NOT EXISTS idx_regeling_bronhouder ON regeling(bronhouder);
+CREATE INDEX IF NOT EXISTS idx_regeling_work ON p2p.regeling(frbr_work);
+CREATE INDEX IF NOT EXISTS idx_regeling_bronhouder ON p2p.regeling(bronhouder);
 
-CREATE TABLE IF NOT EXISTS besluit (
+CREATE TABLE IF NOT EXISTS p2p.besluit (
     frbr_expression     TEXT PRIMARY KEY,
     frbr_work           TEXT NOT NULL,
-    besluitmodel        TEXT NULL REFERENCES besluitmodel(code),
-    bronhouder          TEXT NULL REFERENCES bronhouder(overheidscode)
+    besluitmodel        TEXT NULL REFERENCES core.besluitmodel(code),
+    bronhouder          TEXT NULL REFERENCES core.bronhouder(overheidscode)
 );
 
-CREATE TABLE IF NOT EXISTS besluit_regeling (
-    besluit_expression  TEXT NOT NULL REFERENCES besluit(frbr_expression) ON DELETE CASCADE,
-    regeling_expression TEXT NOT NULL REFERENCES regeling(frbr_expression) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS p2p.besluit_regeling (
+    besluit_expression  TEXT NOT NULL REFERENCES p2p.besluit(frbr_expression) ON DELETE CASCADE,
+    regeling_expression TEXT NOT NULL REFERENCES p2p.regeling(frbr_expression) ON DELETE CASCADE,
     PRIMARY KEY (besluit_expression, regeling_expression)
 );
 
-CREATE TABLE IF NOT EXISTS procedurestap (
+CREATE TABLE IF NOT EXISTS p2p.procedurestap (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    besluit_expression  TEXT NOT NULL REFERENCES besluit(frbr_expression) ON DELETE CASCADE,
+    besluit_expression  TEXT NOT NULL REFERENCES p2p.besluit(frbr_expression) ON DELETE CASCADE,
     soort               TEXT NOT NULL,
     datum               DATE NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_procedurestap_besluit ON procedurestap(besluit_expression);
+CREATE INDEX IF NOT EXISTS idx_procedurestap_besluit ON p2p.procedurestap(besluit_expression);
 
-CREATE TABLE IF NOT EXISTS tekst_element (
+CREATE TABLE IF NOT EXISTS p2p.tekst_element (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    regeling_expression TEXT NOT NULL REFERENCES regeling(frbr_expression) ON DELETE CASCADE,
+    regeling_expression TEXT NOT NULL REFERENCES p2p.regeling(frbr_expression) ON DELETE CASCADE,
     eid                 TEXT NOT NULL,
     wid                 TEXT NOT NULL,
     element_type        TEXT NOT NULL,
-    parent_id           BIGINT NULL REFERENCES tekst_element(id) ON DELETE CASCADE,
+    parent_id           BIGINT NULL REFERENCES p2p.tekst_element(id) ON DELETE CASCADE,
     nummer              TEXT NULL,
     opschrift           TEXT NULL,
     inhoud              TEXT NULL,
+    inhoud_plain        TEXT NULL,
     volgorde            INT NOT NULL DEFAULT 0,
     UNIQUE (regeling_expression, eid)
 );
-CREATE INDEX IF NOT EXISTS idx_tekst_element_regeling ON tekst_element(regeling_expression);
-CREATE INDEX IF NOT EXISTS idx_tekst_element_parent ON tekst_element(parent_id);
-CREATE INDEX IF NOT EXISTS idx_tekst_element_wid ON tekst_element(wid);
+CREATE INDEX IF NOT EXISTS idx_tekst_element_regeling ON p2p.tekst_element(regeling_expression);
+CREATE INDEX IF NOT EXISTS idx_tekst_element_parent ON p2p.tekst_element(parent_id);
+CREATE INDEX IF NOT EXISTS idx_tekst_element_wid ON p2p.tekst_element(wid);
+CREATE INDEX IF NOT EXISTS idx_tekst_element_inhoud_fts ON p2p.tekst_element
+  USING gin (to_tsvector('dutch', coalesce(inhoud_plain, '')));
 
-CREATE TABLE IF NOT EXISTS geo_informatieobject (
+CREATE TABLE IF NOT EXISTS p2p.geo_informatieobject (
     frbr_expression     TEXT PRIMARY KEY,
     frbr_work           TEXT NOT NULL,
-    regeling_expression TEXT NULL REFERENCES regeling(frbr_expression)
+    regeling_expression TEXT NULL REFERENCES p2p.regeling(frbr_expression)
 );
 
-CREATE TABLE IF NOT EXISTS juridische_borging (
+CREATE TABLE IF NOT EXISTS p2p.juridische_borging (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    gio_expression      TEXT NOT NULL REFERENCES geo_informatieobject(frbr_expression) ON DELETE CASCADE,
+    gio_expression      TEXT NOT NULL REFERENCES p2p.geo_informatieobject(frbr_expression) ON DELETE CASCADE,
     domein              TEXT NOT NULL,
     domein_object_id    TEXT NOT NULL,
     locatie_id          TEXT NOT NULL,
@@ -177,10 +196,10 @@ CREATE TABLE IF NOT EXISTS juridische_borging (
 );
 
 -- =============================================================
--- 4. CIM-OW — OW-Objecten
+-- p2p.* — CIM-OW: OW-Objecten
 -- =============================================================
 
-CREATE TABLE IF NOT EXISTS locatie (
+CREATE TABLE IF NOT EXISTS p2p.locatie (
     identificatie       TEXT PRIMARY KEY,
     locatie_type        TEXT NOT NULL,
     noemer              TEXT NULL,
@@ -188,60 +207,60 @@ CREATE TABLE IF NOT EXISTS locatie (
     gml_source          TEXT NULL,
     bron                TEXT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_locatie_geom ON locatie USING GIST(geometrie);
+CREATE INDEX IF NOT EXISTS idx_locatie_geom ON p2p.locatie USING GIST(geometrie);
 
-CREATE TABLE IF NOT EXISTS locatiegroep_lid (
-    groep_identificatie TEXT NOT NULL REFERENCES locatie(identificatie) ON DELETE CASCADE,
-    lid_identificatie   TEXT NOT NULL REFERENCES locatie(identificatie) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS p2p.locatiegroep_lid (
+    groep_identificatie TEXT NOT NULL REFERENCES p2p.locatie(identificatie) ON DELETE CASCADE,
+    lid_identificatie   TEXT NOT NULL REFERENCES p2p.locatie(identificatie) ON DELETE CASCADE,
     PRIMARY KEY (groep_identificatie, lid_identificatie)
 );
 
-CREATE TABLE IF NOT EXISTS juridische_regel (
+CREATE TABLE IF NOT EXISTS p2p.juridische_regel (
     identificatie       TEXT PRIMARY KEY,
     regel_type          TEXT NOT NULL,
-    idealisatie         TEXT NULL REFERENCES idealisatie(code),
+    idealisatie         TEXT NULL REFERENCES core.idealisatie(code),
     thema               TEXT[] NULL,
     omschrijving        TEXT NULL,
     instructieregel_instrument      TEXT NULL,
     instructieregel_taakuitoefening TEXT NULL,
     regeltekst_wid      TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_jr_regeltekst ON juridische_regel(regeltekst_wid);
+CREATE INDEX IF NOT EXISTS idx_jr_regeltekst ON p2p.juridische_regel(regeltekst_wid);
 
-CREATE TABLE IF NOT EXISTS activiteit (
+CREATE TABLE IF NOT EXISTS p2p.activiteit (
     identificatie       TEXT PRIMARY KEY,
     naam                TEXT NOT NULL,
     groep               TEXT NULL,
-    bovenliggende       TEXT NULL REFERENCES activiteit(identificatie),
+    bovenliggende       TEXT NULL REFERENCES p2p.activiteit(identificatie),
     is_tophaak          BOOLEAN NOT NULL DEFAULT FALSE
 );
-CREATE INDEX IF NOT EXISTS idx_activiteit_bovenliggende ON activiteit(bovenliggende);
+CREATE INDEX IF NOT EXISTS idx_activiteit_bovenliggende ON p2p.activiteit(bovenliggende);
 
-CREATE TABLE IF NOT EXISTS activiteit_locatieaanduiding (
+CREATE TABLE IF NOT EXISTS p2p.activiteit_locatieaanduiding (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    juridische_regel_id TEXT NOT NULL REFERENCES juridische_regel(identificatie) ON DELETE CASCADE,
-    activiteit_id       TEXT NOT NULL REFERENCES activiteit(identificatie) ON DELETE CASCADE,
-    locatie_id          TEXT NOT NULL REFERENCES locatie(identificatie),
+    juridische_regel_id TEXT NOT NULL REFERENCES p2p.juridische_regel(identificatie) ON DELETE CASCADE,
+    activiteit_id       TEXT NOT NULL REFERENCES p2p.activiteit(identificatie) ON DELETE CASCADE,
+    locatie_id          TEXT NOT NULL REFERENCES p2p.locatie(identificatie),
     kwalificatie        TEXT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_ala_regel ON activiteit_locatieaanduiding(juridische_regel_id);
-CREATE INDEX IF NOT EXISTS idx_ala_activiteit ON activiteit_locatieaanduiding(activiteit_id);
+CREATE INDEX IF NOT EXISTS idx_ala_regel ON p2p.activiteit_locatieaanduiding(juridische_regel_id);
+CREATE INDEX IF NOT EXISTS idx_ala_activiteit ON p2p.activiteit_locatieaanduiding(activiteit_id);
 
-CREATE TABLE IF NOT EXISTS gebiedsaanwijzing (
+CREATE TABLE IF NOT EXISTS p2p.gebiedsaanwijzing (
     identificatie       TEXT PRIMARY KEY,
     type                TEXT NOT NULL,
     naam                TEXT NOT NULL,
     groep               TEXT NULL,
-    locatie_id          TEXT NOT NULL REFERENCES locatie(identificatie)
+    locatie_id          TEXT NOT NULL REFERENCES p2p.locatie(identificatie)
 );
 
-CREATE TABLE IF NOT EXISTS juridische_regel_gebiedsaanwijzing (
-    juridische_regel_id  TEXT NOT NULL REFERENCES juridische_regel(identificatie) ON DELETE CASCADE,
-    gebiedsaanwijzing_id TEXT NOT NULL REFERENCES gebiedsaanwijzing(identificatie) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS p2p.juridische_regel_gebiedsaanwijzing (
+    juridische_regel_id  TEXT NOT NULL REFERENCES p2p.juridische_regel(identificatie) ON DELETE CASCADE,
+    gebiedsaanwijzing_id TEXT NOT NULL REFERENCES p2p.gebiedsaanwijzing(identificatie) ON DELETE CASCADE,
     PRIMARY KEY (juridische_regel_id, gebiedsaanwijzing_id)
 );
 
-CREATE TABLE IF NOT EXISTS norm (
+CREATE TABLE IF NOT EXISTS p2p.norm (
     identificatie       TEXT PRIMARY KEY,
     norm_type           TEXT NOT NULL,
     naam                TEXT NOT NULL,
@@ -250,200 +269,327 @@ CREATE TABLE IF NOT EXISTS norm (
     groep               TEXT NULL
 );
 
-CREATE TABLE IF NOT EXISTS normwaarde (
+CREATE TABLE IF NOT EXISTS p2p.normwaarde (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    norm_id             TEXT NOT NULL REFERENCES norm(identificatie) ON DELETE CASCADE,
-    locatie_id          TEXT NOT NULL REFERENCES locatie(identificatie),
+    norm_id             TEXT NOT NULL REFERENCES p2p.norm(identificatie) ON DELETE CASCADE,
+    locatie_id          TEXT NOT NULL REFERENCES p2p.locatie(identificatie),
     kwalitatieve_waarde TEXT NULL,
-    kwantitatieve_waarde NUMERIC NULL
+    kwantitatieve_waarde NUMERIC NULL,
+    waarde_in_regeltekst BOOLEAN NULL
 );
 
-CREATE TABLE IF NOT EXISTS juridische_regel_norm (
-    juridische_regel_id TEXT NOT NULL REFERENCES juridische_regel(identificatie) ON DELETE CASCADE,
-    norm_id             TEXT NOT NULL REFERENCES norm(identificatie) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS p2p.juridische_regel_norm (
+    juridische_regel_id TEXT NOT NULL REFERENCES p2p.juridische_regel(identificatie) ON DELETE CASCADE,
+    norm_id             TEXT NOT NULL REFERENCES p2p.norm(identificatie) ON DELETE CASCADE,
     PRIMARY KEY (juridische_regel_id, norm_id)
 );
 
-CREATE TABLE IF NOT EXISTS tekstdeel (
+CREATE TABLE IF NOT EXISTS p2p.tekstdeel (
     identificatie       TEXT PRIMARY KEY,
     divisie_wid         TEXT NOT NULL,
     thema               TEXT[] NULL,
-    locatie_id          TEXT NULL REFERENCES locatie(identificatie)
+    locatie_id          TEXT NULL REFERENCES p2p.locatie(identificatie)
 );
 
-CREATE TABLE IF NOT EXISTS hoofdlijn (
+CREATE TABLE IF NOT EXISTS p2p.hoofdlijn (
     identificatie       TEXT PRIMARY KEY,
     soort               TEXT NOT NULL,
     naam                TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS tekstdeel_hoofdlijn (
-    tekstdeel_id        TEXT NOT NULL REFERENCES tekstdeel(identificatie) ON DELETE CASCADE,
-    hoofdlijn_id        TEXT NOT NULL REFERENCES hoofdlijn(identificatie) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS p2p.tekstdeel_hoofdlijn (
+    tekstdeel_id        TEXT NOT NULL REFERENCES p2p.tekstdeel(identificatie) ON DELETE CASCADE,
+    hoofdlijn_id        TEXT NOT NULL REFERENCES p2p.hoofdlijn(identificatie) ON DELETE CASCADE,
     PRIMARY KEY (tekstdeel_id, hoofdlijn_id)
 );
 
-CREATE TABLE IF NOT EXISTS pons (
+CREATE TABLE IF NOT EXISTS p2p.pons (
     identificatie       TEXT PRIMARY KEY,
-    locatie_id          TEXT NOT NULL REFERENCES locatie(identificatie),
+    locatie_id          TEXT NOT NULL REFERENCES p2p.locatie(identificatie),
     was_bestemmingsplan TEXT NULL
 );
 
-CREATE TABLE IF NOT EXISTS kaart (
+CREATE TABLE IF NOT EXISTS p2p.kaart (
     identificatie       TEXT PRIMARY KEY,
     naam                TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS kaartlaag (
+CREATE TABLE IF NOT EXISTS p2p.kaartlaag (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    kaart_id            TEXT NOT NULL REFERENCES kaart(identificatie) ON DELETE CASCADE,
+    kaart_id            TEXT NOT NULL REFERENCES p2p.kaart(identificatie) ON DELETE CASCADE,
     naam                TEXT NOT NULL,
-    gebiedsaanwijzing_id TEXT NULL REFERENCES gebiedsaanwijzing(identificatie),
-    norm_id             TEXT NULL REFERENCES norm(identificatie),
-    activiteit_id       TEXT NULL REFERENCES activiteit(identificatie)
+    gebiedsaanwijzing_id TEXT NULL REFERENCES p2p.gebiedsaanwijzing(identificatie),
+    norm_id             TEXT NULL REFERENCES p2p.norm(identificatie),
+    activiteit_id       TEXT NULL REFERENCES p2p.activiteit(identificatie)
 );
 
 -- =============================================================
--- 5. IMTR — Toepasbare regels
+-- wro.* — Oud regime (Wro/IMRO), sunset 2032
 -- =============================================================
 
-CREATE TABLE IF NOT EXISTS regelbeheerobject (
-    functionele_structuur_ref TEXT PRIMARY KEY,
-    activiteit_id       TEXT NULL REFERENCES activiteit(identificatie),
-    naam                TEXT NULL
-);
-
-CREATE TABLE IF NOT EXISTS toepasbaar_regelbestand (
-    namespace           TEXT PRIMARY KEY,
-    naam                TEXT NULL,
-    sttr_versie         INT NOT NULL DEFAULT 1,
-    geldig_begindatum   DATE NULL,
-    geldig_einddatum    DATE NULL,
-    regelbeheerobject   TEXT NULL REFERENCES regelbeheerobject(functionele_structuur_ref)
-);
-
-CREATE TABLE IF NOT EXISTS dmn_element (
-    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    regelbestand_ns     TEXT NOT NULL REFERENCES toepasbaar_regelbestand(namespace) ON DELETE CASCADE,
-    dmn_id              TEXT NOT NULL,
-    element_type        TEXT NOT NULL,
-    naam                TEXT NULL,
-    parent_id           BIGINT NULL REFERENCES dmn_element(id),
-    UNIQUE (regelbestand_ns, dmn_id)
-);
-
-CREATE TABLE IF NOT EXISTS uitvoeringsregel (
-    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    regelbestand_ns     TEXT NOT NULL REFERENCES toepasbaar_regelbestand(namespace) ON DELETE CASCADE,
-    regel_type          TEXT NOT NULL,
-    dmn_element_id      BIGINT NULL REFERENCES dmn_element(id),
-    nen3610_id          TEXT NULL,
-    activiteit_urn      TEXT NULL
-);
-
-CREATE TABLE IF NOT EXISTS werkzaamheid (
-    urn                 TEXT PRIMARY KEY,
-    naam                TEXT NOT NULL,
-    activiteit_id       TEXT NULL REFERENCES activiteit(identificatie)
-);
-
-CREATE TABLE IF NOT EXISTS aansluitpunt (
-    uri                 TEXT PRIMARY KEY,
-    type                TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS aansluiting (
-    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    aansluitpunt_uri    TEXT NOT NULL REFERENCES aansluitpunt(uri) ON DELETE CASCADE,
-    activiteit_id       TEXT NULL REFERENCES activiteit(identificatie),
-    bronhouder          TEXT NULL REFERENCES bronhouder(overheidscode),
-    regelbestand_ns     TEXT NULL REFERENCES toepasbaar_regelbestand(namespace)
-);
-
--- =============================================================
--- 6. Wro/IMRO — Het oude regime
--- =============================================================
-
-CREATE TABLE IF NOT EXISTS wro_manifest (
-    overheidscode       TEXT PRIMARY KEY REFERENCES bronhouder(overheidscode),
+CREATE TABLE IF NOT EXISTS wro.wro_manifest (
+    overheidscode       TEXT PRIMARY KEY REFERENCES core.bronhouder(overheidscode),
     naam_overheid       TEXT NOT NULL,
     datum               DATE NULL
 );
 
-CREATE TABLE IF NOT EXISTS wro_dossier (
+CREATE TABLE IF NOT EXISTS wro.wro_dossier (
     dossiernummer       TEXT PRIMARY KEY,
-    manifest_code       TEXT NOT NULL REFERENCES wro_manifest(overheidscode) ON DELETE CASCADE,
-    status              TEXT NULL REFERENCES dossierstatus(code)
+    manifest_code       TEXT NOT NULL REFERENCES wro.wro_manifest(overheidscode) ON DELETE CASCADE,
+    status              TEXT NULL REFERENCES core.dossierstatus(code)
 );
 
-CREATE TABLE IF NOT EXISTS ruimtelijk_instrument (
+CREATE TABLE IF NOT EXISTS wro.ruimtelijk_instrument (
     idn                 TEXT PRIMARY KEY,
-    dossier             TEXT NULL REFERENCES wro_dossier(dossiernummer),
+    dossier             TEXT NULL REFERENCES wro.wro_dossier(dossiernummer),
     type_plan           TEXT NOT NULL,
     naam                TEXT NOT NULL,
-    planstatus          TEXT NULL REFERENCES planstatus(code),
+    planstatus          TEXT NULL REFERENCES core.planstatus(code),
     datum               DATE NULL,
-    bronhouder          TEXT NOT NULL REFERENCES bronhouder(overheidscode),
+    bronhouder          TEXT NOT NULL REFERENCES core.bronhouder(overheidscode),
     geometrie           GEOMETRY(Geometry, 28992) NOT NULL,
     gml_source          TEXT NULL,
     pons_status         TEXT NOT NULL DEFAULT 'actief'
 );
-CREATE INDEX IF NOT EXISTS idx_wro_instrument_geom ON ruimtelijk_instrument USING GIST(geometrie);
-CREATE INDEX IF NOT EXISTS idx_wro_instrument_bronhouder ON ruimtelijk_instrument(bronhouder);
+CREATE INDEX IF NOT EXISTS idx_wro_instrument_geom ON wro.ruimtelijk_instrument USING GIST(geometrie);
+CREATE INDEX IF NOT EXISTS idx_wro_instrument_bronhouder ON wro.ruimtelijk_instrument(bronhouder);
 
-CREATE TABLE IF NOT EXISTS planobject (
+CREATE TABLE IF NOT EXISTS wro.planobject (
     identificatie       TEXT PRIMARY KEY,
-    instrument_idn      TEXT NOT NULL REFERENCES ruimtelijk_instrument(idn) ON DELETE CASCADE,
+    instrument_idn      TEXT NOT NULL REFERENCES wro.ruimtelijk_instrument(idn) ON DELETE CASCADE,
     object_type         TEXT NOT NULL,
     naam                TEXT NULL,
-    bestemmingshoofdgroep TEXT NULL REFERENCES bestemmingshoofdgroep(code),
+    bestemmingshoofdgroep TEXT NULL REFERENCES core.bestemmingshoofdgroep(code),
     artikelnummer       TEXT NULL,
-    bouwaanduidingtype  TEXT NULL REFERENCES bouwaanduidingtype(code),
+    bouwaanduidingtype  TEXT NULL REFERENCES core.bouwaanduidingtype(code),
     maatvoering_info    JSONB NULL,
-    figuurtype          TEXT NULL REFERENCES figuurtype(code),
-    gebiedsaanduidinghoofdgroep TEXT NULL REFERENCES gebiedsaanduidinghoofdgroep(code),
+    figuurtype          TEXT NULL REFERENCES core.figuurtype(code),
+    gebiedsaanduidinghoofdgroep TEXT NULL REFERENCES core.gebiedsaanduidinghoofdgroep(code),
     geometrie           GEOMETRY(Geometry, 28992) NOT NULL,
     gml_source          TEXT NULL,
-    specificeert_id     TEXT NULL REFERENCES planobject(identificatie)
+    specificeert_id     TEXT NULL REFERENCES wro.planobject(identificatie)
 );
-CREATE INDEX IF NOT EXISTS idx_planobject_instrument ON planobject(instrument_idn);
-CREATE INDEX IF NOT EXISTS idx_planobject_geom ON planobject USING GIST(geometrie);
+CREATE INDEX IF NOT EXISTS idx_planobject_instrument ON wro.planobject(instrument_idn);
+CREATE INDEX IF NOT EXISTS idx_planobject_geom ON wro.planobject USING GIST(geometrie);
 
-CREATE TABLE IF NOT EXISTS wro_tekst_object (
+CREATE TABLE IF NOT EXISTS wro.wro_tekst_object (
     identificatie       TEXT PRIMARY KEY,
-    instrument_idn      TEXT NOT NULL REFERENCES ruimtelijk_instrument(idn) ON DELETE CASCADE,
+    instrument_idn      TEXT NOT NULL REFERENCES wro.ruimtelijk_instrument(idn) ON DELETE CASCADE,
     volgnummer          INT NOT NULL,
     niveau              INT NOT NULL CHECK (niveau BETWEEN 0 AND 11),
-    parent_id           TEXT NULL REFERENCES wro_tekst_object(identificatie),
+    parent_id           TEXT NULL REFERENCES wro.wro_tekst_object(identificatie),
     object_type         TEXT NOT NULL,
     label               TEXT NULL,
     nummer              TEXT NULL,
     naam                TEXT NULL,
     inhoud              TEXT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_wro_tekst_instrument ON wro_tekst_object(instrument_idn);
+CREATE INDEX IF NOT EXISTS idx_wro_tekst_instrument ON wro.wro_tekst_object(instrument_idn);
 
-CREATE TABLE IF NOT EXISTS wro_geleideformulier (
-    instrument_idn      TEXT PRIMARY KEY REFERENCES ruimtelijk_instrument(idn) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS wro.wro_geleideformulier (
+    instrument_idn      TEXT PRIMARY KEY REFERENCES wro.ruimtelijk_instrument(idn) ON DELETE CASCADE,
     versie_imro         TEXT NOT NULL,
     versie_praktijkrichtlijn TEXT NOT NULL,
     datum               DATE NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS wro_bronbestand (
+CREATE TABLE IF NOT EXISTS wro.wro_bronbestand (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    instrument_idn      TEXT NOT NULL REFERENCES ruimtelijk_instrument(idn) ON DELETE CASCADE,
+    instrument_idn      TEXT NOT NULL REFERENCES wro.ruimtelijk_instrument(idn) ON DELETE CASCADE,
     bestandsnaam        TEXT NOT NULL,
     bestandstype        TEXT NOT NULL,
     lettercode          TEXT NULL,
     UNIQUE (instrument_idn, bestandsnaam)
 );
+
+-- =============================================================
+-- i2a.* — IMTR: Toepasbare regels en werkzaamheden
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS i2a.regelbeheerobject (
+    functionele_structuur_ref TEXT PRIMARY KEY,
+    activiteit_id       TEXT NULL REFERENCES p2p.activiteit(identificatie),
+    naam                TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS i2a.toepasbaar_regelbestand (
+    namespace           TEXT PRIMARY KEY,
+    naam                TEXT NULL,
+    sttr_versie         INT NOT NULL DEFAULT 1,
+    geldig_begindatum   DATE NULL,
+    geldig_einddatum    DATE NULL,
+    regelbeheerobject   TEXT NULL REFERENCES i2a.regelbeheerobject(functionele_structuur_ref)
+);
+
+CREATE TABLE IF NOT EXISTS i2a.dmn_element (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    regelbestand_ns     TEXT NOT NULL REFERENCES i2a.toepasbaar_regelbestand(namespace) ON DELETE CASCADE,
+    dmn_id              TEXT NOT NULL,
+    element_type        TEXT NOT NULL,
+    naam                TEXT NULL,
+    parent_id           BIGINT NULL REFERENCES i2a.dmn_element(id),
+    UNIQUE (regelbestand_ns, dmn_id)
+);
+
+CREATE TABLE IF NOT EXISTS i2a.uitvoeringsregel (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    regelbestand_ns     TEXT NOT NULL REFERENCES i2a.toepasbaar_regelbestand(namespace) ON DELETE CASCADE,
+    regel_type          TEXT NOT NULL,
+    dmn_element_id      BIGINT NULL REFERENCES i2a.dmn_element(id),
+    nen3610_id          TEXT NULL,
+    activiteit_urn      TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS i2a.werkzaamheid (
+    urn                 TEXT PRIMARY KEY,
+    naam                TEXT NOT NULL,
+    activiteit_id       TEXT NULL REFERENCES p2p.activiteit(identificatie)
+);
+
+CREATE TABLE IF NOT EXISTS i2a.aansluitpunt (
+    uri                 TEXT PRIMARY KEY,
+    type                TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS i2a.aansluiting (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    aansluitpunt_uri    TEXT NOT NULL REFERENCES i2a.aansluitpunt(uri) ON DELETE CASCADE,
+    activiteit_id       TEXT NULL REFERENCES p2p.activiteit(identificatie),
+    bronhouder          TEXT NULL REFERENCES core.bronhouder(overheidscode),
+    regelbestand_ns     TEXT NULL REFERENCES i2a.toepasbaar_regelbestand(namespace)
+);
+
+-- =============================================================
+-- v2a.* — Vraag-tot-antwoord: gereserveerd, nu leeg
+-- =============================================================
+-- Later: vergunning, vergunning_locatie, zoekindex-caches
+
+-- =============================================================
+-- conv.* — Conversie-output: bestemmingsplan → omgevingsplan
+-- =============================================================
+-- Afgeleid, herhaalbaar. Zelfde structuur als p2p, apart schema
+-- zodat autoritatieve data en conversie-voorstellen niet mengen.
+
+CREATE SCHEMA IF NOT EXISTS conv;
+COMMENT ON SCHEMA conv IS 'Conversie-output: bestemmingsplan -> omgevingsplan (afgeleid, herhaalbaar)';
+
+CREATE TABLE IF NOT EXISTS conv.conversie_meta (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    instrument_idn      TEXT NOT NULL,
+    regeling_expression TEXT NOT NULL,
+    stap                INT NOT NULL,
+    bron                TEXT NOT NULL,
+    geconverteerd_op    TIMESTAMP NOT NULL DEFAULT NOW(),
+    llm_model           TEXT NULL,
+    notities            TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS conv.regeling (
+    frbr_expression     TEXT PRIMARY KEY,
+    frbr_work           TEXT NOT NULL,
+    regelingmodel       TEXT NOT NULL,
+    opschrift           TEXT NOT NULL,
+    bronhouder          TEXT NULL REFERENCES core.bronhouder(overheidscode),
+    documenttype        TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS conv.tekst_element (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    regeling_expression TEXT NOT NULL REFERENCES conv.regeling(frbr_expression) ON DELETE CASCADE,
+    eid                 TEXT NOT NULL,
+    wid                 TEXT NOT NULL,
+    element_type        TEXT NOT NULL,
+    parent_id           BIGINT NULL REFERENCES conv.tekst_element(id) ON DELETE CASCADE,
+    nummer              TEXT NULL,
+    opschrift           TEXT NULL,
+    inhoud              TEXT NULL,
+    volgorde            INT NOT NULL DEFAULT 0,
+    UNIQUE (regeling_expression, eid)
+);
+
+CREATE TABLE IF NOT EXISTS conv.locatie (
+    identificatie       TEXT PRIMARY KEY,
+    locatie_type        TEXT NOT NULL,
+    noemer              TEXT NULL,
+    geometrie           GEOMETRY(Geometry, 28992) NOT NULL,
+    bron_planobject     TEXT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conv_locatie_geom ON conv.locatie USING GIST(geometrie);
+
+CREATE TABLE IF NOT EXISTS conv.locatiegroep_lid (
+    groep_identificatie TEXT NOT NULL REFERENCES conv.locatie(identificatie) ON DELETE CASCADE,
+    lid_identificatie   TEXT NOT NULL REFERENCES conv.locatie(identificatie) ON DELETE CASCADE,
+    PRIMARY KEY (groep_identificatie, lid_identificatie)
+);
+
+CREATE TABLE IF NOT EXISTS conv.gebiedsaanwijzing (
+    identificatie       TEXT PRIMARY KEY,
+    type                TEXT NOT NULL,
+    naam                TEXT NOT NULL,
+    groep               TEXT NULL,
+    locatie_id          TEXT NOT NULL REFERENCES conv.locatie(identificatie),
+    bron                TEXT NOT NULL DEFAULT 'mechanisch'
+);
+
+CREATE TABLE IF NOT EXISTS conv.activiteit (
+    identificatie       TEXT PRIMARY KEY,
+    naam                TEXT NOT NULL,
+    groep               TEXT NULL,
+    bovenliggende       TEXT NULL REFERENCES conv.activiteit(identificatie),
+    is_tophaak          BOOLEAN NOT NULL DEFAULT FALSE,
+    bron                TEXT NOT NULL DEFAULT 'llm-voorstel'
+);
+
+CREATE TABLE IF NOT EXISTS conv.juridische_regel (
+    identificatie       TEXT PRIMARY KEY,
+    regel_type          TEXT NOT NULL,
+    thema               TEXT[] NULL,
+    regeltekst_wid      TEXT NOT NULL,
+    bron                TEXT NOT NULL DEFAULT 'llm-voorstel'
+);
+
+CREATE TABLE IF NOT EXISTS conv.activiteit_locatieaanduiding (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    juridische_regel_id TEXT NOT NULL REFERENCES conv.juridische_regel(identificatie) ON DELETE CASCADE,
+    activiteit_id       TEXT NOT NULL REFERENCES conv.activiteit(identificatie) ON DELETE CASCADE,
+    locatie_id          TEXT NOT NULL REFERENCES conv.locatie(identificatie),
+    kwalificatie        TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS conv.juridische_regel_gebiedsaanwijzing (
+    juridische_regel_id  TEXT NOT NULL REFERENCES conv.juridische_regel(identificatie) ON DELETE CASCADE,
+    gebiedsaanwijzing_id TEXT NOT NULL REFERENCES conv.gebiedsaanwijzing(identificatie) ON DELETE CASCADE,
+    PRIMARY KEY (juridische_regel_id, gebiedsaanwijzing_id)
+);
+
+CREATE TABLE IF NOT EXISTS conv.norm (
+    identificatie       TEXT PRIMARY KEY,
+    norm_type           TEXT NOT NULL,
+    naam                TEXT NOT NULL,
+    type_norm           TEXT NULL,
+    eenheid             TEXT NULL,
+    bron                TEXT NOT NULL DEFAULT 'llm-voorstel'
+);
+
+CREATE TABLE IF NOT EXISTS conv.normwaarde (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    norm_id             TEXT NOT NULL REFERENCES conv.norm(identificatie) ON DELETE CASCADE,
+    locatie_id          TEXT NOT NULL REFERENCES conv.locatie(identificatie),
+    kwalitatieve_waarde TEXT NULL,
+    kwantitatieve_waarde NUMERIC NULL
+);
+
+CREATE TABLE IF NOT EXISTS conv.juridische_regel_norm (
+    juridische_regel_id TEXT NOT NULL REFERENCES conv.juridische_regel(identificatie) ON DELETE CASCADE,
+    norm_id             TEXT NOT NULL REFERENCES conv.norm(identificatie) ON DELETE CASCADE,
+    PRIMARY KEY (juridische_regel_id, norm_id)
+);
 """
 
 LOOKUPS = """
-SET search_path TO dso, public;
+SET search_path TO p2p, wro, i2a, v2a, core, public;
 
-INSERT INTO bestemmingshoofdgroep (code) VALUES
+INSERT INTO core.bestemmingshoofdgroep (code) VALUES
 ('Agrarisch'),('Agrarisch met waarden'),('Bedrijf'),('Bedrijventerrein'),
 ('Bos'),('Centrum'),('Cultuur en ontspanning'),('Detailhandel'),
 ('Dienstverlening'),('Gemengd'),('Groen'),('Horeca'),('Kantoor'),
@@ -451,17 +597,17 @@ INSERT INTO bestemmingshoofdgroep (code) VALUES
 ('Verkeer'),('Water'),('Wonen'),('Woongebied'),('Overig')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO dubbelbestemmingshoofdgroep (code) VALUES
+INSERT INTO core.dubbelbestemmingshoofdgroep (code) VALUES
 ('Leiding'),('Waarde'),('Waterstaat')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO bouwaanduidingtype (code) VALUES
+INSERT INTO core.bouwaanduidingtype (code) VALUES
 ('aaneengebouwd'),('antennemast'),('bijgebouwen'),('gestapeld'),
 ('kap'),('karakteristiek'),('nokrichting'),('onderdoorgang'),
 ('plat dak'),('twee-aaneen'),('vrijstaand'),('specifieke bouwaanduiding')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO figuurtype (code) VALUES
+INSERT INTO core.figuurtype (code) VALUES
 ('as van de weg'),('dwarsprofiel'),('gevellijn'),('hartlijn leiding'),
 ('hartlijn leiding - brandstof'),('hartlijn leiding - gas'),
 ('hartlijn leiding - hoogspanning'),('hartlijn leiding - hoogspanningsverbinding'),
@@ -469,47 +615,47 @@ INSERT INTO figuurtype (code) VALUES
 ('hartlijn leiding - water'),('relatie')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO gebiedsaanduidinghoofdgroep (code) VALUES
+INSERT INTO core.gebiedsaanduidinghoofdgroep (code) VALUES
 ('geluidzone'),('luchtvaartverkeerzone'),('milieuzone'),
 ('reconstructiewetzone'),('veiligheidszone'),('vrijwaringszone'),
 ('wetgevingzone'),('overige zone')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO dossierstatus (code) VALUES
+INSERT INTO core.dossierstatus (code) VALUES
 ('in voorbereiding'),('vastgesteld'),('geheel in werking'),
 ('deels in werking'),('niet in werking'),
 ('geheel onherroepelijk in werking'),('deels onherroepelijk in werking'),
 ('vervallen'),('geconsolideerd')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO planstatus (code) VALUES
+INSERT INTO core.planstatus (code) VALUES
 ('concept'),('voorontwerp'),('ontwerp'),('vastgesteld'),('geconsolideerd')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO regelingmodel (code) VALUES
+INSERT INTO core.regelingmodel (code) VALUES
 ('RegelingKlassiek'),('RegelingCompact'),
 ('RegelingTijdelijkdeel'),('RegelingVrijetekst')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO besluitmodel (code) VALUES
+INSERT INTO core.besluitmodel (code) VALUES
 ('BesluitKlassiek'),('BesluitCompact')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO publicatiebladtype (code) VALUES
+INSERT INTO core.publicatiebladtype (code) VALUES
 ('Staatsblad'),('Staatscourant'),('Gemeenteblad'),
 ('Provinciaalblad'),('Waterschapsblad'),('BladGR')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO idealisatie (code) VALUES
+INSERT INTO core.idealisatie (code) VALUES
 ('exact'),('indicatief')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO toestemmingstype (code) VALUES
+INSERT INTO core.toestemmingstype (code) VALUES
 ('Vergunningplicht'),('Meldingsplicht'),('Informatieplicht'),
 ('Verbod'),('Gebod'),('Toegestaan'),('Anders geduid')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO documenttype (code) VALUES
+INSERT INTO core.documenttype (code) VALUES
 ('Omgevingsplan'),('Omgevingsverordening'),('Waterschapsverordening'),
 ('Omgevingsvisie'),('Programma'),('Projectbesluit'),
 ('AMvB'),('Ministeriele regeling'),('Instructie'),

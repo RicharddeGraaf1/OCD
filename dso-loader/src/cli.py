@@ -284,5 +284,167 @@ def overzicht():
     _o()
 
 
+@cli.group()
+def pipeline():
+    """Keten-gedreven pipeline (core/p2p/wro/i2a)."""
+    pass
+
+
+def _resolve_bronhouders(file: str | None, code: tuple[str, ...], naam: tuple[str, ...]):
+    from src.pipeline.bronhouders import Bronhouder, _infer_type, load_bronhouders
+    if file:
+        return load_bronhouders(file)
+    if code:
+        if len(naam) != len(code):
+            raise click.UsageError("Aantal --naam moet gelijk zijn aan aantal --code, of laat --naam weg.")
+        names = naam if naam else code
+        return [Bronhouder(code=c, naam=n, type=_infer_type(c)) for c, n in zip(code, names)]
+    raise click.UsageError("Geef --file of minstens één --code op.")
+
+
+_INPUT_OPTS = [
+    click.option("--file", "-f", type=click.Path(exists=True),
+                 help="JSON-bestand met {code: naam}-mapping."),
+    click.option("--code", "-c", multiple=True, help="Bronhouder-code (herhalen toegestaan)."),
+    click.option("--naam", "-n", multiple=True, help="Bronhouder-naam (parallel aan --code)."),
+]
+
+
+def _add_input_opts(fn):
+    for opt in reversed(_INPUT_OPTS):
+        fn = opt(fn)
+    return fn
+
+
+@pipeline.command("core")
+def pipeline_core():
+    """Bootstrap: schema's, tabellen en lookup-data."""
+    from src.pipeline import core
+    core.bootstrap()
+
+
+@pipeline.command("p2p")
+@_add_input_opts
+@click.option("--types", "-t", default=None,
+              help="Comma-gescheiden documenttypes (bv. 'Omgevingsplan,Omgevingsvisie').")
+def pipeline_p2p(file, code, naam, types):
+    """Laad Ow-regelingen via DSO Presenteren API."""
+    from src.pipeline import p2p
+    bhs = _resolve_bronhouders(file, code, naam)
+    doc_types = [t.strip() for t in types.split(",")] if types else None
+    p2p.run(bhs, doc_types=doc_types)
+
+
+@pipeline.command("wro")
+@_add_input_opts
+@click.option("--no-teksten", is_flag=True, help="Sla IHR-teksten over (alleen plannen).")
+def pipeline_wro(file, code, naam, no_teksten):
+    """Laad Wro-bestemmingsplannen via PDOK + teksten via IHR."""
+    from src.pipeline import wro
+    bhs = _resolve_bronhouders(file, code, naam)
+    wro.run(bhs, include_teksten=not no_teksten)
+
+
+@pipeline.command("i2a")
+@_add_input_opts
+@click.option("--no-werkzaamheden", is_flag=True, help="Sla werkzaamhedencatalogus over.")
+def pipeline_i2a(file, code, naam, no_werkzaamheden):
+    """Laad toepasbare regels (RTR + STTR) en werkzaamhedencatalogus."""
+    from src.pipeline import i2a
+    bhs = _resolve_bronhouders(file, code, naam)
+    i2a.run(bhs, load_werkzaamheden=not no_werkzaamheden)
+
+
+@pipeline.command("all")
+@_add_input_opts
+@click.option("--types", "-t", default=None, help="Documenttype-filter voor p2p.")
+@click.option("--no-wro-teksten", is_flag=True, help="Sla IHR-teksten over.")
+def pipeline_all(file, code, naam, types, no_wro_teksten):
+    """Draai p2p, wro en i2a in volgorde voor dezelfde bronhouder-set."""
+    from src.pipeline import all_ketens
+    bhs = _resolve_bronhouders(file, code, naam)
+    doc_types = [t.strip() for t in types.split(",")] if types else None
+    results = all_ketens(bhs, doc_types=doc_types,
+                         include_wro_teksten=not no_wro_teksten)
+    console.print()
+    console.print(f"[bold]Pipeline klaar[/bold] — ketens: {list(results.keys())}")
+
+
+@cli.group()
+def convert():
+    """Bestemmingsplan -> omgevingsplan conversie (wro -> conv)."""
+    pass
+
+
+@convert.command("plan")
+@click.argument("instrument_idn")
+def convert_plan(instrument_idn):
+    """Converteer een enkel bestemmingsplan (NL.IMRO-identificatie)."""
+    from src.converter.stap1 import convert_bestemmingsplan
+    convert_bestemmingsplan(instrument_idn)
+
+
+@convert.command("gemeente")
+@click.argument("code")
+def convert_gemeente_cmd(code):
+    """Converteer alle vigerende bestemmingsplannen van een gemeente (CBS-code)."""
+    from src.converter.stap1 import convert_gemeente
+    results = convert_gemeente(code)
+    ok = sum(1 for r in results if "error" not in r)
+    err = sum(1 for r in results if "error" in r)
+    console.print(f"\n[bold]Conversie klaar: {ok} gelukt, {err} fouten[/bold]")
+
+
+@convert.command("clear")
+@click.argument("code")
+@click.confirmation_option(prompt="Alle conversie-data voor deze gemeente wissen?")
+def convert_clear(code):
+    """Wis conversie-data voor een gemeente (voor re-run)."""
+    from src.converter.stap1 import clear_gemeente
+    n = clear_gemeente(code)
+    console.print(f"[green]{n} regelingen gewist uit conv-schema[/green]")
+
+
+@convert.command("status")
+def convert_status():
+    """Toon conversie-status per gemeente."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT r.bronhouder, b.naam,
+                       count(DISTINCT r.frbr_expression) AS regelingen,
+                       count(DISTINCT te.id) AS tekst_elementen,
+                       count(DISTINCT l.identificatie) AS locaties,
+                       count(DISTINCT ga.identificatie) AS gebiedsaanwijzingen
+                FROM conv.regeling r
+                JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
+                LEFT JOIN conv.tekst_element te ON te.regeling_expression = r.frbr_expression
+                LEFT JOIN conv.locatie l ON l.bron_planobject IS NOT NULL
+                LEFT JOIN conv.gebiedsaanwijzing ga ON TRUE
+                GROUP BY r.bronhouder, b.naam
+                ORDER BY b.naam
+            """)
+            rows = cur.fetchall()
+
+        if not rows:
+            console.print("[yellow]Geen conversie-data gevonden[/yellow]")
+            return
+
+        tbl = Table(title="Conversie-status (conv-schema)")
+        tbl.add_column("Gemeente")
+        tbl.add_column("Regelingen", justify="right")
+        tbl.add_column("Teksten", justify="right")
+        tbl.add_column("Locaties", justify="right")
+        tbl.add_column("GA's", justify="right")
+        for r in rows:
+            tbl.add_row(r["naam"], str(r["regelingen"]),
+                        str(r["tekst_elementen"]), str(r["locaties"]),
+                        str(r["gebiedsaanwijzingen"]))
+        console.print(tbl)
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     cli()

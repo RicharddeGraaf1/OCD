@@ -125,16 +125,16 @@ def _load_bestemmingsplangebied(conn, cbs_codes: dict[str, str] | None = None):
     with conn.cursor() as cur:
         for code, naam in cbs_codes.items():
             cur.execute(
-                "INSERT INTO dso.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                "INSERT INTO core.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (code, naam),
             )
             cur.execute(
-                "INSERT INTO dso.wro_manifest (overheidscode, naam_overheid) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                "INSERT INTO wro.wro_manifest (overheidscode, naam_overheid) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (code, naam),
             )
         for extra in ["onherroepelijk", "vigerend", "goedgekeurd", "geconsolideerde versie",
                       "uitspraak afdeling bestuursrechtspraak", "onbekend"]:
-            cur.execute("INSERT INTO dso.planstatus (code) VALUES (%s) ON CONFLICT DO NOTHING", (extra,))
+            cur.execute("INSERT INTO core.planstatus (code) VALUES (%s) ON CONFLICT DO NOTHING", (extra,))
     conn.commit()
 
     count = 0
@@ -157,13 +157,13 @@ def _load_bestemmingsplangebied(conn, cbs_codes: dict[str, str] | None = None):
 
             dossier = idn.rsplit("-", 1)[0] if "-" in idn else idn
             cur.execute(
-                """INSERT INTO dso.wro_dossier (dossiernummer, manifest_code, status)
+                """INSERT INTO wro.wro_dossier (dossiernummer, manifest_code, status)
                    VALUES (%s, %s, NULL) ON CONFLICT DO NOTHING""",
                 (dossier, overheids_code),
             )
 
             cur.execute(
-                """INSERT INTO dso.ruimtelijk_instrument
+                """INSERT INTO wro.ruimtelijk_instrument
                    (idn, dossier, type_plan, naam, planstatus, datum, bronhouder,
                     geometrie, gml_source, pons_status)
                    VALUES (%s, %s, %s, %s, %s, %s, %s,
@@ -190,9 +190,9 @@ def _load_planobjecten(conn, feature_type: str, object_type: str, cbs_codes: set
 
     with conn.cursor() as cur:
         if cbs_codes:
-            cur.execute("SELECT idn FROM dso.ruimtelijk_instrument WHERE bronhouder = ANY(%s)", (list(cbs_codes),))
+            cur.execute("SELECT idn FROM wro.ruimtelijk_instrument WHERE bronhouder = ANY(%s)", (list(cbs_codes),))
         else:
-            cur.execute("SELECT idn FROM dso.ruimtelijk_instrument WHERE bronhouder = %s", (cfg.POC_CBS_CODE,))
+            cur.execute("SELECT idn FROM wro.ruimtelijk_instrument WHERE bronhouder = %s", (cfg.POC_CBS_CODE,))
         loaded_idns = {row["idn"] for row in cur.fetchall()}
 
     if not loaded_idns:
@@ -226,13 +226,13 @@ def _load_planobjecten(conn, feature_type: str, object_type: str, cbs_codes: set
             # Ensure hoofdgroep exists in lookup (covers dubbelbestemming + unknown values)
             if bestemmingshoofdgroep:
                 cur.execute(
-                    "INSERT INTO dso.bestemmingshoofdgroep (code) VALUES (%s) ON CONFLICT DO NOTHING",
+                    "INSERT INTO core.bestemmingshoofdgroep (code) VALUES (%s) ON CONFLICT DO NOTHING",
                     (bestemmingshoofdgroep,),
                 )
 
             try:
                 cur.execute(
-                    """INSERT INTO dso.planobject
+                    """INSERT INTO wro.planobject
                        (identificatie, instrument_idn, object_type, naam,
                         bestemmingshoofdgroep, geometrie, gml_source)
                        VALUES (%s, %s, %s, %s, %s,

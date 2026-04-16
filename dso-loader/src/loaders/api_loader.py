@@ -18,6 +18,8 @@ import re
 import httpx
 from rich.console import Console
 
+from utils import strip_xml
+
 from src.config import cfg
 from src.db import get_conn
 from src.rate_limiter import limiter
@@ -170,13 +172,14 @@ def load_documentstructuur(conn, regeling_uri: str, expression_id: str):
         eid_to_id = {}
         for elem in elements:
             cur.execute(
-                """INSERT INTO dso.tekst_element
-                   (regeling_expression, eid, wid, element_type, nummer, opschrift, inhoud, volgorde)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """INSERT INTO p2p.tekst_element
+                   (regeling_expression, eid, wid, element_type, nummer, opschrift, inhoud, inhoud_plain, volgorde)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (regeling_expression, eid) DO NOTHING
                    RETURNING id""",
                 (expression_id, elem["eid"], elem["wid"], elem["element_type"],
-                 elem["nummer"], elem["opschrift"], elem["inhoud"], elem["volgorde"]),
+                 elem["nummer"], elem["opschrift"], elem["inhoud"],
+                 strip_xml(elem["inhoud"]), elem["volgorde"]),
             )
             row = cur.fetchone()
             if row:
@@ -185,7 +188,7 @@ def load_documentstructuur(conn, regeling_uri: str, expression_id: str):
         for elem in elements:
             if elem["parent_eid"] and elem["eid"] in eid_to_id and elem["parent_eid"] in eid_to_id:
                 cur.execute(
-                    "UPDATE dso.tekst_element SET parent_id = %s WHERE id = %s",
+                    "UPDATE p2p.tekst_element SET parent_id = %s WHERE id = %s",
                     (eid_to_id[elem["parent_eid"]], eid_to_id[elem["eid"]]),
                 )
 
@@ -222,7 +225,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
             geojson = _get_geometry(geom_id) if geom_id else None
             if geojson:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, noemer, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
                        VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992))
                        ON CONFLICT (identificatie) DO UPDATE SET
                          geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992)""",
@@ -231,7 +234,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
                 stats["geometrieen"] += 1
             else:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, noemer, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
                        VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992))
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (loc_id, loc_type, noemer),
@@ -241,7 +244,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
         # ── Activiteiten ──
         for act in data.get("activiteiten", []):
             cur.execute(
-                """INSERT INTO dso.activiteit (identificatie, naam, groep, is_tophaak)
+                """INSERT INTO p2p.activiteit (identificatie, naam, groep, is_tophaak)
                    VALUES (%s, %s, %s, false)
                    ON CONFLICT (identificatie) DO NOTHING""",
                 (act["identificatie"], act["naam"],
@@ -253,9 +256,9 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
             parent = act.get("bovenliggendeActiviteitRef")
             if parent:
                 cur.execute(
-                    """UPDATE dso.activiteit SET bovenliggende = %s
+                    """UPDATE p2p.activiteit SET bovenliggende = %s
                        WHERE identificatie = %s
-                       AND EXISTS (SELECT 1 FROM dso.activiteit WHERE identificatie = %s)""",
+                       AND EXISTS (SELECT 1 FROM p2p.activiteit WHERE identificatie = %s)""",
                     (parent, act["identificatie"], parent),
                 )
 
@@ -267,13 +270,13 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
             loc_id = ga_locs[0] if ga_locs else None
             if loc_id:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
                        VALUES (%s, 'Onbekend', ST_SetSRID(ST_MakePoint(0, 0), 28992))
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (loc_id,),
                 )
             cur.execute(
-                """INSERT INTO dso.gebiedsaanwijzing (identificatie, type, naam, groep, locatie_id)
+                """INSERT INTO p2p.gebiedsaanwijzing (identificatie, type, naam, groep, locatie_id)
                    VALUES (%s, %s, %s, %s, %s)
                    ON CONFLICT (identificatie) DO NOTHING""",
                 (ga["identificatie"], ga_type, ga.get("naam", ""), ga_groep, loc_id),
@@ -296,7 +299,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
                 regeltekst_wid = rt_to_wid.get(regeltekst_ref, regeltekst_ref)
 
                 cur.execute(
-                    """INSERT INTO dso.juridische_regel
+                    """INSERT INTO p2p.juridische_regel
                        (identificatie, regel_type, idealisatie, regeltekst_wid)
                        VALUES (%s, %s, %s, %s)
                        ON CONFLICT (identificatie) DO NOTHING""",
@@ -307,7 +310,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
                 # GA-junction
                 for ga_ref in regel.get("gebiedsaanwijzingRefs", []):
                     cur.execute(
-                        """INSERT INTO dso.juridische_regel_gebiedsaanwijzing
+                        """INSERT INTO p2p.juridische_regel_gebiedsaanwijzing
                            (juridische_regel_id, gebiedsaanwijzing_id)
                            VALUES (%s, %s) ON CONFLICT DO NOTHING""",
                         (regel["identificatie"], ga_ref),
@@ -320,13 +323,13 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
                     kwal_val = kwal.get("waarde") if isinstance(kwal, dict) else kwal
                     for loc_ref in ala.get("locatieRefs", []):
                         cur.execute(
-                            """INSERT INTO dso.locatie (identificatie, locatie_type, geometrie)
+                            """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
                                VALUES (%s, 'Onbekend', ST_SetSRID(ST_MakePoint(0, 0), 28992))
                                ON CONFLICT (identificatie) DO NOTHING""",
                             (loc_ref,),
                         )
                         cur.execute(
-                            """INSERT INTO dso.activiteit_locatieaanduiding
+                            """INSERT INTO p2p.activiteit_locatieaanduiding
                                (juridische_regel_id, activiteit_id, locatie_id, kwalificatie)
                                VALUES (%s, %s, %s, %s)""",
                             (regel["identificatie"], act_ref, loc_ref, kwal_val),
@@ -345,7 +348,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
                 n_groep_val = n_groep.get("waarde") if isinstance(n_groep, dict) else n_groep
 
                 cur.execute(
-                    """INSERT INTO dso.norm
+                    """INSERT INTO p2p.norm
                        (identificatie, norm_type, naam, type_norm, eenheid, groep)
                        VALUES (%s, %s, %s, %s, %s, %s)
                        ON CONFLICT (identificatie) DO NOTHING""",
@@ -358,18 +361,19 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
                     nw_locs = nw.get("locatieRefs", [])
                     for nw_loc in nw_locs:
                         cur.execute(
-                            """INSERT INTO dso.locatie (identificatie, locatie_type, geometrie)
+                            """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
                                VALUES (%s, 'Onbekend', ST_SetSRID(ST_MakePoint(0, 0), 28992))
                                ON CONFLICT (identificatie) DO NOTHING""",
                             (nw_loc,),
                         )
                         cur.execute(
-                            """INSERT INTO dso.normwaarde
-                               (norm_id, locatie_id, kwalitatieve_waarde, kwantitatieve_waarde)
-                               VALUES (%s, %s, %s, %s)""",
+                            """INSERT INTO p2p.normwaarde
+                               (norm_id, locatie_id, kwalitatieve_waarde, kwantitatieve_waarde, waarde_in_regeltekst)
+                               VALUES (%s, %s, %s, %s, %s)""",
                             (norm["identificatie"], nw_loc,
                              nw.get("kwalitatieveWaarde"),
-                             nw.get("kwantitatieveWaarde")),
+                             nw.get("kwantitatieveWaarde"),
+                             nw.get("waardeInRegeltekst")),
                         )
                         stats["normwaarden"] += 1
 
@@ -379,7 +383,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
             for regel in data.get(regel_type_key, []):
                 for norm_ref in regel.get(norm_ref_key, []):
                     cur.execute(
-                        """INSERT INTO dso.juridische_regel_norm
+                        """INSERT INTO p2p.juridische_regel_norm
                            (juridische_regel_id, norm_id)
                            VALUES (%s, %s) ON CONFLICT DO NOTHING""",
                         (regel["identificatie"], norm_ref),
@@ -388,7 +392,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
         # ── Kaarten ──
         for kaart in data.get("kaarten", []):
             cur.execute(
-                """INSERT INTO dso.kaart (identificatie, naam)
+                """INSERT INTO p2p.kaart (identificatie, naam)
                    VALUES (%s, %s)
                    ON CONFLICT (identificatie) DO NOTHING""",
                 (kaart["identificatie"], kaart.get("naam", "")),
@@ -400,7 +404,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
                 norm_refs = kl.get("omgevingsnormRefs", [])
                 ala_refs = kl.get("activiteitLocatieaanduidingRefs", [])
                 cur.execute(
-                    """INSERT INTO dso.kaartlaag (kaart_id, naam, gebiedsaanwijzing_id, norm_id, activiteit_id)
+                    """INSERT INTO p2p.kaartlaag (kaart_id, naam, gebiedsaanwijzing_id, norm_id, activiteit_id)
                        VALUES (%s, %s, %s, %s, %s)""",
                     (kaart["identificatie"],
                      kl.get("naam", ""),
@@ -434,7 +438,7 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
             geojson = _get_geometry(geom_id) if geom_id else None
             if geojson:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, noemer, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
                        VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992))
                        ON CONFLICT (identificatie) DO UPDATE SET
                          geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992)""",
@@ -444,7 +448,7 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
                 stats["geometrieen"] += 1
             else:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, noemer, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
                        VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992))
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (loc_id, loc["locatieType"], loc.get("noemer")),
@@ -459,13 +463,13 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
             loc_id = ga_locs[0] if ga_locs else None
             if loc_id:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
                        VALUES (%s, 'Onbekend', ST_SetSRID(ST_MakePoint(0, 0), 28992))
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (loc_id,),
                 )
             cur.execute(
-                """INSERT INTO dso.gebiedsaanwijzing (identificatie, type, naam, groep, locatie_id)
+                """INSERT INTO p2p.gebiedsaanwijzing (identificatie, type, naam, groep, locatie_id)
                    VALUES (%s, %s, %s, %s, %s)
                    ON CONFLICT (identificatie) DO NOTHING""",
                 (ga["identificatie"], ga_type, ga.get("naam", ""), ga_groep, loc_id),
@@ -478,7 +482,7 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
             loc_id = loc_refs[0] if loc_refs else None
             if loc_id:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
                        VALUES (%s, 'Onbekend', ST_SetSRID(ST_MakePoint(0, 0), 28992))
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (loc_id,),
@@ -488,7 +492,7 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
                 themas = [t.get("waarde", t) if isinstance(t, dict) else t for t in td["themas"]]
 
             cur.execute(
-                """INSERT INTO dso.tekstdeel (identificatie, divisie_wid, thema, locatie_id)
+                """INSERT INTO p2p.tekstdeel (identificatie, divisie_wid, thema, locatie_id)
                    VALUES (%s, %s, %s, %s)
                    ON CONFLICT (identificatie) DO NOTHING""",
                 (td["identificatie"], td.get("divisietekstRef", ""), themas, loc_id),
@@ -498,7 +502,7 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
         # ── Hoofdlijnen ──
         for hl in data.get("hoofdlijnen", []):
             cur.execute(
-                """INSERT INTO dso.hoofdlijn (identificatie, soort, naam)
+                """INSERT INTO p2p.hoofdlijn (identificatie, soort, naam)
                    VALUES (%s, %s, %s)
                    ON CONFLICT (identificatie) DO NOTHING""",
                 (hl["identificatie"], hl.get("soort", ""), hl.get("naam", "")),
@@ -508,7 +512,7 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
         # ── Kaarten ──
         for kaart in data.get("kaarten", []):
             cur.execute(
-                """INSERT INTO dso.kaart (identificatie, naam)
+                """INSERT INTO p2p.kaart (identificatie, naam)
                    VALUES (%s, %s)
                    ON CONFLICT (identificatie) DO NOTHING""",
                 (kaart["identificatie"], kaart.get("naam", "")),
@@ -518,7 +522,7 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
             for kl in kaart.get("kaartlagen", []):
                 ga_refs = kl.get("gebiedsaanwijzingRefs", [])
                 cur.execute(
-                    """INSERT INTO dso.kaartlaag (kaart_id, naam, gebiedsaanwijzing_id)
+                    """INSERT INTO p2p.kaartlaag (kaart_id, naam, gebiedsaanwijzing_id)
                        VALUES (%s, %s, %s)""",
                     (kaart["identificatie"],
                      kl.get("naam", ""),
@@ -549,7 +553,7 @@ def load_regeling_expand(conn, regeling_uri: str, expression_id: str):
             tdv_part = tdv_link.split("/regelingen/")[-1].split("?")[0]
             tdv_work = tdv_part.replace("_", "/")
             cur.execute(
-                "UPDATE dso.regeling SET is_tijdelijkdeel_van = %s WHERE frbr_expression = %s",
+                "UPDATE p2p.regeling SET is_tijdelijkdeel_van = %s WHERE frbr_expression = %s",
                 (tdv_work, expression_id),
             )
 
@@ -561,7 +565,7 @@ def load_regeling_expand(conn, regeling_uri: str, expression_id: str):
             geojson = _get_geometry(geom_id) if geom_id else None
             if geojson:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, noemer, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
                        VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992))
                        ON CONFLICT (identificatie) DO UPDATE SET
                          geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992)""",
@@ -570,13 +574,13 @@ def load_regeling_expand(conn, regeling_uri: str, expression_id: str):
                 )
             else:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, noemer, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
                        VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992))
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (rg_id, rg.get("locatieType", "Regelingsgebied"), rg.get("noemer")),
                 )
             cur.execute(
-                "UPDATE dso.regeling SET regelingsgebied_id = %s WHERE frbr_expression = %s",
+                "UPDATE p2p.regeling SET regelingsgebied_id = %s WHERE frbr_expression = %s",
                 (rg_id, expression_id),
             )
             stats["regelingsgebied"] = True
@@ -589,7 +593,7 @@ def load_regeling_expand(conn, regeling_uri: str, expression_id: str):
             geojson = _get_geometry(geom_id) if geom_id else None
             if geojson:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, noemer, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
                        VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992))
                        ON CONFLICT (identificatie) DO UPDATE SET
                          geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992)""",
@@ -598,13 +602,13 @@ def load_regeling_expand(conn, regeling_uri: str, expression_id: str):
                 )
             else:
                 cur.execute(
-                    """INSERT INTO dso.locatie (identificatie, locatie_type, noemer, geometrie)
+                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
                        VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992))
                        ON CONFLICT (identificatie) DO NOTHING""",
                     (pons_id, pons.get("locatieType", "Pons"), pons.get("noemer")),
                 )
             cur.execute(
-                """INSERT INTO dso.pons (identificatie, locatie_id)
+                """INSERT INTO p2p.pons (identificatie, locatie_id)
                    VALUES (%s, %s)
                    ON CONFLICT (identificatie) DO NOTHING""",
                 (pons_id, pons_id),
@@ -663,7 +667,7 @@ def load_via_api(overheid_code: str, naam: str,
 
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO dso.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                "INSERT INTO core.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (bronhouder_code, naam),
             )
         conn.commit()
@@ -679,7 +683,7 @@ def load_via_api(overheid_code: str, naam: str,
             # ── Regeling metadata ──
             with conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO dso.regeling
+                    """INSERT INTO p2p.regeling
                        (frbr_expression, frbr_work, regelingmodel, opschrift, citeertitel, bronhouder, documenttype)
                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (frbr_expression) DO NOTHING""",

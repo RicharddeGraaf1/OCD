@@ -81,7 +81,7 @@ def _load_rtr_activiteiten(conn, organisatie_code: str, naam: str) -> int:
                 fsr = rbo.get("functioneleStructuurRef", "")
                 typering = rbo.get("typering", "")
                 cur.execute(
-                    """INSERT INTO dso.regelbeheerobject
+                    """INSERT INTO i2a.regelbeheerobject
                        (functionele_structuur_ref, naam)
                        VALUES (%s, %s)
                        ON CONFLICT (functionele_structuur_ref) DO NOTHING""",
@@ -140,7 +140,7 @@ def _load_sttr_regelbestanden(conn, oin: str, naam: str) -> int:
                 # Ensure RBO exists (might be from another bestuursorgaan)
                 if fsr:
                     cur.execute(
-                        """INSERT INTO dso.regelbeheerobject
+                        """INSERT INTO i2a.regelbeheerobject
                            (functionele_structuur_ref, naam)
                            VALUES (%s, %s)
                            ON CONFLICT (functionele_structuur_ref) DO NOTHING""",
@@ -149,7 +149,7 @@ def _load_sttr_regelbestanden(conn, oin: str, naam: str) -> int:
 
                 # Insert regelbestand metadata
                 cur.execute(
-                    """INSERT INTO dso.toepasbaar_regelbestand
+                    """INSERT INTO i2a.toepasbaar_regelbestand
                        (namespace, naam, regelbeheerobject)
                        VALUES (%s, %s, %s)
                        ON CONFLICT (namespace) DO UPDATE SET naam = EXCLUDED.naam""",
@@ -200,7 +200,7 @@ def _parse_and_store_dmn(conn, cur, regelbestand_ns: str, xml_bytes: bytes):
         name = decision.get("name", "")
 
         cur.execute(
-            """INSERT INTO dso.dmn_element
+            """INSERT INTO i2a.dmn_element
                (regelbestand_ns, dmn_id, element_type, naam)
                VALUES (%s, %s, %s, %s)
                ON CONFLICT (regelbestand_ns, dmn_id) DO NOTHING""",
@@ -213,7 +213,7 @@ def _parse_and_store_dmn(conn, cur, regelbestand_ns: str, xml_bytes: bytes):
         name = inp.get("name", "")
 
         cur.execute(
-            """INSERT INTO dso.dmn_element
+            """INSERT INTO i2a.dmn_element
                (regelbestand_ns, dmn_id, element_type, naam)
                VALUES (%s, %s, %s, %s)
                ON CONFLICT (regelbestand_ns, dmn_id) DO NOTHING""",
@@ -236,7 +236,7 @@ def _parse_and_store_dmn(conn, cur, regelbestand_ns: str, xml_bytes: bytes):
             regel_type = "RekenRegel"
 
         cur.execute(
-            """INSERT INTO dso.uitvoeringsregel
+            """INSERT INTO i2a.uitvoeringsregel
                (regelbestand_ns, regel_type)
                VALUES (%s, %s)""",
             (regelbestand_ns, regel_type),
@@ -267,7 +267,7 @@ def _load_werkzaamheden(conn) -> dict:
             urn = w["urn"]
             naam = w.get("omschrijving", urn)
             cur.execute(
-                """INSERT INTO dso.werkzaamheid (urn, naam)
+                """INSERT INTO i2a.werkzaamheid (urn, naam)
                    VALUES (%s, %s)
                    ON CONFLICT (urn) DO NOTHING""",
                 (urn, naam),
@@ -291,9 +291,9 @@ def _load_werkzaamheden(conn) -> dict:
                     act_urn = k.get("urn", "")
                     if act_urn:
                         cur.execute(
-                            """UPDATE dso.werkzaamheid SET activiteit_id = %s
+                            """UPDATE i2a.werkzaamheid SET activiteit_id = %s
                                WHERE urn = %s
-                               AND EXISTS (SELECT 1 FROM dso.activiteit WHERE identificatie = %s)""",
+                               AND EXISTS (SELECT 1 FROM p2p.activiteit WHERE identificatie = %s)""",
                             (act_urn, urn, act_urn),
                         )
                         if cur.rowcount > 0:

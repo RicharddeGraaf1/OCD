@@ -56,12 +56,12 @@ def wat_geldt_hier(x: float, y: float):
             SELECT DISTINCT r.opschrift as regeling, r.documenttype,
                    te.nummer, te.opschrift as artikel,
                    jr.regel_type, a.naam as activiteit
-            FROM dso.locatie l
-            JOIN dso.activiteit_locatieaanduiding ala ON ala.locatie_id = l.identificatie
-            JOIN dso.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-            JOIN dso.activiteit a ON a.identificatie = ala.activiteit_id
-            JOIN dso.tekst_element te ON te.wid = jr.regeltekst_wid
-            JOIN dso.regeling r ON r.frbr_expression = te.regeling_expression
+            FROM p2p.locatie l
+            JOIN p2p.activiteit_locatieaanduiding ala ON ala.locatie_id = l.identificatie
+            JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+            JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
+            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE ST_Contains(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
             ORDER BY r.opschrift, te.nummer
             LIMIT 50
@@ -72,8 +72,8 @@ def wat_geldt_hier(x: float, y: float):
         cur.execute("""
             SELECT ri.naam as plan, ri.type_plan, ri.planstatus,
                    po.object_type, po.naam as bestemming, po.bestemmingshoofdgroep
-            FROM dso.planobject po
-            JOIN dso.ruimtelijk_instrument ri ON ri.idn = po.instrument_idn
+            FROM wro.planobject po
+            JOIN wro.ruimtelijk_instrument ri ON ri.idn = po.instrument_idn
             WHERE ST_Contains(po.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
             ORDER BY ri.naam, po.object_type
             LIMIT 50
@@ -125,8 +125,8 @@ def welke_activiteiten(gemeente: str):
     with conn.cursor() as cur:
         cur.execute("""
             SELECT a.naam, a.groep, count(ala.id) as ala_count
-            FROM dso.activiteit a
-            LEFT JOIN dso.activiteit_locatieaanduiding ala ON ala.activiteit_id = a.identificatie
+            FROM p2p.activiteit a
+            LEFT JOIN p2p.activiteit_locatieaanduiding ala ON ala.activiteit_id = a.identificatie
             WHERE a.identificatie LIKE %s
             GROUP BY a.naam, a.groep
             ORDER BY ala_count DESC
@@ -151,8 +151,8 @@ def normen_gemeente(gemeente: str):
         cur.execute("""
             SELECT n.naam, n.groep, n.type_norm,
                    count(nw.id) as waarden
-            FROM dso.norm n
-            LEFT JOIN dso.normwaarde nw ON nw.norm_id = n.identificatie
+            FROM p2p.norm n
+            LEFT JOIN p2p.normwaarde nw ON nw.norm_id = n.identificatie
             WHERE n.identificatie LIKE %s
             GROUP BY n.naam, n.groep, n.type_norm
             ORDER BY waarden DESC
@@ -179,12 +179,12 @@ def werkzaamheid_keten(werkzaamheid: str):
             SELECT w.naam as werkzaamheid, a.naam as activiteit,
                    te.nummer, te.opschrift as artikel,
                    r.opschrift as regeling, r.bronhouder
-            FROM dso.werkzaamheid w
-            JOIN dso.activiteit a ON a.identificatie = w.activiteit_id
-            JOIN dso.activiteit_locatieaanduiding ala ON ala.activiteit_id = a.identificatie
-            JOIN dso.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-            JOIN dso.tekst_element te ON te.wid = jr.regeltekst_wid
-            JOIN dso.regeling r ON r.frbr_expression = te.regeling_expression
+            FROM i2a.werkzaamheid w
+            JOIN p2p.activiteit a ON a.identificatie = w.activiteit_id
+            JOIN p2p.activiteit_locatieaanduiding ala ON ala.activiteit_id = a.identificatie
+            JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE w.naam ILIKE %s OR w.urn ILIKE %s
             ORDER BY r.opschrift, te.nummer
             LIMIT 30
@@ -217,8 +217,8 @@ def pons_status(gemeente: str):
     with conn.cursor() as cur:
         cur.execute("""
             SELECT p.identificatie, l.noemer
-            FROM dso.pons p
-            JOIN dso.locatie l ON l.identificatie = p.locatie_id
+            FROM p2p.pons p
+            JOIN p2p.locatie l ON l.identificatie = p.locatie_id
             WHERE p.identificatie LIKE %s
         """, (f"nl.imow-gm{gemeente}.%",))
         pons = cur.fetchone()
@@ -226,7 +226,7 @@ def pons_status(gemeente: str):
         cur.execute("""
             SELECT count(*) as total,
                    count(*) FILTER (WHERE ri.planstatus = 'vastgesteld') as vastgesteld
-            FROM dso.ruimtelijk_instrument ri
+            FROM wro.ruimtelijk_instrument ri
             WHERE ri.bronhouder = %s
         """, (gemeente,))
         wro = cur.fetchone()
@@ -261,8 +261,8 @@ def zoek_tekst(zoekterm: str):
             SELECT te.nummer, te.opschrift, te.element_type,
                    r.opschrift as regeling, 'Ow' as regime,
                    regexp_replace(te.inhoud, '<[^>]+>', '', 'g') as platte_tekst
-            FROM dso.tekst_element te
-            JOIN dso.regeling r ON r.frbr_expression = te.regeling_expression
+            FROM p2p.tekst_element te
+            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE te.inhoud ILIKE %s
             ORDER BY r.opschrift, te.nummer
             LIMIT 20
@@ -274,8 +274,8 @@ def zoek_tekst(zoekterm: str):
             SELECT wt.nummer, wt.naam as opschrift, wt.object_type as element_type,
                    ri.naam as regeling, 'Wro' as regime,
                    wt.inhoud as platte_tekst
-            FROM dso.wro_tekst_object wt
-            JOIN dso.ruimtelijk_instrument ri ON ri.idn = wt.instrument_idn
+            FROM wro.wro_tekst_object wt
+            JOIN wro.ruimtelijk_instrument ri ON ri.idn = wt.instrument_idn
             WHERE wt.inhoud ILIKE %s
             ORDER BY ri.naam, wt.volgnummer
             LIMIT 20
@@ -313,7 +313,7 @@ def bevoegde_gezagen():
             SELECT overheidscode, naam, oin, bestuurslaag,
                    ow_geladen, imtr_geladen, wro_geladen, wro_teksten_geladen,
                    ow_regelingen, wro_instrumenten
-            FROM dso.bronhouder
+            FROM core.bronhouder
             ORDER BY bestuurslaag, naam
         """)
         rows = cur.fetchall()
@@ -352,21 +352,21 @@ def overzicht():
     """Show database overview."""
     conn = get_conn()
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM dso.bronhouder")
+        cur.execute("SELECT count(*) FROM core.bronhouder")
         n_bh = cur.fetchone()["count"]
-        cur.execute("SELECT count(*) FROM dso.regeling")
+        cur.execute("SELECT count(*) FROM p2p.regeling")
         n_reg = cur.fetchone()["count"]
-        cur.execute("SELECT count(*) FROM dso.juridische_regel")
+        cur.execute("SELECT count(*) FROM p2p.juridische_regel")
         n_jr = cur.fetchone()["count"]
-        cur.execute("SELECT count(*) FROM dso.activiteit")
+        cur.execute("SELECT count(*) FROM p2p.activiteit")
         n_act = cur.fetchone()["count"]
-        cur.execute("SELECT count(*) FROM dso.ruimtelijk_instrument")
+        cur.execute("SELECT count(*) FROM wro.ruimtelijk_instrument")
         n_wro = cur.fetchone()["count"]
-        cur.execute("SELECT count(*) FROM dso.planobject")
+        cur.execute("SELECT count(*) FROM wro.planobject")
         n_po = cur.fetchone()["count"]
-        cur.execute("SELECT count(*) FROM dso.werkzaamheid WHERE activiteit_id IS NOT NULL")
+        cur.execute("SELECT count(*) FROM i2a.werkzaamheid WHERE activiteit_id IS NOT NULL")
         n_wz = cur.fetchone()["count"]
-        cur.execute("SELECT count(*) FROM dso.pons")
+        cur.execute("SELECT count(*) FROM p2p.pons")
         n_pons = cur.fetchone()["count"]
     conn.close()
 
