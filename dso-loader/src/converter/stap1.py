@@ -24,35 +24,39 @@ console = Console()
 
 # ── Mappingtabel bestemmingshoofdgroep → Ow-functie ──────────────────
 
+# Mapping gevalideerd tegen IMOW waardelijsten v5.1.0:
+#   type → waardelijst "type gebiedsaanwijzing" (lowercase)
+#   groep → waardelijst "functiegroep" of "beperkingengebiedgroep" (lowercase)
 BESTEMMING_NAAR_OW = {
-    # enkelbestemmingen
-    "agrarisch":                ("Functie", "Agrarische functie"),
-    "agrarisch met waarden":    ("Functie", "Agrarische functie"),
-    "bedrijf":                  ("Functie", "Bedrijfsfunctie"),
-    "bedrijventerrein":         ("Functie", "Bedrijfsfunctie"),
-    "bos":                      ("Functie", "Groenvoorziening"),
-    "centrum":                  ("Functie", "Gemengde dorps- en stadsgebiedfunctie"),
-    "cultuur en ontspanning":   ("Functie", "Maatschappelijke functie"),
-    "detailhandel":             ("Functie", "Detailhandelfunctie"),
-    "dienstverlening":          ("Functie", "Maatschappelijke functie"),
-    "gemengd":                  ("Functie", "Gemengde dorps- en stadsgebiedfunctie"),
-    "groen":                    ("Functie", "Groenvoorziening"),
-    "horeca":                   ("Functie", "Horecafunctie"),
-    "kantoor":                  ("Functie", "Kantoorfunctie"),
-    "maatschappelijk":          ("Functie", "Maatschappelijke functie"),
-    "natuur":                   ("Functie", "Groenvoorziening"),
-    "recreatie":                ("Functie", "Recreatiefunctie"),
-    "sport":                    ("Functie", "Sportfunctie"),
-    "tuin":                     ("Functie", "Woonfunctie"),
-    "verkeer":                  ("Functie", "Verkeersfunctie"),
-    "water":                    ("Functie", "Waterfunctie"),
-    "wonen":                    ("Functie", "Woonfunctie"),
-    "woongebied":               ("Functie", "Woonfunctie"),
-    "overig":                   ("Functie", "Overige functie"),
-    # dubbelbestemmingen
-    "leiding":                  ("Beperkingengebied", "Leidingstrook"),
-    "waarde":                   ("Functie", "Waardevol gebied"),
-    "waterstaat":               ("Beperkingengebied", "Waterstaatswerk"),
+    # enkelbestemmingen → type "functie" + functiegroep
+    "agrarisch":                ("functie", "agrarisch"),
+    "agrarisch met waarden":    ("functie", "landbouw"),
+    "bedrijf":                  ("functie", "bedrijf"),
+    "bedrijventerrein":         ("functie", "bedrijventerrein"),
+    "bos":                      ("functie", "natuur"),
+    "centrum":                  ("functie", "centrumgebied"),
+    "cultuur en ontspanning":   ("functie", "cultuur"),
+    "detailhandel":             ("functie", "detailhandel"),
+    "dienstverlening":          ("functie", "dienstverlening"),
+    "gemengd":                  ("functie", "centrumgebied"),
+    "groen":                    ("functie", "groen"),
+    "horeca":                   ("functie", "horeca"),
+    "kantoor":                  ("functie", "kantoor"),
+    "maatschappelijk":          ("functie", "maatschappelijk"),
+    "natuur":                   ("functie", "natuur"),
+    "recreatie":                ("functie", "recreatie"),
+    "sport":                    ("functie", "sport"),
+    "tuin":                     ("functie", "wonen"),
+    "verkeer":                  ("functie", "verkeer"),
+    "water":                    ("functie", "water"),
+    "wonen":                    ("functie", "wonen"),
+    "woongebied":               ("functie", "woongebied"),
+    "overig":                   ("functie", "overig"),
+    # dubbelbestemmingen → type "beperkingengebied" + beperkingengebiedgroep,
+    # of type "functie" + functiegroep
+    "leiding":                  ("beperkingengebied", "leiding"),
+    "waarde":                   ("functie", "waarde"),
+    "waterstaat":               ("beperkingengebied", "waterstaatswerk"),
 }
 
 
