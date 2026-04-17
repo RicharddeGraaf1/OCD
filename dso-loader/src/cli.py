@@ -403,6 +403,18 @@ def convert_annotate(regeling_expression):
     annotate_bestemmingsplan(regeling_expression)
 
 
+@convert.command("match")
+@click.argument("regeling_expression")
+@click.option("--min-score", default=0.5, help="Minimum match-score voor weergave (0-1).")
+@click.option("--persist", is_flag=True, help="Sla matches >= 70%% op in conv.activiteit.")
+@click.option("--persist-min-score", default=0.7, help="Minimum score voor persistentie.")
+def convert_match(regeling_expression, min_score, persist, persist_min_score):
+    """Match artikelen tegen bestaande activiteiten/werkzaamheden (geen LLM)."""
+    from src.converter.matcher import match_bestemmingsplan
+    match_bestemmingsplan(regeling_expression, min_score=min_score,
+                          persist=persist, persist_min_score=persist_min_score)
+
+
 @convert.command("clear")
 @click.argument("code")
 @click.confirmation_option(prompt="Alle conversie-data voor deze gemeente wissen?")

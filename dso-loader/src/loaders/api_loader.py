@@ -173,13 +173,12 @@ def load_documentstructuur(conn, regeling_uri: str, expression_id: str):
         for elem in elements:
             cur.execute(
                 """INSERT INTO p2p.tekst_element
-                   (regeling_expression, eid, wid, element_type, nummer, opschrift, inhoud, inhoud_plain, volgorde)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   (regeling_expression, eid, wid, element_type, nummer, opschrift, inhoud, volgorde)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (regeling_expression, eid) DO NOTHING
                    RETURNING id""",
                 (expression_id, elem["eid"], elem["wid"], elem["element_type"],
-                 elem["nummer"], elem["opschrift"], elem["inhoud"],
-                 strip_xml(elem["inhoud"]), elem["volgorde"]),
+                 elem["nummer"], elem["opschrift"], elem["inhoud"], elem["volgorde"]),
             )
             row = cur.fetchone()
             if row:
