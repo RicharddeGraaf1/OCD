@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Security
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 
 from db import get_conn, pool
@@ -28,6 +29,17 @@ app = FastAPI(
     description="Omgevingswet Centraal Datamodel — alle regelgeving van Nederland",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:4200",
+        "http://localhost:4201",
+        "http://localhost:4202",
+    ],
+    allow_methods=["GET"],
+    allow_headers=["X-Api-Key"],
 )
 
 api_key_header = APIKeyHeader(name="X-Api-Key", auto_error=False)
@@ -398,6 +410,688 @@ def gezagen():
             """
         )
         return {"bronhouders": cur.fetchall()}
+
+
+# ── Viewer endpoints ──────────────────────────────────────────────
+
+
+@app.get("/v1/viewer/regelingen", dependencies=[Depends(verify_key)])
+def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
+    """Welke regelingen gelden op een RD-coördinaat? Retourneert een
+    documentenlijst voor de viewer, gegroepeerd op bestuurslaag."""
+    with get_conn() as conn, conn.cursor() as cur:
+        # Dedupliceer op opschrift: zelfde titel = zelfde regeling voor de
+        # gebruiker, zelfs als er 340 expressions zijn (bv. Voorbeschermings-
+        # regels hyperscale datacentra per gemeente). Pak de nieuwste expression.
+        cur.execute(
+            """
+            SELECT DISTINCT ON (r.opschrift)
+                r.frbr_expression   AS expression,
+                r.opschrift         AS titel,
+                r.documenttype      AS type,
+                r.bronhouder,
+                b.naam              AS bronhouder_naam,
+                b.bestuurslaag
+            FROM p2p.activiteit_locatieaanduiding ala
+            JOIN p2p.locatie l        ON l.identificatie = ala.locatie_id
+            JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+            JOIN p2p.regeling r       ON r.frbr_expression = te.regeling_expression
+            JOIN core.bronhouder b    ON b.overheidscode = r.bronhouder
+            WHERE ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+            ORDER BY r.opschrift, r.frbr_expression DESC
+            """,
+            (x, y),
+        )
+        regelingen = cur.fetchall()
+        laag_order = {'gemeente': 0, 'provincie': 1, 'waterschap': 2, 'rijk': 3}
+        regelingen.sort(key=lambda r: (laag_order.get(r['bestuurslaag'] or '', 4), r['titel']))
+
+        # Wro-plannen op dezelfde locatie — als volledige objecten
+        cur.execute(
+            """
+            SELECT DISTINCT ON (ri.naam)
+                ri.idn,
+                ri.naam             AS titel,
+                ri.type_plan        AS type,
+                ri.planstatus,
+                ri.datum,
+                ri.pons_status,
+                b.naam              AS bronhouder_naam,
+                b.bestuurslaag
+            FROM wro.ruimtelijk_instrument ri
+            JOIN core.bronhouder b ON b.overheidscode = ri.bronhouder
+            WHERE ST_Intersects(ri.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+              AND ri.pons_status = 'actief'
+            ORDER BY ri.naam, ri.datum DESC NULLS LAST
+            """,
+            (x, y),
+        )
+        wro_plannen = cur.fetchall()
+
+        # Pons-check: valt dit punt binnen een pons-geometrie?
+        cur.execute(
+            """
+            SELECT count(*) AS n
+            FROM p2p.pons p
+            JOIN p2p.locatie l ON l.identificatie = p.locatie_id
+            WHERE ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+            """,
+            (x, y),
+        )
+        pons_count = cur.fetchone()["n"]
+
+    return {
+        "locatie": {"x": x, "y": y},
+        "regelingen": regelingen,
+        "wro_plannen": wro_plannen,
+        "pons_aanwezig": pons_count > 0,
+    }
+
+
+def _build_boom(rows: list[dict]) -> list[dict]:
+    """Nest een platte lijst tekst_elementen (met parent_id) tot een boom.
+
+    Twee-pass: eerst alle nodes aanmaken, dan pas nesten. Dit werkt
+    ongeacht de volgorde van parent en child in de lijst.
+    """
+    by_id: dict[int, dict] = {}
+
+    # Pass 1: maak alle nodes
+    for row in rows:
+        by_id[row["id"]] = {
+            "id": row["id"],
+            "wid": row["wid"],
+            "type": row["element_type"],
+            "nummer": row["nummer"],
+            "opschrift": row["opschrift"],
+            "tekst": row.get("tekst"),  # None wanneer lazy-loaded
+            "heeft_tekst": (row.get("tekst_lengte") or 0) > 0,
+            "kinderen": [],
+            "annotaties": None,
+            "_parent_id": row["parent_id"],
+        }
+
+    # Pass 2: nest kinderen onder hun parent
+    roots: list[dict] = []
+    for node in by_id.values():
+        parent_id = node.pop("_parent_id")
+        if parent_id is None or parent_id not in by_id:
+            roots.append(node)
+        else:
+            by_id[parent_id]["kinderen"].append(node)
+
+    return roots
+
+
+def _annoteer_boom(boom: list[dict], annotaties: dict[str, dict]):
+    """Hang annotaties (per regeltekst_wid) aan de juiste boom-nodes."""
+    for node in boom:
+        wid = node["wid"]
+        if wid in annotaties:
+            node["annotaties"] = annotaties[wid]
+        if node["kinderen"]:
+            _annoteer_boom(node["kinderen"], annotaties)
+
+
+@app.get("/v1/viewer/regeling/{expression:path}/boom", dependencies=[Depends(verify_key)])
+def viewer_boom(
+    expression: str,
+    x: float = Query(None, description="RD x-coördinaat (optioneel, voor locatie-filtering)"),
+    y: float = Query(None, description="RD y-coördinaat (optioneel, voor locatie-filtering)"),
+):
+    """Documentstructuur als geneste boom + annotaties per artikel.
+
+    Wanneer x/y zijn meegegeven, worden alleen annotaties geretourneerd
+    waarvan de locatie het opgegeven punt raakt.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        # Regeling-metadata
+        cur.execute(
+            "SELECT frbr_expression, opschrift, documenttype, bronhouder "
+            "FROM p2p.regeling WHERE frbr_expression = %s",
+            (expression,),
+        )
+        regeling = cur.fetchone()
+        if not regeling:
+            raise HTTPException(404, "Regeling niet gevonden")
+
+        # A: documentstructuur (platte lijst, genest in Python)
+        cur.execute(
+            """
+            SELECT id, eid, wid, element_type, parent_id,
+                   nummer, opschrift, volgorde,
+                   CASE WHEN element_type IN ('Artikel', 'Lid', 'Divisietekst')
+                        THEN length(coalesce(inhoud_plain, ''))
+                        ELSE 0 END AS tekst_lengte
+            FROM p2p.tekst_element
+            WHERE regeling_expression = %s
+            ORDER BY volgorde
+            """,
+            (expression,),
+        )
+        boom = _build_boom(cur.fetchall())
+
+        # B: annotaties — activiteiten, gebiedsaanwijzingen, normwaarden
+        #
+        # Optimalisatie: als x/y meegegeven, zoek eerst welke locatie_ids
+        # het punt raken (GIST index), en filter daarna. Voorkomt dat
+        # ST_Intersects op elke rij in de join wordt berekend.
+        # Geen locatie-filtering op de boom-annotaties. De boom toont
+        # alle annotaties van de regeling — het is aan de frontend om
+        # bij klik op de kaart te highlighten welke locaties relevant zijn.
+        # Dit bespaart een dure ST_Intersects query (~2s op grote gemeenten).
+
+        cur.execute(
+            f"""
+            SELECT jr.regeltekst_wid,
+                   a.naam           AS activiteit_naam,
+                   a.groep          AS activiteit_groep,
+                   ala.kwalificatie,
+                   ala.locatie_id   AS ala_locatie_id
+            FROM p2p.juridische_regel jr
+            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                                     AND te.regeling_expression = %s
+            LEFT JOIN p2p.activiteit_locatieaanduiding ala
+                   ON ala.juridische_regel_id = jr.identificatie
+            LEFT JOIN p2p.activiteit a
+                   ON a.identificatie = ala.activiteit_id
+            """,
+            (expression,),
+        )
+        act_rows = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT jr.regeltekst_wid,
+                   ga.identificatie  AS ga_id,
+                   ga.type           AS ga_type,
+                   ga.naam           AS ga_naam,
+                   ga.groep          AS ga_groep,
+                   ga.locatie_id     AS ga_locatie_id
+            FROM p2p.juridische_regel jr
+            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                                     AND te.regeling_expression = %s
+            JOIN p2p.juridische_regel_gebiedsaanwijzing jrga
+                   ON jrga.juridische_regel_id = jr.identificatie
+            JOIN p2p.gebiedsaanwijzing ga
+                   ON ga.identificatie = jrga.gebiedsaanwijzing_id
+            """,
+            (expression,),
+        )
+        ga_rows = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT jr.regeltekst_wid,
+                   n.naam            AS norm_naam,
+                   n.type_norm,
+                   n.eenheid,
+                   nw.kwantitatieve_waarde,
+                   nw.kwalitatieve_waarde,
+                   nw.locatie_id     AS nw_locatie_id
+            FROM p2p.juridische_regel jr
+            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                                     AND te.regeling_expression = %s
+            JOIN p2p.juridische_regel_norm jrn
+                   ON jrn.juridische_regel_id = jr.identificatie
+            JOIN p2p.norm n
+                   ON n.identificatie = jrn.norm_id
+            LEFT JOIN p2p.normwaarde nw
+                   ON nw.norm_id = n.identificatie
+            """,
+            (expression,),
+        )
+        nw_rows = cur.fetchall()
+
+    # Groepeer annotaties per regeltekst_wid
+    annot: dict[str, dict] = {}
+    locatie_ids: set[str] = set()
+
+    for row in act_rows:
+        wid = row["regeltekst_wid"]
+        annot.setdefault(wid, {"activiteiten": [], "gebiedsaanwijzingen": [], "normwaarden": []})
+        if row["activiteit_naam"]:
+            entry = {
+                "naam": row["activiteit_naam"],
+                "groep": row["activiteit_groep"],
+                "kwalificatie": row["kwalificatie"],
+            }
+            if entry not in annot[wid]["activiteiten"]:
+                annot[wid]["activiteiten"].append(entry)
+        if row["ala_locatie_id"]:
+            locatie_ids.add(row["ala_locatie_id"])
+
+    for row in ga_rows:
+        wid = row["regeltekst_wid"]
+        annot.setdefault(wid, {"activiteiten": [], "gebiedsaanwijzingen": [], "normwaarden": []})
+        entry = {
+            "id": row["ga_id"],
+            "type": row["ga_type"],
+            "naam": row["ga_naam"],
+            "groep": row["ga_groep"],
+            "locatie_id": row["ga_locatie_id"],
+        }
+        if entry not in annot[wid]["gebiedsaanwijzingen"]:
+            annot[wid]["gebiedsaanwijzingen"].append(entry)
+        locatie_ids.add(row["ga_locatie_id"])
+
+    for row in nw_rows:
+        wid = row["regeltekst_wid"]
+        annot.setdefault(wid, {"activiteiten": [], "gebiedsaanwijzingen": [], "normwaarden": []})
+        entry = {
+            "naam": row["norm_naam"],
+            "type_norm": row["type_norm"],
+            "eenheid": row["eenheid"],
+            "waarde": (
+                float(row["kwantitatieve_waarde"])
+                if row["kwantitatieve_waarde"] is not None
+                else row["kwalitatieve_waarde"]
+            ),
+        }
+        if entry not in annot[wid]["normwaarden"]:
+            annot[wid]["normwaarden"].append(entry)
+        if row.get("nw_locatie_id"):
+            locatie_ids.add(row["nw_locatie_id"])
+
+    # Hang annotaties aan de boom
+    _annoteer_boom(boom, annot)
+
+    return {
+        "regeling": {
+            "expression": regeling["frbr_expression"],
+            "titel": regeling["opschrift"],
+            "type": regeling["documenttype"],
+        },
+        "boom": boom,
+        "locatie_ids": sorted(locatie_ids),
+    }
+
+
+@app.get("/v1/viewer/tekst/{wid}", dependencies=[Depends(verify_key)])
+def viewer_tekst(wid: str):
+    """Tekst-inhoud van een enkel tekst_element (lazy loading)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT inhoud_plain AS tekst FROM p2p.tekst_element WHERE wid = %s LIMIT 1",
+            (wid,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Tekst niet gevonden")
+    return {"wid": wid, "tekst": row["tekst"]}
+
+
+@app.get("/v1/viewer/geometrie", dependencies=[Depends(verify_key)])
+def viewer_geometrie(
+    locatie_ids: str = Query(..., description="Komma-gescheiden locatie-identificaties"),
+):
+    """GeoJSON FeatureCollection voor de opgegeven locaties.
+
+    Geometrie wordt direct uit PostGIS geleverd via ST_AsGeoJSON.
+    """
+    ids = [lid.strip() for lid in locatie_ids.split(",") if lid.strip()]
+    if not ids:
+        return {"type": "FeatureCollection", "features": []}
+
+    with get_conn() as conn, conn.cursor() as cur:
+        # Geometrie + gebiedsaanwijzing-metadata voor kleuring per type
+        cur.execute(
+            """
+            SELECT l.identificatie,
+                   l.locatie_type,
+                   l.noemer,
+                   ga.type  AS ga_type,
+                   ga.naam  AS ga_naam,
+                   ga.groep AS ga_groep,
+                   ST_AsGeoJSON(ST_Transform(l.geometrie, 4326))::json AS geometry
+            FROM p2p.locatie l
+            LEFT JOIN p2p.gebiedsaanwijzing ga ON ga.locatie_id = l.identificatie
+            WHERE l.identificatie = ANY(%s)
+            """,
+            (ids,),
+        )
+        features = [
+            {
+                "type": "Feature",
+                "properties": {
+                    "identificatie": row["identificatie"],
+                    "locatie_type": row["locatie_type"],
+                    "noemer": row["noemer"],
+                    "ga_type": row["ga_type"],
+                    "ga_naam": row["ga_naam"],
+                    "ga_groep": row["ga_groep"],
+                },
+                "geometry": row["geometry"],
+            }
+            for row in cur.fetchall()
+        ]
+
+    return {"type": "FeatureCollection", "features": features}
+
+
+@app.get("/v1/viewer/regeling/{expression:path}/ala", dependencies=[Depends(verify_key)])
+def viewer_ala(
+    expression: str,
+    x: float = Query(None),
+    y: float = Query(None),
+):
+    """ActiviteitLocatieaanduidingen als GeoJSON voor kaartweergave.
+
+    Elke feature is een locatie met als properties de activiteit-naam,
+    kwalificatie, en het artikel waar de ALA uit komt. Dit maakt het
+    mogelijk om op de kaart te tonen waar welke activiteit met welke
+    kwalificatie geldt — vergelijkbaar met "Regels op de kaart".
+    """
+    loc_filter = ""
+    loc_params: list = []
+    if x is not None and y is not None:
+        loc_filter = "AND ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))"
+        loc_params = [x, y]
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT DISTINCT ON (a.naam, ala.kwalificatie, l.identificatie)
+                a.naam              AS activiteit,
+                a.groep             AS activiteit_groep,
+                ala.kwalificatie,
+                te.opschrift        AS artikel,
+                te.wid              AS artikel_wid,
+                l.identificatie     AS locatie_id,
+                l.noemer            AS locatie_noemer,
+                ST_AsGeoJSON(ST_Transform(l.geometrie, 4326))::json AS geometry
+            FROM p2p.activiteit_locatieaanduiding ala
+            JOIN p2p.activiteit a        ON a.identificatie = ala.activiteit_id
+            JOIN p2p.locatie l            ON l.identificatie = ala.locatie_id
+            JOIN p2p.juridische_regel jr  ON jr.identificatie = ala.juridische_regel_id
+            JOIN p2p.tekst_element te     ON te.wid = jr.regeltekst_wid
+                                         AND te.regeling_expression = %s
+            WHERE TRUE {loc_filter}
+            ORDER BY a.naam, ala.kwalificatie, l.identificatie
+            """,
+            (expression, *loc_params),
+        )
+        features = [
+            {
+                "type": "Feature",
+                "properties": {
+                    "activiteit": row["activiteit"],
+                    "activiteit_groep": row["activiteit_groep"],
+                    "kwalificatie": row["kwalificatie"],
+                    "artikel": row["artikel"],
+                    "artikel_wid": row["artikel_wid"],
+                    "locatie_id": row["locatie_id"],
+                    "locatie_noemer": row["locatie_noemer"],
+                },
+                "geometry": row["geometry"],
+            }
+            for row in cur.fetchall()
+        ]
+
+    return {"type": "FeatureCollection", "features": features}
+
+
+@app.get("/v1/viewer/wro/{idn}/detail", dependencies=[Depends(verify_key)])
+def viewer_wro_detail(
+    idn: str,
+    x: float = Query(None),
+    y: float = Query(None),
+):
+    """Wro-bestemmingsplan detail: planobjecten (bestemmingen) + teksten + geometrie.
+
+    Retourneert bestemmingen als GeoJSON features + een teksten-array.
+    Wanneer x/y meegegeven worden, worden alleen objecten geretourneerd
+    die het opgegeven punt raken.
+    """
+    loc_filter = ""
+    loc_params: list = []
+    if x is not None and y is not None:
+        loc_filter = "AND ST_Intersects(po.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))"
+        loc_params = [x, y]
+
+    with get_conn() as conn, conn.cursor() as cur:
+        # Plan-metadata
+        cur.execute(
+            """
+            SELECT ri.idn, ri.naam, ri.type_plan, ri.planstatus, ri.datum,
+                   ri.pons_status, b.naam AS bronhouder
+            FROM wro.ruimtelijk_instrument ri
+            JOIN core.bronhouder b ON b.overheidscode = ri.bronhouder
+            WHERE ri.idn = %s
+            """,
+            (idn,),
+        )
+        plan = cur.fetchone()
+        if not plan:
+            raise HTTPException(404, "Wro-plan niet gevonden")
+
+        # Planobjecten als GeoJSON
+        cur.execute(
+            f"""
+            SELECT po.identificatie, po.object_type, po.naam,
+                   po.bestemmingshoofdgroep, po.artikelnummer,
+                   po.maatvoering_info,
+                   ST_AsGeoJSON(ST_Transform(po.geometrie, 4326))::json AS geometry
+            FROM wro.planobject po
+            WHERE po.instrument_idn = %s {loc_filter}
+            ORDER BY po.object_type, po.naam
+            """,
+            (idn, *loc_params),
+        )
+        features = [
+            {
+                "type": "Feature",
+                "properties": {
+                    "identificatie": row["identificatie"],
+                    "object_type": row["object_type"],
+                    "naam": row["naam"],
+                    "bestemmingshoofdgroep": row["bestemmingshoofdgroep"],
+                    "artikelnummer": row["artikelnummer"],
+                    "maatvoering": row["maatvoering_info"],
+                },
+                "geometry": row["geometry"],
+            }
+            for row in cur.fetchall()
+        ]
+
+        # Teksten
+        cur.execute(
+            """
+            SELECT wt.naam, wt.label, wt.nummer, wt.inhoud,
+                   wt.object_type, wt.niveau
+            FROM wro.wro_tekst_object wt
+            WHERE wt.instrument_idn = %s
+            ORDER BY wt.volgnummer
+            """,
+            (idn,),
+        )
+        teksten = cur.fetchall()
+
+        # Check of er een conv-versie bestaat voor dit plan
+        cur.execute(
+            """
+            SELECT cm.regeling_expression, cm.stap, cm.bron, cm.llm_model
+            FROM conv.conversie_meta cm
+            WHERE cm.instrument_idn = %s
+            ORDER BY cm.stap DESC
+            LIMIT 1
+            """,
+            (idn,),
+        )
+        conv_meta = cur.fetchone()
+
+    return {
+        "plan": {
+            "idn": plan["idn"],
+            "naam": plan["naam"],
+            "type": plan["type_plan"],
+            "status": plan["planstatus"],
+            "datum": str(plan["datum"]) if plan["datum"] else None,
+            "pons_status": plan["pons_status"],
+            "bronhouder": plan["bronhouder"],
+        },
+        "bestemmingen": {"type": "FeatureCollection", "features": features},
+        "teksten": teksten,
+        "conv": {
+            "beschikbaar": conv_meta is not None,
+            "expression": conv_meta["regeling_expression"] if conv_meta else None,
+            "stap": conv_meta["stap"] if conv_meta else None,
+            "bron": conv_meta["bron"] if conv_meta else None,
+            "model": conv_meta["llm_model"] if conv_meta else None,
+        },
+    }
+
+
+@app.get("/v1/viewer/conv/{expression:path}/boom", dependencies=[Depends(verify_key)])
+def viewer_conv_boom(expression: str):
+    """Geconverteerde Wro→Ow boom uit het conv-schema.
+
+    Zelfde structuur als /v1/viewer/regeling/{expression}/boom, maar
+    leest uit conv.* in plaats van p2p.*. Dit maakt het mogelijk om
+    een bestemmingsplan naast de geconverteerde Ow-variant te tonen.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        # Regeling-metadata
+        cur.execute(
+            "SELECT frbr_expression, opschrift, documenttype FROM conv.regeling WHERE frbr_expression = %s",
+            (expression,),
+        )
+        regeling = cur.fetchone()
+        if not regeling:
+            raise HTTPException(404, "Geconverteerde regeling niet gevonden")
+
+        # Documentstructuur
+        cur.execute(
+            """
+            SELECT id, eid, wid, element_type, parent_id,
+                   nummer, opschrift, inhoud AS tekst, volgorde
+            FROM conv.tekst_element
+            WHERE regeling_expression = %s
+            ORDER BY volgorde
+            """,
+            (expression,),
+        )
+        boom = _build_boom(cur.fetchall())
+
+        # Annotaties — activiteiten
+        cur.execute(
+            """
+            SELECT jr.regeltekst_wid,
+                   a.naam AS activiteit_naam,
+                   a.groep AS activiteit_groep,
+                   ala.kwalificatie,
+                   ala.locatie_id AS ala_locatie_id
+            FROM conv.juridische_regel jr
+            JOIN conv.tekst_element te ON te.wid = jr.regeltekst_wid
+                                      AND te.regeling_expression = %s
+            LEFT JOIN conv.activiteit_locatieaanduiding ala
+                   ON ala.juridische_regel_id = jr.identificatie
+            LEFT JOIN conv.activiteit a
+                   ON a.identificatie = ala.activiteit_id
+            """,
+            (expression,),
+        )
+        act_rows = cur.fetchall()
+
+        # Gebiedsaanwijzingen
+        cur.execute(
+            """
+            SELECT jr.regeltekst_wid,
+                   ga.identificatie AS ga_id, ga.type AS ga_type,
+                   ga.naam AS ga_naam, ga.groep AS ga_groep,
+                   ga.locatie_id AS ga_locatie_id
+            FROM conv.juridische_regel jr
+            JOIN conv.tekst_element te ON te.wid = jr.regeltekst_wid
+                                      AND te.regeling_expression = %s
+            JOIN conv.juridische_regel_gebiedsaanwijzing jrga
+                   ON jrga.juridische_regel_id = jr.identificatie
+            JOIN conv.gebiedsaanwijzing ga
+                   ON ga.identificatie = jrga.gebiedsaanwijzing_id
+            """,
+            (expression,),
+        )
+        ga_rows = cur.fetchall()
+
+        # Normwaarden
+        cur.execute(
+            """
+            SELECT jr.regeltekst_wid,
+                   n.naam AS norm_naam, n.type_norm, n.eenheid,
+                   nw.kwantitatieve_waarde, nw.kwalitatieve_waarde,
+                   nw.locatie_id AS nw_locatie_id
+            FROM conv.juridische_regel jr
+            JOIN conv.tekst_element te ON te.wid = jr.regeltekst_wid
+                                      AND te.regeling_expression = %s
+            JOIN conv.juridische_regel_norm jrn
+                   ON jrn.juridische_regel_id = jr.identificatie
+            JOIN conv.norm n ON n.identificatie = jrn.norm_id
+            LEFT JOIN conv.normwaarde nw ON nw.norm_id = n.identificatie
+            """,
+            (expression,),
+        )
+        nw_rows = cur.fetchall()
+
+    # Groepeer annotaties per regeltekst_wid (zelfde logica als viewer_boom)
+    annot: dict[str, dict] = {}
+    locatie_ids: set[str] = set()
+
+    for row in act_rows:
+        wid = row["regeltekst_wid"]
+        annot.setdefault(wid, {"activiteiten": [], "gebiedsaanwijzingen": [], "normwaarden": []})
+        if row["activiteit_naam"]:
+            entry = {"naam": row["activiteit_naam"], "groep": row["activiteit_groep"], "kwalificatie": row["kwalificatie"]}
+            if entry not in annot[wid]["activiteiten"]:
+                annot[wid]["activiteiten"].append(entry)
+        if row.get("ala_locatie_id"):
+            locatie_ids.add(row["ala_locatie_id"])
+
+    for row in ga_rows:
+        wid = row["regeltekst_wid"]
+        annot.setdefault(wid, {"activiteiten": [], "gebiedsaanwijzingen": [], "normwaarden": []})
+        entry = {"id": row["ga_id"], "type": row["ga_type"], "naam": row["ga_naam"], "groep": row["ga_groep"], "locatie_id": row["ga_locatie_id"]}
+        if entry not in annot[wid]["gebiedsaanwijzingen"]:
+            annot[wid]["gebiedsaanwijzingen"].append(entry)
+        locatie_ids.add(row["ga_locatie_id"])
+
+    for row in nw_rows:
+        wid = row["regeltekst_wid"]
+        annot.setdefault(wid, {"activiteiten": [], "gebiedsaanwijzingen": [], "normwaarden": []})
+        entry = {
+            "naam": row["norm_naam"], "type_norm": row["type_norm"], "eenheid": row["eenheid"],
+            "waarde": float(row["kwantitatieve_waarde"]) if row["kwantitatieve_waarde"] is not None else row["kwalitatieve_waarde"],
+        }
+        if entry not in annot[wid]["normwaarden"]:
+            annot[wid]["normwaarden"].append(entry)
+        if row.get("nw_locatie_id"):
+            locatie_ids.add(row["nw_locatie_id"])
+
+    _annoteer_boom(boom, annot)
+
+    # Conversie-metadata
+    conv_meta_row = None
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_idn, stap, bron, llm_model FROM conv.conversie_meta WHERE regeling_expression = %s ORDER BY stap DESC LIMIT 1",
+            (expression,),
+        )
+        conv_meta_row = cur.fetchone()
+
+    return {
+        "regeling": {
+            "expression": regeling["frbr_expression"],
+            "titel": regeling["opschrift"],
+            "type": regeling["documenttype"],
+        },
+        "boom": boom,
+        "locatie_ids": sorted(locatie_ids),
+        "conversie": {
+            "instrument_idn": conv_meta_row["instrument_idn"] if conv_meta_row else None,
+            "stap": conv_meta_row["stap"] if conv_meta_row else None,
+            "bron": conv_meta_row["bron"] if conv_meta_row else None,
+            "model": conv_meta_row["llm_model"] if conv_meta_row else None,
+        } if conv_meta_row else None,
+    }
 
 
 @app.get("/v1/overzicht", dependencies=[Depends(verify_key)])
