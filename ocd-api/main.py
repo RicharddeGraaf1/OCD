@@ -106,12 +106,12 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                    string_agg(DISTINCT a.naam, ' | ') AS activiteit,
                    string_agg(DISTINCT ala.kwalificatie, ' | ') AS kwalificatie
             FROM p2p.activiteit_locatieaanduiding ala
-            JOIN p2p.locatie l ON l.identificatie = ala.locatie_id
+            JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
             JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
             JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
-            WHERE ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+            WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
             {combined_filter}
             GROUP BY r.opschrift, r.documenttype, te.opschrift, te.inhoud
             """,
@@ -126,11 +126,11 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                 """
                 SELECT DISTINCT r.frbr_work, r.opschrift, r.documenttype, r.bronhouder
                 FROM p2p.activiteit_locatieaanduiding ala
-                JOIN p2p.locatie l ON l.identificatie = ala.locatie_id
+                JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
                 JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
                 JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
                 JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
-                WHERE ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
                   AND r.documenttype IN ('Omgevingsplan', 'Waterschapsverordening', 'Omgevingsverordening')
                 """,
                 (x, y),
@@ -433,12 +433,12 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
                 b.naam              AS bronhouder_naam,
                 b.bestuurslaag
             FROM p2p.activiteit_locatieaanduiding ala
-            JOIN p2p.locatie l        ON l.identificatie = ala.locatie_id
+            JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
             JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
             JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
             JOIN p2p.regeling r       ON r.frbr_expression = te.regeling_expression
             JOIN core.bronhouder b    ON b.overheidscode = r.bronhouder
-            WHERE ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+            WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
             ORDER BY r.opschrift, r.frbr_expression DESC
             """,
             (x, y),
@@ -474,8 +474,8 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
             """
             SELECT count(*) AS n
             FROM p2p.pons p
-            JOIN p2p.locatie l ON l.identificatie = p.locatie_id
-            WHERE ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+            JOIN p2p.locatie_subdiv ls ON ls.identificatie = p.locatie_id
+            WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
             """,
             (x, y),
         )
@@ -722,6 +722,109 @@ def viewer_tekst(wid: str):
     return {"wid": wid, "tekst": row["tekst"]}
 
 
+@app.get("/v1/viewer/objecten", dependencies=[Depends(verify_key)])
+def viewer_objecten(x: float = Query(...), y: float = Query(...)):
+    """Alle OW-objecten op een RD-coördinaat, over alle regelingen heen.
+
+    Retourneert gebiedsaanwijzingen, activiteiten met kwalificatie,
+    normwaarden, en Wro-bestemmingen die op dit punt gelden.
+    """
+    point = "ST_SetSRID(ST_MakePoint(%s, %s), 28992)"
+    with get_conn() as conn, conn.cursor() as cur:
+        # Gebiedsaanwijzingen
+        cur.execute(
+            f"""
+            SELECT DISTINCT ga.type, ga.naam, ga.groep,
+                   r.opschrift AS regeling, r.documenttype
+            FROM p2p.gebiedsaanwijzing ga
+            JOIN p2p.locatie_subdiv ls ON ls.identificatie = ga.locatie_id
+            JOIN p2p.juridische_regel_gebiedsaanwijzing jrga
+                   ON jrga.gebiedsaanwijzing_id = ga.identificatie
+            JOIN p2p.juridische_regel jr ON jr.identificatie = jrga.juridische_regel_id
+            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+            WHERE ST_Intersects(ls.geometrie, {point})
+            ORDER BY ga.type, ga.naam
+            """,
+            (x, y),
+        )
+        gebiedsaanwijzingen = cur.fetchall()
+
+        # Activiteiten met kwalificatie
+        cur.execute(
+            f"""
+            SELECT DISTINCT a.naam, a.groep, ala.kwalificatie,
+                   r.opschrift AS regeling
+            FROM p2p.activiteit_locatieaanduiding ala
+            JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
+            JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
+            JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+            WHERE ST_Intersects(ls.geometrie, {point})
+              AND a.is_tophaak = FALSE
+              AND a.naam NOT ILIKE '%%gereguleerd in%%'
+              AND a.naam NOT ILIKE '%%gereguleerd bij%%'
+            ORDER BY a.naam
+            """,
+            (x, y),
+        )
+        activiteiten = cur.fetchall()
+
+        # Normwaarden
+        cur.execute(
+            f"""
+            SELECT DISTINCT n.naam, n.type_norm, n.eenheid,
+                   nw.kwantitatieve_waarde, nw.kwalitatieve_waarde,
+                   r.opschrift AS regeling
+            FROM p2p.normwaarde nw
+            JOIN p2p.norm n ON n.identificatie = nw.norm_id
+            JOIN p2p.locatie_subdiv ls ON ls.identificatie = nw.locatie_id
+            JOIN p2p.juridische_regel_norm jrn ON jrn.norm_id = n.identificatie
+            JOIN p2p.juridische_regel jr ON jr.identificatie = jrn.juridische_regel_id
+            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+            WHERE ST_Intersects(ls.geometrie, {point})
+            ORDER BY n.naam
+            """,
+            (x, y),
+        )
+        normwaarden = [
+            {
+                **row,
+                "waarde": (
+                    float(row["kwantitatieve_waarde"])
+                    if row["kwantitatieve_waarde"] is not None
+                    else row["kwalitatieve_waarde"]
+                ),
+            }
+            for row in cur.fetchall()
+        ]
+
+        # Wro-bestemmingen
+        cur.execute(
+            f"""
+            SELECT DISTINCT po.object_type, po.naam, po.bestemmingshoofdgroep,
+                   ri.naam AS plan
+            FROM wro.planobject po
+            JOIN wro.ruimtelijk_instrument ri ON ri.idn = po.instrument_idn
+            WHERE ST_Intersects(po.geometrie, {point})
+              AND ri.pons_status = 'actief'
+            ORDER BY ri.naam, po.object_type
+            """,
+            (x, y),
+        )
+        wro_bestemmingen = cur.fetchall()
+
+    return {
+        "locatie": {"x": x, "y": y},
+        "gebiedsaanwijzingen": gebiedsaanwijzingen,
+        "activiteiten": activiteiten,
+        "normwaarden": normwaarden,
+        "wro_bestemmingen": wro_bestemmingen,
+    }
+
+
 @app.get("/v1/viewer/geometrie", dependencies=[Depends(verify_key)])
 def viewer_geometrie(
     locatie_ids: str = Query(..., description="Komma-gescheiden locatie-identificaties"),
@@ -744,7 +847,7 @@ def viewer_geometrie(
                    ga.type  AS ga_type,
                    ga.naam  AS ga_naam,
                    ga.groep AS ga_groep,
-                   ST_AsGeoJSON(ST_Transform(l.geometrie, 4326))::json AS geometry
+                   ST_AsGeoJSON(l.geometrie)::json AS geometry
             FROM p2p.locatie l
             LEFT JOIN p2p.gebiedsaanwijzing ga ON ga.locatie_id = l.identificatie
             WHERE l.identificatie = ANY(%s)
@@ -786,7 +889,7 @@ def viewer_ala(
     loc_filter = ""
     loc_params: list = []
     if x is not None and y is not None:
-        loc_filter = "AND ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))"
+        loc_filter = "AND ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))"
         loc_params = [x, y]
 
     with get_conn() as conn, conn.cursor() as cur:
@@ -800,13 +903,14 @@ def viewer_ala(
                 te.wid              AS artikel_wid,
                 l.identificatie     AS locatie_id,
                 l.noemer            AS locatie_noemer,
-                ST_AsGeoJSON(ST_Transform(l.geometrie, 4326))::json AS geometry
+                ST_AsGeoJSON(l.geometrie)::json AS geometry
             FROM p2p.activiteit_locatieaanduiding ala
             JOIN p2p.activiteit a        ON a.identificatie = ala.activiteit_id
             JOIN p2p.locatie l            ON l.identificatie = ala.locatie_id
             JOIN p2p.juridische_regel jr  ON jr.identificatie = ala.juridische_regel_id
             JOIN p2p.tekst_element te     ON te.wid = jr.regeltekst_wid
                                          AND te.regeling_expression = %s
+            {("JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id" if loc_filter else "")}
             WHERE TRUE {loc_filter}
             ORDER BY a.naam, ala.kwalificatie, l.identificatie
             """,
@@ -872,7 +976,7 @@ def viewer_wro_detail(
             SELECT po.identificatie, po.object_type, po.naam,
                    po.bestemmingshoofdgroep, po.artikelnummer,
                    po.maatvoering_info,
-                   ST_AsGeoJSON(ST_Transform(po.geometrie, 4326))::json AS geometry
+                   ST_AsGeoJSON(po.geometrie)::json AS geometry
             FROM wro.planobject po
             WHERE po.instrument_idn = %s {loc_filter}
             ORDER BY po.object_type, po.naam
