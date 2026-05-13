@@ -367,9 +367,14 @@ def parse_tekstdelen(xml_bytes: bytes) -> list[dict]:
 
         locatie_ref = _href(td, f"{{{VT_NS}}}locatieaanduiding/l:LocatieRef")
 
-        thema = td.findtext(f"{{{VT_NS}}}thema")
-        if thema:
-            thema = thema.strip()
+        # IMOW staat 0..* `<vt:thema>`-elementen toe per Tekstdeel; in praktijk
+        # zien we er meestal één, maar findall is robuust voor documenten met
+        # meerdere. Strip whitespace en filter lege strings.
+        themas = [
+            t.strip()
+            for t in (el.text for el in td.findall(f"{{{VT_NS}}}thema"))
+            if t and t.strip()
+        ]
 
         hoofdlijn_refs = []
         for hl_ref in td.findall(f"{{{VT_NS}}}hoofdlijnaanduiding/{{{VT_NS}}}HoofdlijnRef"):
@@ -383,7 +388,8 @@ def parse_tekstdelen(xml_bytes: bytes) -> list[dict]:
                 "divisie_wid": divisie_ref,
                 "idealisatie": idealisatie,
                 "locatie_id": locatie_ref,
-                "thema": thema,
+                "themas": themas,                          # nieuwe naam, list[str]
+                "thema": themas[0] if themas else None,    # backwards-compat (eerste)
                 "hoofdlijn_refs": hoofdlijn_refs,
             })
 

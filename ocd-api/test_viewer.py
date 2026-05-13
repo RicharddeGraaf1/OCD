@@ -250,17 +250,19 @@ class TestObjecten:
         assert r.status_code == 200
         data = r.json()
         assert "gebiedsaanwijzingen" in data
-        assert "activiteiten" in data
+        assert "activiteitlocatieaanduidingen" in data
+        assert "omgevingsnormen" in data
         assert "normwaarden" in data
+        assert "ongetypeerde_locaties" in data
         assert "wro_bestemmingen" in data
 
-    def test_geen_tophaak_activiteiten(self):
-        """Tophaak-activiteiten moeten gefilterd zijn.
+    def test_geen_tophaak_alas(self):
+        """Tophaak-activiteiten moeten gefilterd zijn uit ALA's.
         NB: sommige provinciale tophaken staan niet als is_tophaak in de data."""
         r = client.get(f"/v1/viewer/objecten?x={AMS_X}&y={AMS_Y}")
         tophaak_count = sum(
-            1 for act in r.json()["activiteiten"]
-            if "activiteit gereguleerd in" in act["naam"].lower()
+            1 for ala in r.json()["activiteitlocatieaanduidingen"]
+            if "activiteit gereguleerd in" in ala["naam"].lower()
         )
         # Maximaal een paar mogen doorlekken (data-kwaliteit issue, niet API-bug)
         assert tophaak_count <= 5, \
@@ -276,14 +278,26 @@ class TestObjecten:
         assert "naam" in ga
         assert "regeling" in ga
 
-    def test_activiteit_velden(self):
+    def test_ala_velden(self):
         r = client.get(f"/v1/viewer/objecten?x={AMS_X}&y={AMS_Y}")
-        acts = r.json()["activiteiten"]
-        assert len(acts) > 0
-        act = acts[0]
-        assert "naam" in act
-        assert "kwalificatie" in act
-        assert "regeling" in act
+        alas = r.json()["activiteitlocatieaanduidingen"]
+        assert len(alas) > 0
+        ala = alas[0]
+        assert "naam" in ala
+        assert "kwalificatie" in ala
+        assert "groep" in ala
+        assert "regelingen" in ala
+        assert isinstance(ala["regelingen"], list)
+
+    def test_ongetypeerde_locaties_velden(self):
+        r = client.get(f"/v1/viewer/objecten?x={AMS_X}&y={AMS_Y}")
+        locs = r.json()["ongetypeerde_locaties"]
+        if not locs:
+            pytest.skip("Geen ongetypeerde locaties op deze locatie")
+        loc = locs[0]
+        assert "identificatie" in loc
+        assert "noemer" in loc
+        assert "locatie_type" in loc
 
     def test_zee_locatie_alleen_rijksobjecten(self):
         """Noordzee: alleen Rijks-gebiedsaanwijzingen, geen gemeentelijke."""

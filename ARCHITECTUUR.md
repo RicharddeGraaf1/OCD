@@ -1,6 +1,6 @@
 # OCD Architectuur
 
-**Datum:** 2026-04-15
+**Datum:** 2026-05-04
 
 ---
 
@@ -52,12 +52,12 @@ weerspiegelen. Daaromheen draaien meerdere tools die de data consumeren.
      │  │bronhouder│ │OW-object │ │planobject│ │DMN/STTR  │ │
      │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ │
      │                                                        │
-     │  ┌──────────┐ ┌──────────┐                            │
-     │  │   v2a    │ │   conv   │                            │
-     │  │  0 tbl   │ │ 13 tbl   │                            │
-     │  │vergunning│ │bp → op   │                            │
-     │  │(reserved)│ │conversie │                            │
-     │  └──────────┘ └──────────┘                            │
+     │  ┌──────────┐ ┌──────────┐ ┌──────────────┐          │
+     │  │   v2a    │ │   conv   │ │ p2pwijziging │          │
+     │  │  0 tbl   │ │ 13 tbl   │ │  5 tbl + 2 v │          │
+     │  │vergunning│ │bp → op   │ │ontwerpen +   │          │
+     │  │(reserved)│ │conversie │ │besluitversies│          │
+     │  └──────────┘ └──────────┘ └──────────────┘          │
      └───────┬──────────┬──────────┬──────────┬──────────────┘
              │          │          │          │
     ┌────────▼───┐ ┌────▼─────┐ ┌─▼────────┐ │
@@ -151,23 +151,54 @@ norm, normwaarde, juridische_regel_norm.
 Elke tabel heeft een `bron`-kolom: `'mechanisch'` (stap 1) of
 `'llm-voorstel'` (stap 2).
 
+### `p2pwijziging` — aankomende wijzigingen (5 tabellen + 2 views)
+
+Ontwerpen en besluitversies die wijzigen wat in `p2p` staat.
+Delta-gebaseerd: alleen de annotaties/teksten/locaties die
+toegevoegd, gewijzigd of verwijderd worden t.o.v. de geconsolideerde
+versie. Eén `besluit`-tabel met `soort`-discriminator
+(`'ontwerp' | 'besluitversie'`); de delta-tabellen zijn voor beide
+soorten identiek.
+
+**Tabellen:**
+- `besluit` — metadata (work, expression, status, inwerkingtreding, …)
+- `procedurestap` — bekendmaking, vaststelling, ondertekening, …
+- `tekst_delta` — gewijzigde tekst-elementen met `bewerking` (toevoegen/wijzigen/verwijderen)
+- `annotatie_delta` — gewijzigde IMOW-annotaties (JSONB payload)
+- `locatie_delta` — gewijzigde geometrieën (PostGIS, optioneel ingeladen)
+
+**Views:**
+- `ontwerp` — `SELECT * FROM besluit WHERE soort = 'ontwerp'`
+- `besluitversie` — `SELECT * FROM besluit WHERE soort = 'besluitversie'`
+
+**Filter-logica** (alleen écht aankomende wijzigingen):
+1. Wij moeten de regeling kennen (`p2p.regeling.frbr_work` matcht)
+2. De wijziging introduceert een **andere expression** dan onze huidige
+3. Voor besluitversies: `begin_inwerking >= vandaag`
+4. Voor ontwerpen: `bekend_op >= datum_van_huidige_p2p_versie`
+
+Zie `docs/p2pwijziging.md`.
+
 ---
 
 ## Schema-afhankelijkheden
 
 ```
-core ◄─── p2p   (FK's: bronhouder, regelingmodel, documenttype,
-                  besluitmodel, idealisatie)
-core ◄─── wro   (FK's: bronhouder, planstatus, dossierstatus,
-                  bestemmingshoofdgroep, bouwaanduidingtype, figuurtype,
-                  gebiedsaanduidinghoofdgroep)
-core ◄─── i2a   (FK: aansluiting.bronhouder)
-core ◄─── conv  (FK: regeling.bronhouder)
-p2p  ◄─── i2a   (FK's: regelbeheerobject.activiteit_id,
-                  werkzaamheid.activiteit_id,
-                  aansluiting.activiteit_id)
-wro  ───► conv  (bron-data voor conversie, geen FK)
-p2p  ───► conv  (referentie voor bruidsschat-conflictdetectie, geen FK)
+core ◄─── p2p           (FK's: bronhouder, regelingmodel, documenttype,
+                          besluitmodel, idealisatie)
+core ◄─── wro           (FK's: bronhouder, planstatus, dossierstatus,
+                          bestemmingshoofdgroep, bouwaanduidingtype, figuurtype,
+                          gebiedsaanduidinghoofdgroep)
+core ◄─── i2a           (FK: aansluiting.bronhouder)
+core ◄─── conv          (FK: regeling.bronhouder)
+core ◄─── p2pwijziging  (FK: besluit.bronhouder)
+p2p  ◄─── i2a           (FK's: regelbeheerobject.activiteit_id,
+                          werkzaamheid.activiteit_id,
+                          aansluiting.activiteit_id)
+p2p  ───► p2pwijziging  (filter-referentie: regeling_work +
+                          frbr_expression bepalen relevantie, geen FK)
+wro  ───► conv          (bron-data voor conversie, geen FK)
+p2p  ───► conv          (referentie voor bruidsschat-conflictdetectie, geen FK)
 ```
 
 **Richting:** `core` is de basis, `p2p`/`wro` leunen erop, `i2a` leunt op
@@ -178,12 +209,14 @@ p2p  ───► conv  (referentie voor bruidsschat-conflictdetectie, geen FK)
 ## Dataflow per schema
 
 ```
-DSO Presenteren v8 ──► p2p  (Ow-regelingen, STOP + CIM-OW objecten)
-PDOK + IHR ──────────► wro  (bestemmingsplannen, planobjecten, teksten)
-DSO RTR + STTR ──────► i2a  (toepasbare regels, DMN, werkzaamheden)
-Lookups + bronhouder ► core (waardelijsten, stamgegevens)
-(gepland) OB-scraper ► v2a  (vergunningen uit officielebekendmakingen.nl)
-bp-converter ────────► conv (wro mechanisch + LLM omgezet naar Ow-structuur)
+DSO Presenteren v8 ──────────────► p2p          (Ow-regelingen, STOP + CIM-OW objecten)
+DSO Presenteren v8 ontwerpen ────► p2pwijziging (ontwerpregelingen + besluitversies)
+DSO Presenteren v8 besluitversies ► p2pwijziging
+PDOK + IHR ──────────────────────► wro          (bestemmingsplannen, planobjecten, teksten)
+DSO RTR + STTR ──────────────────► i2a          (toepasbare regels, DMN, werkzaamheden)
+Lookups + bronhouder ────────────► core         (waardelijsten, stamgegevens)
+(gepland) OB-scraper ────────────► v2a          (vergunningen uit officielebekendmakingen.nl)
+bp-converter ────────────────────► conv         (wro mechanisch + LLM omgezet naar Ow-structuur)
 ```
 
 ---
@@ -201,6 +234,19 @@ python -m src.cli pipeline p2p  -f gemeenten.json  # Ow-regelingen
 python -m src.cli pipeline wro  -f gemeenten.json  # Wro-plannen + teksten
 python -m src.cli pipeline i2a  -f gemeenten.json  # IMTR
 python -m src.cli pipeline all  -f gemeenten.json  # Alles in volgorde
+```
+
+**Wijzigingen** (`src/loaders/ontwerp_loader.py`):
+```bash
+python -m src.cli wijziging ontwerpen   # Ontwerpregelingen via Presenteren v8
+python -m src.cli wijziging besluiten   # Besluitversies via Presenteren v8
+python -m src.cli wijziging status      # Overzicht
+```
+
+**Refresh** (`scripts/refresh_p2p_expressions.py`):
+```bash
+python scripts/refresh_p2p_expressions.py  # Houd p2p actueel zodat
+                                           # p2pwijziging-filter klopt
 ```
 
 **Queries** (`src/query.py`):
@@ -272,12 +318,12 @@ Zie `docs/toepasbare-regel-checker.md`.
 
 ---
 
-## Database-omvang (snapshot 2026-04-15)
+## Database-omvang (snapshot 2026-05-04)
 
 | Schema | Tabel | Rijen |
 |---|---|---|
 | core | bronhouder | 399 |
-| p2p | regeling | 1.755 |
+| p2p | regeling | 1.868 |
 | p2p | tekst_element | 614.128 |
 | p2p | juridische_regel | 260.177 |
 | p2p | activiteit | 33.627 |
@@ -290,7 +336,14 @@ Zie `docs/toepasbare-regel-checker.md`.
 | i2a | toepasbaar_regelbestand | 53.379 |
 | i2a | dmn_element | 930.123 |
 | i2a | uitvoeringsregel | 388.887 |
-| | **Totaal** | **~9.500.000** |
+| p2pwijziging | besluit | 214 (198 ontwerp + 16 besluitversie) |
+| p2pwijziging | annotatie_delta | 363.231 |
+| p2pwijziging | locatie_delta | 1.083.472 |
+| conv | regeling | 28.801 |
+| conv | tekst_element | 438.039 |
+| conv | locatie | 3.256.700 |
+| conv | activiteit | 816.773 (matcher) + 2.944 (LLM) |
+| | **Totaal** | **~24.500.000** |
 
 ---
 
@@ -315,6 +368,7 @@ Zie `docs/toepasbare-regel-checker.md`.
 | Migratiescript | `OCD/dso-loader/scripts/migrate_to_keten_schemas.sql` | dso → core/p2p/wro/i2a migratie |
 | Bestemmingsplan-converter | `OCD/docs/bestemmingsplan-converter.md` | 3-staps conversie-ontwerp met conv-schema |
 | Toepasbare-regel-checker | `OCD/docs/toepasbare-regel-checker.md` | DMN vs. artikeltekst vergelijking |
+| p2pwijziging-ontwerp | `OCD/docs/p2pwijziging.md` | Ontwerpen + besluitversies, delta-opslag, filter-logica |
 | OCD-integratie odkwaliteit | `odkwaliteit/docs/plan-ocd-integratie.md` | OCD als databron voor annotatieconformiteit |
 | Omgevingsbot optimalisaties | `omgevingsbot.nl/docs/optimalisaties.md` | 14 verbeterpunten voor RAG-pipeline |
 | Ideeën | `vault_v1/ideeen.md` | 8 productideeën met haalbaarheid |

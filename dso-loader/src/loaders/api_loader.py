@@ -29,6 +29,16 @@ console = Console()
 CRS_RD = "http://www.opengis.net/def/crs/EPSG/0/28992"
 
 
+def _encode_regeling_uri(regeling_uri: str) -> str:
+    """Encode een frbr-work tot DSO-pad-segment.
+
+    DSO Presenteren v8 vervangt zowel `/` als `-` door `_` in regelingen-paden;
+    alleen `/`-substitutie geeft 404 voor regelingen met date- of UUID-segmenten
+    (bv. `/akn/nl/act/ws0653/2023-12-05/fdff9a72-7954-...`).
+    """
+    return regeling_uri.replace("/", "_").replace("-", "_")
+
+
 def _headers():
     return {"X-Api-Key": cfg.DSO_API_KEY}
 
@@ -89,19 +99,33 @@ def find_regelingen(overheid_code: str, naam: str,
 
 # ── Documentstructuur ────────────────────────────────────────────────
 
+_INNER_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _extract_kop_field(kop_xml: str, tag: str) -> str | None:
+    """Pak de inhoud van één Kop-veld (bv. Nummer, Opschrift) als platte tekst.
+
+    DOTALL: STOP-bronnen formatteren `<Kop>` soms compact (alles op één regel)
+    en soms ingesprongen met newlines. Zonder DOTALL faalt de match op het
+    tweede geval geruisloos en raakten we de waarde kwijt — wat te zien was
+    als willekeurig ontbrekende opschriften per artikel.
+
+    Inner-tag-strip: `<Opschrift>` mag mixed content bevatten (`<Inline>`,
+    `<Nadruk>`, …); we willen alleen de leesbare tekst overhouden.
+    """
+    m = re.search(rf"<{tag}>(.*?)</{tag}>", kop_xml, re.DOTALL)
+    if not m:
+        return None
+    text = _INNER_TAG_RE.sub("", m.group(1))
+    text = " ".join(text.split())  # whitespace-normalisatie incl. newlines
+    return text or None
+
+
 def _parse_kop(kop_xml: str | None) -> tuple[str | None, str | None]:
     """Extract Nummer and Opschrift from STOP <Kop> XML snippet."""
     if not kop_xml:
         return None, None
-    nummer = None
-    opschrift = None
-    m = re.search(r"<Nummer>(.*?)</Nummer>", kop_xml)
-    if m:
-        nummer = m.group(1).strip()
-    m = re.search(r"<Opschrift>(.*?)</Opschrift>", kop_xml)
-    if m:
-        opschrift = m.group(1).strip()
-    return nummer, opschrift
+    return _extract_kop_field(kop_xml, "Nummer"), _extract_kop_field(kop_xml, "Opschrift")
 
 
 API_TYPE_TO_STOP = {
@@ -159,7 +183,7 @@ def _flatten_components(components: list[dict], parent_eid: str | None = None,
 
 def load_documentstructuur(conn, regeling_uri: str, expression_id: str):
     """Load document structure via Presenteren API."""
-    encoded = regeling_uri.replace("/", "_")
+    encoded = _encode_regeling_uri(regeling_uri)
     data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen/{encoded}/documentstructuur")
 
     top_components = data.get("_embedded", {}).get("documentComponenten", [])
@@ -167,6 +191,12 @@ def load_documentstructuur(conn, regeling_uri: str, expression_id: str):
 
     if not elements:
         return 0
+
+    from src.loaders.inline_referentie import (
+        extract_inline_referenties,
+        insert_inline_referenties,
+        resolve_target_soort,
+    )
 
     with conn.cursor() as cur:
         eid_to_id = {}
@@ -191,6 +221,16 @@ def load_documentstructuur(conn, regeling_uri: str, expression_id: str):
                     (eid_to_id[elem["parent_eid"]], eid_to_id[elem["eid"]]),
                 )
 
+    for elem in elements:
+        te_id = eid_to_id.get(elem["eid"])
+        if te_id is None:
+            continue
+        refs = extract_inline_referenties(elem["inhoud"])
+        if refs:
+            insert_inline_referenties(conn, te_id, refs)
+
+    resolve_target_soort(conn, regeling_expression=expression_id)
+
     conn.commit()
     return len(elements)
 
@@ -199,7 +239,7 @@ def load_documentstructuur(conn, regeling_uri: str, expression_id: str):
 
 def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
     """Load regeltekstannotaties (artikelstructuur) via Presenteren API."""
-    encoded = regeling_uri.replace("/", "_")
+    encoded = _encode_regeling_uri(regeling_uri)
     data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen/{encoded}/regeltekstannotaties",
                 params={"locatieSelectie": "primair"})
 
@@ -224,19 +264,23 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
             geojson = _get_geometry(geom_id) if geom_id else None
             if geojson:
                 cur.execute(
-                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
-                       VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992))
+                    """INSERT INTO p2p.locatie
+                         (identificatie, locatie_type, noemer, geometrie, geometrie_identificatie)
+                       VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992), %s)
                        ON CONFLICT (identificatie) DO UPDATE SET
-                         geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992)""",
-                    (loc_id, loc_type, noemer, json.dumps(geojson), json.dumps(geojson)),
+                         geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992),
+                         geometrie_identificatie = COALESCE(EXCLUDED.geometrie_identificatie, p2p.locatie.geometrie_identificatie)""",
+                    (loc_id, loc_type, noemer, json.dumps(geojson), geom_id, json.dumps(geojson)),
                 )
                 stats["geometrieen"] += 1
             else:
                 cur.execute(
-                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
-                       VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992))
-                       ON CONFLICT (identificatie) DO NOTHING""",
-                    (loc_id, loc_type, noemer),
+                    """INSERT INTO p2p.locatie
+                         (identificatie, locatie_type, noemer, geometrie, geometrie_identificatie)
+                       VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992), %s)
+                       ON CONFLICT (identificatie) DO UPDATE SET
+                         geometrie_identificatie = COALESCE(EXCLUDED.geometrie_identificatie, p2p.locatie.geometrie_identificatie)""",
+                    (loc_id, loc_type, noemer, geom_id),
                 )
             stats["locaties"] += 1
 
@@ -421,7 +465,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
 
 def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
     """Load divisieannotaties (vrijetekststructuur) via Presenteren API."""
-    encoded = regeling_uri.replace("/", "_")
+    encoded = _encode_regeling_uri(regeling_uri)
     data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen/{encoded}/divisieannotaties",
                 params={"locatieSelectie": "primair"})
 
@@ -437,20 +481,24 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
             geojson = _get_geometry(geom_id) if geom_id else None
             if geojson:
                 cur.execute(
-                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
-                       VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992))
+                    """INSERT INTO p2p.locatie
+                         (identificatie, locatie_type, noemer, geometrie, geometrie_identificatie)
+                       VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992), %s)
                        ON CONFLICT (identificatie) DO UPDATE SET
-                         geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992)""",
+                         geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992),
+                         geometrie_identificatie = COALESCE(EXCLUDED.geometrie_identificatie, p2p.locatie.geometrie_identificatie)""",
                     (loc_id, loc["locatieType"], loc.get("noemer"),
-                     json.dumps(geojson), json.dumps(geojson)),
+                     json.dumps(geojson), geom_id, json.dumps(geojson)),
                 )
                 stats["geometrieen"] += 1
             else:
                 cur.execute(
-                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
-                       VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992))
-                       ON CONFLICT (identificatie) DO NOTHING""",
-                    (loc_id, loc["locatieType"], loc.get("noemer")),
+                    """INSERT INTO p2p.locatie
+                         (identificatie, locatie_type, noemer, geometrie, geometrie_identificatie)
+                       VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992), %s)
+                       ON CONFLICT (identificatie) DO UPDATE SET
+                         geometrie_identificatie = COALESCE(EXCLUDED.geometrie_identificatie, p2p.locatie.geometrie_identificatie)""",
+                    (loc_id, loc["locatieType"], loc.get("noemer"), geom_id),
                 )
             stats["locaties"] += 1
 
@@ -535,9 +583,73 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
 
 # ── Pons + Regelingsgebied (via _expand) ────────────────────────────
 
+def _upsert_locatie_met_kinderen(cur, loc: dict, default_type: str) -> None:
+    """Sla een locatie op met geometrie.
+
+    DSO retourneert Gebiedengroepen (typisch voor Aanwijzingsbesluit N2000,
+    Projectbesluit, Toegangsbeperkingsbesluit) zonder eigen
+    `geometrieIdentificatie`; de geometrie zit dan een laag dieper in
+    `_embedded.omvat[].geometrieIdentificatie`. We slaan elke child-locatie
+    apart op én aggregaten met ST_Union voor de parent.
+    """
+    loc_id = loc["identificatie"]
+    locatie_type = loc.get("locatieType", default_type)
+    noemer = loc.get("noemer")
+
+    geom_id = loc.get("geometrieIdentificatie")
+    if geom_id:
+        geojson = _get_geometry(geom_id)
+        if geojson:
+            cur.execute(
+                """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
+                   VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992))
+                   ON CONFLICT (identificatie) DO UPDATE SET
+                     geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992)""",
+                (loc_id, locatie_type, noemer, json.dumps(geojson), json.dumps(geojson)),
+            )
+            return
+
+    children = loc.get("_embedded", {}).get("omvat", [])
+    geladen_kinderen: list[str] = []
+    for child in children:
+        child_id = child.get("identificatie")
+        child_geom_id = child.get("geometrieIdentificatie")
+        if not child_id or not child_geom_id:
+            continue
+        geojson = _get_geometry(child_geom_id)
+        if not geojson:
+            continue
+        cur.execute(
+            """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
+               VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992))
+               ON CONFLICT (identificatie) DO UPDATE SET
+                 geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992)""",
+            (child_id, child.get("locatieType", "Gebied"), child.get("noemer"),
+             json.dumps(geojson), json.dumps(geojson)),
+        )
+        geladen_kinderen.append(child_id)
+
+    if geladen_kinderen:
+        cur.execute(
+            """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
+               SELECT %s, %s, %s, ST_Union(geometrie)
+               FROM p2p.locatie WHERE identificatie = ANY(%s)
+               ON CONFLICT (identificatie) DO UPDATE SET geometrie = EXCLUDED.geometrie""",
+            (loc_id, locatie_type, noemer, geladen_kinderen),
+        )
+        return
+
+    cur.execute(
+        """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
+           VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992))
+           ON CONFLICT (identificatie) DO NOTHING""",
+        (loc_id, locatie_type, noemer),
+    )
+
+
 def load_regeling_expand(conn, regeling_uri: str, expression_id: str):
     """Load pons and regelingsgebied via GET /regelingen/{id}?_expand=true."""
-    encoded = regeling_uri.replace("/", "_")
+    encoded = _encode_regeling_uri(regeling_uri)
     data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen/{encoded}",
                 params={"_expand": "true"})
 
@@ -559,58 +671,22 @@ def load_regeling_expand(conn, regeling_uri: str, expression_id: str):
         # ── Regelingsgebied ──
         rg = embedded.get("regelingsgebied")
         if rg:
-            rg_id = rg["identificatie"]
-            geom_id = rg.get("geometrieIdentificatie")
-            geojson = _get_geometry(geom_id) if geom_id else None
-            if geojson:
-                cur.execute(
-                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
-                       VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992))
-                       ON CONFLICT (identificatie) DO UPDATE SET
-                         geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992)""",
-                    (rg_id, rg.get("locatieType", "Regelingsgebied"), rg.get("noemer"),
-                     json.dumps(geojson), json.dumps(geojson)),
-                )
-            else:
-                cur.execute(
-                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
-                       VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992))
-                       ON CONFLICT (identificatie) DO NOTHING""",
-                    (rg_id, rg.get("locatieType", "Regelingsgebied"), rg.get("noemer")),
-                )
+            _upsert_locatie_met_kinderen(cur, rg, default_type="Regelingsgebied")
             cur.execute(
                 "UPDATE p2p.regeling SET regelingsgebied_id = %s WHERE frbr_expression = %s",
-                (rg_id, expression_id),
+                (rg["identificatie"], expression_id),
             )
             stats["regelingsgebied"] = True
 
         # ── Pons ──
         pons = embedded.get("pons")
         if pons:
-            pons_id = pons["identificatie"]
-            geom_id = pons.get("geometrieIdentificatie")
-            geojson = _get_geometry(geom_id) if geom_id else None
-            if geojson:
-                cur.execute(
-                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
-                       VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992))
-                       ON CONFLICT (identificatie) DO UPDATE SET
-                         geometrie = ST_SetSRID(ST_GeomFromGeoJSON(%s), 28992)""",
-                    (pons_id, pons.get("locatieType", "Pons"), pons.get("noemer"),
-                     json.dumps(geojson), json.dumps(geojson)),
-                )
-            else:
-                cur.execute(
-                    """INSERT INTO p2p.locatie (identificatie, locatie_type, noemer, geometrie)
-                       VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(0, 0), 28992))
-                       ON CONFLICT (identificatie) DO NOTHING""",
-                    (pons_id, pons.get("locatieType", "Pons"), pons.get("noemer")),
-                )
+            _upsert_locatie_met_kinderen(cur, pons, default_type="Pons")
             cur.execute(
                 """INSERT INTO p2p.pons (identificatie, locatie_id)
                    VALUES (%s, %s)
                    ON CONFLICT (identificatie) DO NOTHING""",
-                (pons_id, pons_id),
+                (pons["identificatie"], pons["identificatie"]),
             )
             stats["pons"] = True
 
@@ -660,13 +736,16 @@ def load_via_api(overheid_code: str, naam: str,
     if bronhouder_code is None:
         bronhouder_code = overheid_code
 
+    from src.db import normalize_bronhouder_code
+    bronhouder_code = normalize_bronhouder_code(bronhouder_code)
+
     conn = get_conn()
     try:
         regelingen = find_regelingen(overheid_code, naam, doc_types)
 
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO core.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                "INSERT INTO core.bronhouder (overheidscode, naam, bestuurslaag) VALUES (%s, %s, 'gemeente') ON CONFLICT DO NOTHING",
                 (bronhouder_code, naam),
             )
         conn.commit()

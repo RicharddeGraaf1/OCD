@@ -49,6 +49,19 @@ def load_wro():
     load_wro_plans()
 
 
+@cli.command("load-wro-structuurvisies")
+@click.option("--niveau", "-n", multiple=True, type=click.Choice(["G", "P", "R"]),
+              help="G=gemeentelijk, P=provinciaal, R=rijk (herhaalbaar). Default: alle.")
+@click.option("--code", "-c", multiple=True,
+              help="Filter op bronhouder-code (pv25, gm0344, rijk). Herhaalbaar.")
+def load_wro_structuurvisies_cmd(niveau, code):
+    """Laad Wro-structuurvisies uit PDOK (provinciaal/gemeentelijk/rijk)."""
+    from src.loaders.wro_pdok import load_wro_structuurvisies
+    niveaus = list(niveau) if niveau else None
+    codes = set(code) if code else None
+    load_wro_structuurvisies(niveaus=niveaus, codes=codes)
+
+
 @cli.command("load-imtr")
 def load_imtr():
     """Load toepasbare regels (RTR activiteiten + STTR regelbestanden)."""
@@ -368,6 +381,61 @@ def pipeline_all(file, code, naam, types, no_wro_teksten):
                          include_wro_teksten=not no_wro_teksten)
     console.print()
     console.print(f"[bold]Pipeline klaar[/bold] — ketens: {list(results.keys())}")
+
+
+@cli.group()
+def wijziging():
+    """p2p-wijzigingen: ontwerpen en besluitversies."""
+    pass
+
+
+@wijziging.command("ontwerpen")
+def wijziging_load_ontwerpen():
+    """Laad alle relevante ontwerpregelingen via Presenteren v8."""
+    from src.loaders.ontwerp_loader import load_alle_ontwerpen
+    load_alle_ontwerpen()
+
+
+@wijziging.command("besluiten")
+def wijziging_load_besluiten():
+    """Laad alle relevante besluitversies via Presenteren v8."""
+    from src.loaders.ontwerp_loader import load_alle_besluitversies
+    load_alle_besluitversies()
+
+
+@wijziging.command("status")
+def wijziging_status():
+    """Toon overzicht van geladen ontwerpen en besluiten."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT soort, status, count(*),
+                       count(*) FILTER (WHERE begin_inwerking > now()) AS toekomstig
+                FROM p2pwijziging.besluit
+                GROUP BY soort, status
+                ORDER BY soort, status
+            """)
+            rows = cur.fetchall()
+
+            tbl = Table(title="p2pwijziging-status")
+            tbl.add_column("Soort")
+            tbl.add_column("Status")
+            tbl.add_column("Aantal", justify="right")
+            tbl.add_column("Toekomstig", justify="right")
+            for r in rows:
+                tbl.add_row(r["soort"], r["status"], str(r["count"]), str(r["toekomstig"]))
+            console.print(tbl)
+
+            cur.execute("""SELECT count(*) FROM p2pwijziging.tekst_delta""")
+            tekst = cur.fetchone()["count"]
+            cur.execute("""SELECT count(*) FROM p2pwijziging.annotatie_delta""")
+            ann = cur.fetchone()["count"]
+            cur.execute("""SELECT count(*) FROM p2pwijziging.locatie_delta""")
+            loc = cur.fetchone()["count"]
+            console.print(f"\n  tekst_delta: {tekst}, annotatie_delta: {ann}, locatie_delta: {loc}")
+    finally:
+        conn.close()
 
 
 @cli.group()

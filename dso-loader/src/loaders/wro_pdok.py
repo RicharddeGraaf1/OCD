@@ -122,15 +122,17 @@ def _load_bestemmingsplangebied(conn, cbs_codes: dict[str, str] | None = None):
 
     console.print(f"  Parsing Bestemmingsplangebied for {len(code_set)} gemeenten...")
 
+    from src.db import normalize_bronhouder_code
     with conn.cursor() as cur:
         for code, naam in cbs_codes.items():
+            gm_code = normalize_bronhouder_code(code)
             cur.execute(
-                "INSERT INTO core.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (code, naam),
+                "INSERT INTO core.bronhouder (overheidscode, naam, bestuurslaag) VALUES (%s, %s, 'gemeente') ON CONFLICT DO NOTHING",
+                (gm_code, naam),
             )
             cur.execute(
                 "INSERT INTO wro.wro_manifest (overheidscode, naam_overheid) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (code, naam),
+                (gm_code, naam),
             )
         for extra in ["onherroepelijk", "vigerend", "goedgekeurd", "geconsolideerde versie",
                       "uitspraak afdeling bestuursrechtspraak", "onbekend"]:
@@ -155,11 +157,12 @@ def _load_bestemmingsplangebied(conn, cbs_codes: dict[str, str] | None = None):
             if not gml_str or not idn:
                 continue
 
+            gm_overheid = normalize_bronhouder_code(overheids_code)
             dossier = idn.rsplit("-", 1)[0] if "-" in idn else idn
             cur.execute(
                 """INSERT INTO wro.wro_dossier (dossiernummer, manifest_code, status)
                    VALUES (%s, %s, NULL) ON CONFLICT DO NOTHING""",
-                (dossier, overheids_code),
+                (dossier, gm_overheid),
             )
 
             cur.execute(
@@ -170,7 +173,7 @@ def _load_bestemmingsplangebied(conn, cbs_codes: dict[str, str] | None = None):
                            ST_GeomFromGML(%s, 28992), %s, 'actief')
                    ON CONFLICT (idn) DO NOTHING""",
                 (idn, dossier, type_plan or "onbekend", naam or "onbekend",
-                 planstatus_val, datum, overheids_code,
+                 planstatus_val, datum, gm_overheid,
                  gml_str, gml_str),
             )
             count += 1
@@ -186,13 +189,15 @@ def _load_bestemmingsplangebied(conn, cbs_codes: dict[str, str] | None = None):
 
 def _load_planobjecten(conn, feature_type: str, object_type: str, cbs_codes: set[str] | None = None):
     """Load planobject features for already-loaded instruments."""
+    from src.db import normalize_bronhouder_code
     gz_path = _download_gml_gz(feature_type)
 
     with conn.cursor() as cur:
         if cbs_codes:
-            cur.execute("SELECT idn FROM wro.ruimtelijk_instrument WHERE bronhouder = ANY(%s)", (list(cbs_codes),))
+            gm_codes = [normalize_bronhouder_code(c) for c in cbs_codes]
+            cur.execute("SELECT idn FROM wro.ruimtelijk_instrument WHERE bronhouder = ANY(%s)", (gm_codes,))
         else:
-            cur.execute("SELECT idn FROM wro.ruimtelijk_instrument WHERE bronhouder = %s", (cfg.POC_CBS_CODE,))
+            cur.execute("SELECT idn FROM wro.ruimtelijk_instrument WHERE bronhouder = %s", (normalize_bronhouder_code(cfg.POC_CBS_CODE),))
         loaded_idns = {row["idn"] for row in cur.fetchall()}
 
     if not loaded_idns:
@@ -252,6 +257,131 @@ def _load_planobjecten(conn, feature_type: str, object_type: str, cbs_codes: set
     conn.commit()
     console.print(f"\n  [green]{count} {feature_type} geladen[/green]")
     return count
+
+
+_PROVINCIE_IMRO_TO_PV = {f"99{n:02d}": f"pv{n:02d}" for n in range(20, 32)}
+_PROVINCIE_NAMEN = {
+    "pv20": "provincie Groningen", "pv21": "provincie Fryslân",
+    "pv22": "provincie Drenthe", "pv23": "provincie Overijssel",
+    "pv24": "provincie Flevoland", "pv25": "provincie Gelderland",
+    "pv26": "provincie Utrecht", "pv27": "provincie Noord-Holland",
+    "pv28": "provincie Zuid-Holland", "pv29": "provincie Zeeland",
+    "pv30": "provincie Noord-Brabant", "pv31": "provincie Limburg",
+}
+
+
+def _structuurvisie_bronhouder(imro_code: str, niveau: str) -> tuple[str, str] | None:
+    """Map IMRO overheidsCode + schaalniveau (G/P/R) naar (bronhouder, naam).
+
+    Niveau G (gemeentelijk): code is gewone 4-digit CBS-code → gm-prefix.
+    Niveau P (provinciaal): code is 99XX → pv-prefix via vaste mapping.
+    Niveau R (rijk): één regeling-bron, code "rijk".
+    """
+    from src.db import normalize_bronhouder_code
+    if niveau == "P":
+        pv = _PROVINCIE_IMRO_TO_PV.get(imro_code)
+        return (pv, _PROVINCIE_NAMEN[pv]) if pv else None
+    if niveau == "G":
+        if imro_code and imro_code.isdigit() and len(imro_code) == 4:
+            return (normalize_bronhouder_code(imro_code), f"gemeente {imro_code}")
+        return None
+    if niveau == "R":
+        return ("rijk", "Rijk")
+    return None
+
+
+def _load_structuurvisieplangebied(conn, niveau: str, code_filter: set[str] | None = None) -> int:
+    """Laad Structuurvisieplangebied_{G|P|R} uit PDOK.
+
+    code_filter: optioneel set bronhouder-codes (pv25, gm0344, rijk) om op te filteren.
+    Geen filter = alle structuurvisies van dat niveau.
+    """
+    feature = f"Structuurvisieplangebied_{niveau}"
+    gz_path = _download_gml_gz(feature)
+
+    console.print(f"  Parsing {feature}{' (filter: ' + ','.join(code_filter) + ')' if code_filter else ''}...")
+
+    count = 0
+    skipped = 0
+    with conn.cursor() as cur:
+        for elem in _iter_features(gz_path, feature):
+            imro_code = _extract_text(elem, "app:overheidsCode")
+            bron = _structuurvisie_bronhouder(imro_code, niveau)
+            if not bron:
+                skipped += 1
+                continue
+            bron_code, bron_naam = bron
+            if code_filter and bron_code not in code_filter:
+                continue
+
+            idn = _extract_text(elem, "app:identificatie")
+            naam = _extract_text(elem, "app:naam")
+            type_plan = _extract_text(elem, "app:typePlan") or "structuurvisie"
+            planstatus = (_extract_text(elem, "app:planstatus") or "onbekend").split(";")[0].strip()
+            datum = _extract_text(elem, "app:datum")
+            gml_str = _extract_gml_geometry(elem)
+            if not gml_str or not idn:
+                continue
+
+            bestuurslaag = {"P": "provincie", "G": "gemeente", "R": "rijk"}.get(niveau, "onbekend")
+            cur.execute(
+                "INSERT INTO core.bronhouder (overheidscode, naam, bestuurslaag) "
+                "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                (bron_code, bron_naam, bestuurslaag),
+            )
+            cur.execute(
+                "INSERT INTO wro.wro_manifest (overheidscode, naam_overheid) "
+                "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (bron_code, bron_naam),
+            )
+            cur.execute(
+                "INSERT INTO core.planstatus (code) VALUES (%s) ON CONFLICT DO NOTHING",
+                (planstatus,),
+            )
+            dossier = idn.rsplit("-", 1)[0] if "-" in idn else idn
+            cur.execute(
+                "INSERT INTO wro.wro_dossier (dossiernummer, manifest_code, status) "
+                "VALUES (%s, %s, NULL) ON CONFLICT DO NOTHING",
+                (dossier, bron_code),
+            )
+            cur.execute(
+                """INSERT INTO wro.ruimtelijk_instrument
+                   (idn, dossier, type_plan, naam, planstatus, datum, bronhouder,
+                    geometrie, gml_source, pons_status)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s,
+                           ST_GeomFromGML(%s, 28992), %s, 'actief')
+                   ON CONFLICT (idn) DO NOTHING""",
+                (idn, dossier, type_plan, naam or "onbekend",
+                 planstatus, datum, bron_code, gml_str, gml_str),
+            )
+            count += 1
+            if count % 100 == 0:
+                conn.commit()
+                console.print(f"\r  {count} structuurvisies geladen...", end="")
+
+    conn.commit()
+    console.print(f"\n  [green]{count} {feature} geladen[/green]"
+                  + (f" ([dim]{skipped} overgeslagen[/dim])" if skipped else ""))
+    return count
+
+
+def load_wro_structuurvisies(niveaus: list[str] | None = None,
+                              codes: set[str] | None = None) -> int:
+    """Laad provinciale/gemeentelijke/rijks-structuurvisies uit PDOK.
+
+    niveaus: subset van {'G','P','R'}; default = alle drie.
+    codes: bronhouder-codes om te filteren (pv25, gm0344, rijk).
+    """
+    niveaus = niveaus or ["G", "P", "R"]
+    conn = get_conn()
+    try:
+        total = 0
+        for niv in niveaus:
+            total += _load_structuurvisieplangebied(conn, niv, codes)
+        console.print(f"[bold green]{total} structuurvisies totaal geladen[/bold green]")
+        return total
+    finally:
+        conn.close()
 
 
 def load_wro_plans(cbs_codes: dict[str, str] | None = None):

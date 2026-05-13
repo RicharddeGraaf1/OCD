@@ -59,6 +59,17 @@ def execute_sql_file(conn: psycopg.Connection, sql: str) -> None:
     conn.commit()
 
 
+def normalize_bronhouder_code(code: str) -> str:
+    """Normaliseer een bronhouder-code naar standaard formaat.
+
+    Gemeenten: '0344' → 'gm0344'
+    Provincies, waterschappen, rijk: 'pv26', 'ws0147', 'mnre1034' → ongewijzigd
+    """
+    if code and len(code) == 4 and code.isdigit():
+        return f"gm{code}"
+    return code
+
+
 def table_count(conn: psycopg.Connection, table: str) -> int:
     """Quick row count for a table."""
     with conn.cursor() as cur:

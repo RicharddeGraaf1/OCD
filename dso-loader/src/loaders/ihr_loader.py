@@ -128,9 +128,11 @@ def load_wro_teksten(cbs_codes: list[str] | None = None):
     try:
         with conn.cursor() as cur:
             if cbs_codes:
+                from src.db import normalize_bronhouder_code
+                gm_codes = [normalize_bronhouder_code(c) for c in cbs_codes]
                 cur.execute(
                     "SELECT idn, naam FROM wro.ruimtelijk_instrument WHERE bronhouder = ANY(%s) ORDER BY idn",
-                    (cbs_codes,))
+                    (gm_codes,))
             else:
                 cur.execute("SELECT idn, naam FROM wro.ruimtelijk_instrument ORDER BY idn")
             instruments = cur.fetchall()

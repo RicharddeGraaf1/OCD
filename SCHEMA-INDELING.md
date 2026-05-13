@@ -1,14 +1,15 @@
 # OCD Schema-indeling — keten-gedreven opsplitsing
 
-**Status:** afgestemd, klaar voor implementatie
-**Datum:** 2026-04-15
-**Scope:** alle tabellen in `src/ddl.py` (DSO Datamodel v1.0)
+**Status:** geïmplementeerd; uitbreidingen lopen door
+**Datum:** 2026-05-04 (initieel 2026-04-15)
+**Scope:** alle tabellen in `src/ddl.py` (DSO Datamodel v1.0+)
 
 ## Achtergrond
 
-De OCD-database heeft op dit moment één schema (`dso`) waarin alle 46 tabellen
-zitten. Dit voorstel splitst die onderverdeling in vijf schema's langs de
-DSO-ketenlogica, met Wro als apart historisch schema:
+De OCD-database is gemigreerd van één `dso`-schema (46 tabellen) naar
+zeven keten-gedreven schema's. Naast de oorspronkelijke vijf zijn er
+later twee bijgekomen: `conv` (bestemmingsplan-conversie, afgeleid)
+en `p2pwijziging` (aankomende wijzigingen op geconsolideerde regelingen).
 
 | Schema | Betekenis | Scope |
 |--------|-----------|-------|
@@ -17,6 +18,8 @@ DSO-ketenlogica, met Wro als apart historisch schema:
 | `wro`  | Oud regime (Wro/IMRO) | bestemmingsplannen, IMRO-planobjecten, tot sunset 2032 |
 | `i2a`  | Idee-tot-afhandeling | toepasbare regels, werkzaamheden, vragenbomen |
 | `v2a`  | Vraag-tot-antwoord | viewer-data, later vergunningen, zoekindex-caches |
+| `conv` | Conversie-output | bestemmingsplan → omgevingsplan (afgeleid uit `wro`) |
+| `p2pwijziging` | Aankomende wijzigingen | ontwerpen + besluitversies, delta op `p2p` |
 
 **Waarom Wro apart:** Wro heeft een eigen technische stack (IMRO/STRI, losse
 loaders, eigen manifest-structuur) en een sunset-datum in 2032. Een apart
@@ -56,17 +59,18 @@ wordt).
 | `toestemmingstype` | dso | IMOW-waardelijst |
 | `documenttype` | dso | STOP-waardelijst |
 
-### `p2p` — plan-tot-publicatie Ow (16 tabellen)
+### `p2p` — plan-tot-publicatie Ow (17 tabellen + 1 matview + 1 view)
 
 Het omgevingsdocument (STOP) en zijn IMOW-annotaties. Alleen het
 huidige Ow-regime; Wro heeft zijn eigen schema.
 
-**STOP — Regelingen & Besluiten (7 tabellen):**
+**STOP — Regelingen & Besluiten (8 tabellen):**
 
 | Tabel | Nu in | Reden |
 |-------|-------|-------|
 | `regeling` | dso | STOP-regeling is het kerninstrument van de planketen |
 | `tekst_element` | dso | Onderdeel van de regeling |
+| `tekst_inline_referentie` | dso | Inline IntIoRef/ExtIoRef/IntRef/ExtRef per tekst_element — type 2 in drieslag tekst↔object |
 | `besluit` | dso | Wijzigt een regeling, hoort bij de planketen |
 | `besluit_regeling` | dso | Junction |
 | `procedurestap` | dso | Procedurele status van besluit |
@@ -93,6 +97,13 @@ huidige Ow-regime; Wro heeft zijn eigen schema.
 | `pons` | dso | Hoort bij Ow-zijde van Wro-Ow overgang |
 | `kaart` | dso | Viewer-metadata gekoppeld aan IMOW-objecten (volgt IMOW-definities) |
 | `kaartlaag` | dso | Koppelt kaart aan gebiedsaanwijzing/norm/activiteit |
+
+**Afgeleide analyse-laag (drieslag tekst↔object):**
+
+| Object | Soort | Reden |
+|---|---|---|
+| `naammatch_signaal` | matview | Type 3 — exacte naam-match tussen object-namen (Activiteit/GA/Norm/Omgevingswaarde) en `tekst_element.inhoud_plain`. Refresh via `scripts/refresh_naammatch_signaal.py`. |
+| `tekst_object_consistentie` | view | Combineert type 1 + 2 + 3 per (tekst_element, object), kent een `consistentie_klasse` toe (consistent_aanwezig, vermoedelijk_vergeten_annotatie, annotatie_zonder_tekstbasis, tegenstrijdige_doelen, overig_inconsistent). Filter hierop voor integriteitssignalen in de OCD-viewer. |
 
 ### `wro` — oud regime (7 tabellen)
 
@@ -133,6 +144,38 @@ Nu leeg. Gereserveerd voor:
 - Zoekindex-caches (pgvector embeddings, full-text materialized views)
 - Viewer-gerichte aggregaties die niet in p2p/i2a thuishoren
 
+### `conv` — conversie-output (13 tabellen)
+
+Bestemmingsplan → omgevingsplan conversie. Afgeleid uit `wro`,
+herhaalbaar (wis en opnieuw draaien). Zelfde tabelstructuur als `p2p`
+plus een `conversie_meta`-tabel met bron-info per regeling
+(`'mechanisch'` / `'llm-voorstel'`). Zie `docs/bestemmingsplan-converter.md`.
+
+### `p2pwijziging` — aankomende wijzigingen (5 tabellen + 2 views)
+
+Ontwerpregelingen en besluitversies die de huidige geconsolideerde
+versie in `p2p` gaan wijzigen. Delta-gebaseerd: alleen de annotaties /
+teksten / locaties die `toegevoegd | gewijzigd | verwijderd` worden.
+
+| Tabel | Reden |
+|---|---|
+| `besluit` | Eén tabel voor beide soorten met `soort` discriminator (`'ontwerp'` / `'besluitversie'`) — delta-tabellen zijn voor beide identiek dus splitsen geeft alleen duplicatie |
+| `procedurestap` | Bekendmaking, vaststelling, ondertekening per besluit |
+| `tekst_delta` | Gewijzigde tekst-elementen met `bewerking` |
+| `annotatie_delta` | Gewijzigde IMOW-annotaties (JSONB payload) |
+| `locatie_delta` | Gewijzigde geometrieën (PostGIS, optioneel) |
+
+**Views:** `ontwerp` en `besluitversie` filteren `besluit` op `soort` —
+zo kun je expliciet kiezen of de discriminator weglaten.
+
+**Filter-logica** (alleen écht aankomende wijzigingen):
+1. Wij moeten de regeling kennen (`p2p.regeling.frbr_work` matcht)
+2. De wijziging introduceert een **andere expression** dan onze huidige
+3. Voor besluitversies: `begin_inwerking >= vandaag`
+4. Voor ontwerpen: `bekend_op >= datum_van_huidige_p2p_versie`
+
+Zie `docs/p2pwijziging.md` voor volledige uitleg.
+
 ---
 
 ## Cross-schema FK's (verwacht, geen probleem)
@@ -156,6 +199,15 @@ Postgres ondersteunt cross-schema FK's zonder meerkosten. Verwachte links:
 - `planobject.bouwaanduidingtype → core.bouwaanduidingtype`
 - `planobject.figuurtype → core.figuurtype`
 - `planobject.gebiedsaanduidinghoofdgroep → core.gebiedsaanduidinghoofdgroep`
+
+**p2pwijziging → core:**
+- `besluit.bronhouder → core.bronhouder`
+
+**p2pwijziging → p2p (filter, geen FK):**
+- `besluit.regeling_work` matcht met `p2p.regeling.frbr_work`
+  voor relevantie-bepaling. Geen harde FK omdat de regeling-work
+  een vrij identificator is (kan ook van regelingen zijn die wij
+  niet kennen — die worden door de loader gefilterd).
 
 **i2a → p2p:**
 - `regelbeheerobject.activiteit_id → p2p.activiteit`

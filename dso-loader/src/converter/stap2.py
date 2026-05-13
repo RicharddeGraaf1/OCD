@@ -10,32 +10,62 @@ import os
 import re
 import uuid
 
-from groq import Groq
+import httpx
 from rich.console import Console
 
 from src.db import get_conn
 
 console = Console()
 
-# ── Groq client ──────────────────────────────────────────────────────
-
-_client: Groq | None = None
-
-
-def _groq() -> Groq:
-    global _client
-    if _client is None:
-        api_key = os.getenv("GROQ_API_KEY", "")
-        if not api_key:
-            raise RuntimeError("GROQ_API_KEY niet gezet in .env")
-        _client = Groq(api_key=api_key)
-    return _client
+# ── LLM client (Ollama of Groq) ─────────────────────────────────────
 
 
 def _llm(system: str, user: str, temperature: float = 0.1) -> str:
-    """Eén LLM-call naar Groq."""
+    """Eén LLM-call via Ollama (lokaal) of Groq (cloud).
+
+    Selectie via LLM_PROVIDER env var: 'ollama' (default) of 'groq'.
+    """
+    provider = os.getenv("LLM_PROVIDER", "ollama")
+
+    if provider == "groq":
+        return _llm_groq(system, user, temperature)
+    else:
+        return _llm_ollama(system, user, temperature)
+
+
+def _llm_ollama(system: str, user: str, temperature: float) -> str:
+    """LLM-call via lokale Ollama."""
+    model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+    resp = httpx.post(
+        f"{base}/api/chat",
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "stream": False,
+            "options": {"temperature": temperature},
+        },
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json().get("message", {}).get("content", "")
+
+
+def _llm_groq(system: str, user: str, temperature: float) -> str:
+    """LLM-call via Groq cloud API."""
+    from groq import Groq
+
+    api_key = os.getenv("GROQ_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY niet gezet in .env")
+
+    client = Groq(api_key=api_key)
     model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    resp = _groq().chat.completions.create(
+    resp = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system},
@@ -263,7 +293,7 @@ def store_normen(conn, regeling_expr: str, artikel: dict,
                 ON CONFLICT DO NOTHING
             """, (norm_id, naam, type_norm, eenheid))
 
-            # Normwaarde
+            # Normwaarde — onderscheid kwantitatief vs kwalitatief
             waarde = norm.get("waarde")
             if waarde is not None:
                 cur.execute("""
@@ -274,11 +304,20 @@ def store_normen(conn, regeling_expr: str, artikel: dict,
                 """, (f"%gm{bronhouder}%",))
                 loc = cur.fetchone()
                 if loc:
-                    cur.execute("""
-                        INSERT INTO conv.normwaarde
-                            (norm_id, locatie_id, kwantitatieve_waarde)
-                        VALUES (%s, %s, %s)
-                    """, (norm_id, loc["identificatie"], waarde))
+                    # Probeer als getal, anders als kwalitatieve waarde
+                    try:
+                        num_waarde = float(waarde)
+                        cur.execute("""
+                            INSERT INTO conv.normwaarde
+                                (norm_id, locatie_id, kwantitatieve_waarde)
+                            VALUES (%s, %s, %s)
+                        """, (norm_id, loc["identificatie"], num_waarde))
+                    except (ValueError, TypeError):
+                        cur.execute("""
+                            INSERT INTO conv.normwaarde
+                                (norm_id, locatie_id, kwalitatieve_waarde)
+                            VALUES (%s, %s, %s)
+                        """, (norm_id, loc["identificatie"], str(waarde)))
 
             # Koppel aan juridische regel (als die er is voor dit artikel)
             cur.execute("""

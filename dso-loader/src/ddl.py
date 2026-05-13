@@ -95,6 +95,35 @@ CREATE TABLE IF NOT EXISTS core.documenttype (
     code TEXT PRIMARY KEY
 );
 
+-- IMOW Thema-waardelijst (versie 5.1.0). 28 waarden, 7 deprecated.
+-- `term` is de IMOW-term (PascalCase), `label` is de presentatie-vorm
+-- (lowercase met spaties) zoals die ook in `tekstdeel.thema` opgeslagen
+-- staat — de label is de natural key voor JOIN's.
+-- Bron: vault_v1/raw/valuelists/imow/5.1.0/waardelijsten IMOW 5.1.0.json
+CREATE TABLE IF NOT EXISTS core.imow_thema (
+    label       TEXT PRIMARY KEY,            -- 'bouwen', 'erfgoed', …
+    term        TEXT NOT NULL UNIQUE,        -- 'Bouwen', 'Erfgoed', …
+    deprecated  BOOLEAN NOT NULL DEFAULT FALSE,
+    uri         TEXT NULL                    -- volledige IMOW-URI (informatief)
+);
+CREATE INDEX IF NOT EXISTS imow_thema_deprecated_idx
+    ON core.imow_thema (deprecated);
+
+-- Side-mapping voor hoofdlijn-soort. De IMOW-XML levert vrij-tekst soorten
+-- (47+ varianten met case-verschillen, '-'-placeholder en ad-hoc beleids-
+-- teksten als soort). Deze mapping rust raw → canonical zodat filters in
+-- de viewer met een schone taxonomie werken; raw blijft op p2p.hoofdlijn
+-- staan voor auditability. `reviewed=FALSE` markeert auto-gegenereerde
+-- (lowercase + trim) entries die nog door een mens bekeken moeten worden.
+CREATE TABLE IF NOT EXISTS core.hoofdlijn_soort_mapping (
+    raw_value   TEXT PRIMARY KEY,
+    canonical   TEXT NOT NULL,
+    reviewed    BOOLEAN NOT NULL DEFAULT FALSE,
+    notitie     TEXT NULL
+);
+CREATE INDEX IF NOT EXISTS hoofdlijn_soort_mapping_canonical_idx
+    ON core.hoofdlijn_soort_mapping (canonical);
+
 CREATE TABLE IF NOT EXISTS core.waardelijst (
     uri             TEXT PRIMARY KEY,
     waardelijst     TEXT NOT NULL,
@@ -107,6 +136,7 @@ CREATE TABLE IF NOT EXISTS core.waardelijst (
 CREATE TABLE IF NOT EXISTS core.bronhouder (
     overheidscode   TEXT PRIMARY KEY,
     naam            TEXT NOT NULL,
+    label           TEXT NULL,
     oin             TEXT NULL,
     bestuurslaag    TEXT NULL,
     ow_geladen      BOOLEAN NOT NULL DEFAULT FALSE,
@@ -115,7 +145,8 @@ CREATE TABLE IF NOT EXISTS core.bronhouder (
     wro_teksten_geladen BOOLEAN NOT NULL DEFAULT FALSE,
     ow_regelingen   INT NOT NULL DEFAULT 0,
     wro_instrumenten INT NOT NULL DEFAULT 0,
-    laatst_geladen  TIMESTAMP NULL
+    laatst_geladen  TIMESTAMP NULL,
+    geldig_tot      DATE NULL
 );
 
 -- =============================================================
@@ -349,7 +380,8 @@ CREATE TABLE IF NOT EXISTS wro.ruimtelijk_instrument (
     bronhouder          TEXT NOT NULL REFERENCES core.bronhouder(overheidscode),
     geometrie           GEOMETRY(Geometry, 28992) NOT NULL,
     gml_source          TEXT NULL,
-    pons_status         TEXT NOT NULL DEFAULT 'actief'
+    pons_status         TEXT NOT NULL DEFAULT 'actief',
+    laatst_geladen      TIMESTAMP NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_wro_instrument_geom ON wro.ruimtelijk_instrument USING GIST(geometrie);
 CREATE INDEX IF NOT EXISTS idx_wro_instrument_bronhouder ON wro.ruimtelijk_instrument(bronhouder);
@@ -458,6 +490,108 @@ CREATE TABLE IF NOT EXISTS i2a.aansluiting (
     bronhouder          TEXT NULL REFERENCES core.bronhouder(overheidscode),
     regelbestand_ns     TEXT NULL REFERENCES i2a.toepasbaar_regelbestand(namespace)
 );
+
+-- =============================================================
+-- p2pwijziging.* — Ontwerpen en besluitversies (delta-gebaseerd)
+-- =============================================================
+-- Slaat alleen wijzigingen op (toevoegen/wijzigen/verwijderen)
+-- t.o.v. de geconsolideerde versie in p2p. Filter:
+-- alleen ontwerpen/besluiten die de huidige geldende versie
+-- wijzigen OF in de toekomst in werking treden.
+
+CREATE SCHEMA IF NOT EXISTS p2pwijziging;
+COMMENT ON SCHEMA p2pwijziging IS 'Wijzigingen op geconsolideerde regelingen: ontwerpen en besluitversies, delta-gebaseerd';
+
+CREATE TABLE IF NOT EXISTS p2pwijziging.besluit (
+    ontwerpbesluit_id        TEXT PRIMARY KEY,
+    technisch_id             TEXT NOT NULL UNIQUE,
+    regeling_work            TEXT NOT NULL,
+    wijzigt_expression       TEXT,
+    nieuwe_expression        TEXT,
+    soort                    TEXT NOT NULL,
+    status                   TEXT NOT NULL,
+    bekend_op                DATE,
+    ontvangen_op             DATE,
+    begin_geldigheid         DATE,
+    begin_inwerking          DATE,
+    eindverantwoordelijke    TEXT,
+    bronhouder               TEXT REFERENCES core.bronhouder(overheidscode),
+    documenttype             TEXT,
+    opschrift                TEXT,
+    citeertitel              TEXT,
+    publicatie_id            TEXT,
+    beschikbaar_op           TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_besluit_work ON p2pwijziging.besluit(regeling_work);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_besluit_wijzigt ON p2pwijziging.besluit(wijzigt_expression);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_besluit_inwerking ON p2pwijziging.besluit(begin_inwerking);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_besluit_status ON p2pwijziging.besluit(status);
+
+CREATE TABLE IF NOT EXISTS p2pwijziging.procedurestap (
+    id                       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ontwerpbesluit_id        TEXT NOT NULL REFERENCES p2pwijziging.besluit(ontwerpbesluit_id) ON DELETE CASCADE,
+    soort                    TEXT NOT NULL,
+    voltooid_op              DATE,
+    plaats                   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_procedurestap ON p2pwijziging.procedurestap(ontwerpbesluit_id);
+
+CREATE TABLE IF NOT EXISTS p2pwijziging.tekst_delta (
+    id                       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ontwerpbesluit_id        TEXT NOT NULL REFERENCES p2pwijziging.besluit(ontwerpbesluit_id) ON DELETE CASCADE,
+    eid                      TEXT NOT NULL,
+    wid                      TEXT NOT NULL,
+    element_type             TEXT,
+    bewerking                TEXT NOT NULL CHECK (bewerking IN ('toevoegen', 'wijzigen', 'verwijderen')),
+    nummer                   TEXT,
+    opschrift                TEXT,
+    inhoud_nieuw             TEXT,
+    parent_eid               TEXT,
+    volgorde                 INT NOT NULL DEFAULT 0,
+    UNIQUE (ontwerpbesluit_id, eid)
+);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_tekst_besluit ON p2pwijziging.tekst_delta(ontwerpbesluit_id);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_tekst_wid ON p2pwijziging.tekst_delta(wid);
+
+CREATE TABLE IF NOT EXISTS p2pwijziging.annotatie_delta (
+    id                       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ontwerpbesluit_id        TEXT NOT NULL REFERENCES p2pwijziging.besluit(ontwerpbesluit_id) ON DELETE CASCADE,
+    type                     TEXT NOT NULL,
+    identificatie            TEXT NOT NULL,
+    bewerking                TEXT NOT NULL CHECK (bewerking IN ('toevoegen', 'wijzigen', 'verwijderen')),
+    naam                     TEXT,
+    payload                  JSONB NOT NULL,
+    UNIQUE (ontwerpbesluit_id, type, identificatie)
+);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_ann_besluit ON p2pwijziging.annotatie_delta(ontwerpbesluit_id);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_ann_type ON p2pwijziging.annotatie_delta(type);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_ann_id ON p2pwijziging.annotatie_delta(identificatie);
+
+CREATE TABLE IF NOT EXISTS p2pwijziging.locatie_delta (
+    id                       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ontwerpbesluit_id        TEXT NOT NULL REFERENCES p2pwijziging.besluit(ontwerpbesluit_id) ON DELETE CASCADE,
+    locatie_id               TEXT NOT NULL,
+    bewerking                TEXT NOT NULL CHECK (bewerking IN ('toevoegen', 'wijzigen', 'verwijderen')),
+    locatie_type             TEXT,
+    noemer                   TEXT,
+    geometrie                GEOMETRY(Geometry, 28992),
+    UNIQUE (ontwerpbesluit_id, locatie_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_loc_besluit ON p2pwijziging.locatie_delta(ontwerpbesluit_id);
+CREATE INDEX IF NOT EXISTS idx_ontwerp_loc_geom ON p2pwijziging.locatie_delta USING GIST(geometrie);
+
+-- Check constraints op besluit
+ALTER TABLE p2pwijziging.besluit DROP CONSTRAINT IF EXISTS besluit_soort_check;
+ALTER TABLE p2pwijziging.besluit DROP CONSTRAINT IF EXISTS besluit_status_check;
+ALTER TABLE p2pwijziging.besluit
+  ADD CONSTRAINT besluit_soort_check CHECK (soort IN ('ontwerp', 'besluitversie')),
+  ADD CONSTRAINT besluit_status_check CHECK (status IN ('ontwerp', 'ter_inzage', 'vastgesteld', 'in_werking'));
+
+-- Views voor expliciete leesbaarheid per soort
+CREATE OR REPLACE VIEW p2pwijziging.ontwerp AS
+  SELECT * FROM p2pwijziging.besluit WHERE soort = 'ontwerp';
+CREATE OR REPLACE VIEW p2pwijziging.besluitversie AS
+  SELECT * FROM p2pwijziging.besluit WHERE soort = 'besluitversie';
 
 -- =============================================================
 -- v2a.* — Vraag-tot-antwoord: gereserveerd, nu leeg

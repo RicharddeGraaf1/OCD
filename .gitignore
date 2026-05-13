@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# IDE & tooling
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude lokale state
+.claude/settings.local.json
+.claude/*.lock
+
+# Database / data dumps
+*.sqlite
+*.db
+*.dump
+
+# OS
+.DS_Store
+Thumbs.db

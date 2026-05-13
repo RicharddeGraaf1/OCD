@@ -11,7 +11,9 @@ Levert op:
   - conv.conversie_meta (metadata)
 """
 
+import os
 import re
+import sys
 import uuid
 from collections import defaultdict
 
@@ -20,7 +22,9 @@ from rich.console import Console
 
 from src.db import get_conn
 
-console = Console()
+# Fix Windows console encoding
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+console = Console(highlight=False)
 
 # ── Mappingtabel bestemmingshoofdgroep → Ow-functie ──────────────────
 
@@ -121,7 +125,12 @@ def _derive_chapter_name(slug: str, child_rows: list[dict]) -> str:
 
 def _make_eid(niveau: int, nummer: str | None, volgnummer: int,
               parent_eid: str | None) -> str:
-    """Genereer STOP-conforme eId op basis van niveau en nummering."""
+    """Genereer STOP-conforme eId op basis van niveau en nummering.
+
+    Met `parent_eid` wordt de eId genest (`{parent}__chp_X` / `__art_X`),
+    zodat top-level containers (Lichaam/Bijlage/Toelichting) hoofdstukken
+    met identiek nummer in verschillende secties uniek kunnen houden.
+    """
     if nummer:
         # Gebruik het bestemmingsplan-nummer voor stabiele eId's
         parts = nummer.replace(".", "_")
@@ -129,12 +138,10 @@ def _make_eid(niveau: int, nummer: str | None, volgnummer: int,
     else:
         clean = str(volgnummer)
 
-    if niveau <= 1:
-        return f"chp_{clean}"
-    elif parent_eid:
-        return f"{parent_eid}__art_{clean}"
-    else:
-        return f"art_{clean}"
+    prefix = "chp" if niveau <= 1 else "art"
+    if parent_eid:
+        return f"{parent_eid}__{prefix}_{clean}"
+    return f"{prefix}_{clean}"
 
 
 def _element_type_from_niveau(niveau: int, object_type: str) -> str:
@@ -148,6 +155,40 @@ def _element_type_from_niveau(niveau: int, object_type: str) -> str:
     if object_type.lower() in ("lid",):
         return "Lid"
     return "Artikel"
+
+
+# ── Bucket-classificatie: Lichaam / Bijlage / Toelichting ───────────
+
+# STOP-conforme top-level containers. De viewer-frontend filtert op deze
+# `element_type`-waarden om de tabs Regels/Bijlagen/Toelichting te vullen.
+_BUCKETS = ("Lichaam", "Bijlage", "Toelichting")
+_BUCKET_EID = {
+    "Lichaam":     "body",
+    "Bijlage":     "bijlage",
+    "Toelichting": "toelichting",
+}
+
+
+def _classify_root(naam: str | None, object_type: str | None) -> str:
+    """Map een wro top-level rij naar bucket Lichaam/Bijlage/Toelichting.
+
+    `object_type` is het primaire signaal (door de IHR-loader uit de titel
+    afgeleid). Voor generieke types ('Overig', 'Hoofdstuk') vallen we
+    terug op een prefix-match op de naam zelf.
+    """
+    ot = (object_type or "").lower()
+    if ot == "bijlage":
+        return "Bijlage"
+    if ot == "toelichting":
+        return "Toelichting"
+    if ot == "regels":
+        return "Lichaam"
+    n = (naam or "").lower().strip()
+    if n.startswith("bijlage"):
+        return "Bijlage"
+    if n.startswith("toelichting"):
+        return "Toelichting"
+    return "Lichaam"
 
 
 # ── Stap 1.1: Regeling ──────────────────────────────────────────────
@@ -218,6 +259,22 @@ def convert_tekst(conn: psycopg.Connection, instrument_idn: str,
             if r["parent_id"]:
                 children_by_parent[r["parent_id"]].append(r)
 
+        # Bucket per rij — door de boom omhoog wandelen tot de rootrij die
+        # zichzelf classificeert (Regels/Bijlage/Toelichting/Overig). Een rij
+        # waarvan parent_id naar een niet-bestaande string wijst valt onder
+        # virtual_parents en zit niet in deze map; die krijgen Lichaam.
+        rows_by_id = {r["identificatie"]: r for r in rows}
+
+        def _bucket_for_row(r: dict, depth: int = 0) -> str:
+            if depth > 50:
+                return "Lichaam"
+            pid = r.get("parent_id")
+            if pid is None or pid not in rows_by_id:
+                return _classify_root(r.get("naam"), r.get("object_type"))
+            return _bucket_for_row(rows_by_id[pid], depth + 1)
+
+        row_bucket: dict[str, str] = {r["identificatie"]: _bucket_for_row(r) for r in rows}
+
         seen_nummers: dict[str, int] = {}  # track duplicaat-nummers
         for r in rows:
             pid = r["parent_id"]
@@ -241,94 +298,182 @@ def convert_tekst(conn: psycopg.Connection, instrument_idn: str,
                 else:
                     seen_nummers[nummer] = 1
 
+                # Bucket voor virtuele parents: zelfde heuristiek op de slug
+                # (meeste virtuele hoofdstukken zijn gewoon planregels →
+                # Lichaam, maar een slug die met "Bijlage"/"Toelichting" begint
+                # belandt in de juiste sectie).
+                vp_bucket = _classify_root(naam, None)
+
                 virtual_parents[pid] = {
                     "nummer": nummer,
                     "naam": naam,
                     "niveau": 1,
                     "volgnummer": 0,
+                    "bucket": vp_bucket,
                 }
 
         # Stap B: Bouw alle elementen op (virtuele parents + echte rijen)
-        elements = []  # (volgnummer, is_virtual, data)
+        # Pass B1: bepaal de FINALE eId per chapter (niveau ≤ 1) met
+        # disambiguatie. Twee "Hoofdstuk 1"-en in dezelfde bucket — bv.
+        # "Bijlagen bij regels" + "Bijlagen bij toelichting" beide met een
+        # ongenummerd `1` — krijgen daar `__2`, `__3` achteraan zodat de
+        # UNIQUE-constraint op (regeling_expression, eid) niet sneuvelt.
+        elements: list[dict] = []
+        chapter_eid_by_orig: dict[str, str] = {}
+        seen_chapter_eids: dict[str, int] = {}
 
-        # Root element
-        root_row = next((r for r in rows if r["parent_id"] is None), None)
+        def _claim_chapter_eid(base: str) -> str:
+            if base not in seen_chapter_eids:
+                seen_chapter_eids[base] = 1
+                return base
+            seen_chapter_eids[base] += 1
+            return f"{base}__{seen_chapter_eids[base]}"
 
         # Virtuele hoofdstukken
         for pid, vp in virtual_parents.items():
-            eid = _make_eid(1, vp["nummer"], 0, None)
-            wid = f"gm{bronhouder}__{eid}"
+            container_eid = _BUCKET_EID[vp["bucket"]]
+            base_eid = _make_eid(1, vp["nummer"], 0, container_eid)
+            eid = _claim_chapter_eid(base_eid)
+            chapter_eid_by_orig[pid] = eid
             elements.append({
                 "eid": eid,
-                "wid": wid,
+                "wid": f"gm{bronhouder}__{eid}",
                 "element_type": "Hoofdstuk",
                 "nummer": vp["nummer"],
                 "opschrift": vp["naam"],
                 "inhoud": None,
-                "parent_eid": None,  # direct onder root
+                "parent_eid": container_eid,
+                "bucket": vp["bucket"],
                 "sort_key": (int(re.match(r"(\d+)", vp["nummer"]).group(1)) if re.match(r"\d", vp["nummer"]) else 999, chapter_counter),
                 "original_id": pid,
             })
 
-        # Echte tekst-objecten (geen root)
+        # Echte niveau-1 chapters die direct onder een (geskipte) root hangen
+        for r in rows:
+            if r["parent_id"] is None or r["niveau"] > 1:
+                continue
+            parent_row = rows_by_id.get(r["parent_id"])
+            if parent_row is None or parent_row.get("parent_id") is not None:
+                # Geen echte chapter-positie (parent is virtueel of geneste rij)
+                continue
+            bucket = row_bucket[r["identificatie"]]
+            container_eid = _BUCKET_EID[bucket]
+            base_eid = _make_eid(1, r["nummer"], r["volgnummer"], container_eid)
+            eid = _claim_chapter_eid(base_eid)
+            chapter_eid_by_orig[r["identificatie"]] = eid
+            nr_parts = r["nummer"].split(".") if r["nummer"] else [str(r["volgnummer"])]
+            sort_key = tuple(int(p) if p.isdigit() else 999 for p in nr_parts)
+            elements.append({
+                "eid": eid,
+                "wid": f"gm{bronhouder}__{eid}",
+                "element_type": "Hoofdstuk",
+                "nummer": r["nummer"],
+                "opschrift": r["naam"] or r["label"],
+                "inhoud": r["inhoud"],
+                "parent_eid": container_eid,
+                "bucket": bucket,
+                "sort_key": sort_key,
+                "original_id": r["identificatie"],
+                "original_parent_id": r["parent_id"],
+            })
+
+        # Pass B2: artikelen / leden / overige rijen
         for r in rows:
             if r["parent_id"] is None:
-                continue  # skip root
+                continue  # root — vertegenwoordigd door bucket-container
+            if r["identificatie"] in chapter_eid_by_orig:
+                continue  # al verwerkt als chapter
 
-            # Bepaal parent eId
-            parent_eid = None
-            if r["parent_id"] in virtual_parents:
-                vp = virtual_parents[r["parent_id"]]
-                parent_eid = _make_eid(1, vp["nummer"], 0, None)
-            # Check of parent_id een bestaande rij is
+            bucket = row_bucket[r["identificatie"]]
+            container_eid = _BUCKET_EID[bucket]
+
+            # Parent eId resoluties:
+            # 1) parent is een chapter (virtueel of echt): pak de finale eId.
+            # 2) parent is een geneste rij: deferred — insert-fase regelt het
+            #    via original_parent_id-lookup.
+            parent_eid: str | None = None
+            if r["parent_id"] in chapter_eid_by_orig:
+                parent_eid = chapter_eid_by_orig[r["parent_id"]]
             elif r["parent_id"] in existing_ids:
-                # Zoek de parent in eerder verwerkte elements
-                # (wordt in de insert-fase opgelost via parent_id mapping)
                 parent_eid = "__deferred__"
 
-            eid = _make_eid(r["niveau"], r["nummer"], r["volgnummer"], parent_eid if parent_eid != "__deferred__" else None)
-            wid = f"gm{bronhouder}__{eid}"
-            el_type = _element_type_from_niveau(r["niveau"], r["object_type"])
+            # eId-prefix: gebruik chapter-eId als die bekend is, anders fall
+            # back op de container zodat geneste artikel-eIds niet anoniem
+            # `art_X` worden (en zo conflicten geven over secties heen).
+            eid_prefix = parent_eid if parent_eid and parent_eid != "__deferred__" else container_eid
+            eid = _make_eid(r["niveau"], r["nummer"], r["volgnummer"], eid_prefix)
+            # Best-effort uniekheid voor articles (bv. twee "1.1" leden onder
+            # geneste deferred parents in dezelfde sectie). Hergebruik hetzelfde
+            # disambiguatie-mechanisme, maar zonder de chapter-mapping te
+            # vervuilen — articles zijn nooit parent van een ander item.
+            eid = _claim_chapter_eid(eid)
 
             nr_parts = r["nummer"].split(".") if r["nummer"] else [str(r["volgnummer"])]
             sort_key = tuple(int(p) if p.isdigit() else 999 for p in nr_parts)
+            el_type = _element_type_from_niveau(r["niveau"], r["object_type"])
 
             elements.append({
                 "eid": eid,
-                "wid": wid,
+                "wid": f"gm{bronhouder}__{eid}",
                 "element_type": el_type,
                 "nummer": r["nummer"],
                 "opschrift": r["naam"] or r["label"],
                 "inhoud": r["inhoud"],
                 "parent_eid": parent_eid,
+                "bucket": bucket,
                 "sort_key": sort_key,
                 "original_id": r["identificatie"],
                 "original_parent_id": r["parent_id"],
             })
 
         # Stap C: Insert in conv.tekst_element
-        # Eerst hoofdstukken (geen parent), dan artikelen
+        # Eerst de bucket-containers (Lichaam/Bijlage/Toelichting), dan
+        # hoofdstukken (parent = container), dan artikelen (parent = eid-lookup).
         eid_to_db_id: dict[str, int] = {}
         original_id_to_db_id: dict[str, int] = {}
 
-        # Sorteer: hoofdstukken eerst, dan op sort_key
-        chapters = [e for e in elements if e["element_type"] == "Hoofdstuk"]
-        chapters.sort(key=lambda e: e["sort_key"])
-        articles = [e for e in elements if e["element_type"] != "Hoofdstuk"]
-        articles.sort(key=lambda e: e["sort_key"])
+        used_buckets = {e["bucket"] for e in elements}
+        container_db: dict[str, int] = {}
 
         volgorde = 0
-        for el in chapters:
+        for bucket in _BUCKETS:
+            if bucket not in used_buckets:
+                continue
             volgorde += 1
+            container_eid = _BUCKET_EID[bucket]
+            container_wid = f"gm{bronhouder}__{container_eid}"
             cur.execute("""
                 INSERT INTO conv.tekst_element
                     (regeling_expression, eid, wid, element_type,
                      parent_id, nummer, opschrift, inhoud, volgorde)
-                VALUES (%s, %s, %s, %s, NULL, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, NULL, NULL, NULL, NULL, %s)
+                RETURNING id
+            """, (regeling_expression, container_eid, container_wid, bucket, volgorde))
+            db_id = cur.fetchone()["id"]
+            container_db[bucket] = db_id
+            eid_to_db_id[container_eid] = db_id
+
+        chapters = [e for e in elements if e["element_type"] == "Hoofdstuk"]
+        chapters.sort(key=lambda e: (_BUCKETS.index(e["bucket"]), e["sort_key"]))
+        articles = [e for e in elements if e["element_type"] != "Hoofdstuk"]
+        articles.sort(key=lambda e: (_BUCKETS.index(e["bucket"]), e["sort_key"]))
+
+        for el in chapters:
+            volgorde += 1
+            # Hoofdstukken hangen direct onder hun bucket-container, tenzij
+            # ze al een echte parent hebben (zeldzame geneste hoofdstukken).
+            parent_db_id = container_db[el["bucket"]]
+            if el.get("parent_eid") and el["parent_eid"] not in (None, "__deferred__"):
+                parent_db_id = eid_to_db_id.get(el["parent_eid"], parent_db_id)
+            cur.execute("""
+                INSERT INTO conv.tekst_element
+                    (regeling_expression, eid, wid, element_type,
+                     parent_id, nummer, opschrift, inhoud, volgorde)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (regeling_expression, el["eid"], el["wid"],
-                  el["element_type"], el["nummer"], el["opschrift"],
-                  el["inhoud"], volgorde))
+                  el["element_type"], parent_db_id, el["nummer"],
+                  el["opschrift"], el["inhoud"], volgorde))
             db_id = cur.fetchone()["id"]
             eid_to_db_id[el["eid"]] = db_id
             if "original_id" in el:
@@ -337,11 +482,10 @@ def convert_tekst(conn: psycopg.Connection, instrument_idn: str,
         for el in articles:
             volgorde += 1
             # Resolve parent
-            parent_db_id = None
+            parent_db_id: int | None = None
             if el.get("parent_eid") and el["parent_eid"] != "__deferred__":
                 parent_db_id = eid_to_db_id.get(el["parent_eid"])
-            elif el.get("original_parent_id"):
-                # Parent is een virtueel hoofdstuk of een bestaand element
+            if parent_db_id is None and el.get("original_parent_id"):
                 parent_db_id = original_id_to_db_id.get(el["original_parent_id"])
                 if parent_db_id is None:
                     # Zoek via eid van het virtuele parent
@@ -349,6 +493,9 @@ def convert_tekst(conn: psycopg.Connection, instrument_idn: str,
                         if ch.get("original_id") == el["original_parent_id"]:
                             parent_db_id = eid_to_db_id.get(ch["eid"])
                             break
+            # Laatste fallback: artikel direct onder de bucket-container.
+            if parent_db_id is None:
+                parent_db_id = container_db[el["bucket"]]
 
             cur.execute("""
                 INSERT INTO conv.tekst_element
@@ -364,7 +511,7 @@ def convert_tekst(conn: psycopg.Connection, instrument_idn: str,
             if "original_id" in el:
                 original_id_to_db_id[el["original_id"]] = db_id
 
-        return len(elements)
+        return len(elements) + len(used_buckets)
 
 
 # ── Stap 1.3: Locaties ──────────────────────────────────────────────
@@ -420,12 +567,18 @@ def convert_locaties(conn: psycopg.Connection, instrument_idn: str,
             obj_type, bhg = groep_key.split("|", 1)
             noemer = f"{obj_type} - {bhg}" if bhg != "geen" else obj_type
 
-            # Union-geometrie voor de groep
+            # Union-geometrie voor de groep. ST_MakeValid wikkelt invalide
+            # IMRO-polygonen (zelf-doorsnijdend, dubbele ringen) zodat
+            # ST_Union niet faalt met een GEOS-error op één rotte feature.
+            # CollectionExtract(...,3) houdt alleen polygonen over: MakeValid
+            # kan op extreem kapotte input een GeometryCollection met punten
+            # of lijnen produceren, die niet in onze GEOMETRY(28992)-kolom
+            # passen.
             cur.execute("""
                 INSERT INTO conv.locatie
                     (identificatie, locatie_type, noemer, geometrie)
                 SELECT %s, 'Gebiedengroep', %s,
-                       ST_Union(geometrie)
+                       ST_CollectionExtract(ST_Union(ST_MakeValid(geometrie)), 3)
                 FROM conv.locatie
                 WHERE identificatie = ANY(%s)
             """, (groep_id, noemer, leden))
@@ -639,10 +792,15 @@ def clear_gemeente(bronhouder_code: str) -> int:
             if not expressions:
                 return 0
 
-            # CASCADE vanuit regeling ruimt tekst_element op, maar
-            # locaties en gebiedsaanwijzingen hangen er niet aan via FK.
-            # Die moeten apart, in FK-volgorde.
+            # Verwijder in FK-volgorde: junctions → objecten → locaties → regeling
             bh_pattern = f"%gm{bronhouder_code}%"
+            cur.execute("DELETE FROM conv.juridische_regel_norm WHERE juridische_regel_id LIKE %s", (bh_pattern,))
+            cur.execute("DELETE FROM conv.juridische_regel_gebiedsaanwijzing WHERE juridische_regel_id LIKE %s", (bh_pattern,))
+            cur.execute("DELETE FROM conv.activiteit_locatieaanduiding WHERE activiteit_id LIKE %s", (bh_pattern,))
+            cur.execute("DELETE FROM conv.normwaarde WHERE norm_id LIKE %s", (bh_pattern,))
+            cur.execute("DELETE FROM conv.norm WHERE identificatie LIKE %s", (bh_pattern,))
+            cur.execute("DELETE FROM conv.juridische_regel WHERE identificatie LIKE %s", (bh_pattern,))
+            cur.execute("DELETE FROM conv.activiteit WHERE identificatie LIKE %s", (bh_pattern,))
             cur.execute("DELETE FROM conv.gebiedsaanwijzing WHERE identificatie LIKE %s", (bh_pattern,))
             cur.execute("DELETE FROM conv.locatiegroep_lid WHERE groep_identificatie LIKE %s", (bh_pattern,))
             cur.execute("DELETE FROM conv.locatie WHERE identificatie LIKE %s", (bh_pattern,))

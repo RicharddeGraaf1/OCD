@@ -445,13 +445,19 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                         (loc_id,),
                     )
                 try:
+                    # `themas` is de nieuwe multi-value list (parser
+                    # output); fall back op single `thema` voor backwards-
+                    # compat met oudere parser-output.
+                    themas_val = td.get("themas")
+                    if not themas_val and td.get("thema"):
+                        themas_val = [td["thema"]]
                     cur.execute(
                         """INSERT INTO p2p.tekstdeel
                            (identificatie, divisie_wid, thema, locatie_id)
                            VALUES (%s, %s, %s, %s)
                            ON CONFLICT (identificatie) DO NOTHING""",
                         (td["identificatie"], td["divisie_wid"],
-                         [td["thema"]] if td.get("thema") else None,
+                         themas_val if themas_val else None,
                          loc_id),
                     )
                     td_count += 1
@@ -603,12 +609,15 @@ def load_ow_overheid(overheid_code: str, naam: str, bronhouder_code: str,
         bronhouder_code: key for the bronhouder table.
         doc_types: Optional filter, e.g. ['Programma', 'Omgevingsvisie'].
     """
+    from src.db import normalize_bronhouder_code
+    bronhouder_code = normalize_bronhouder_code(bronhouder_code)
+
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO core.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (bronhouder_code, naam),
+                "INSERT INTO core.bronhouder (overheidscode, naam, bestuurslaag) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                (bronhouder_code, naam, 'gemeente' if bronhouder_code.startswith('gm') else 'provincie' if bronhouder_code.startswith('pv') else 'waterschap' if bronhouder_code.startswith('ws') else 'rijk'),
             )
         conn.commit()
 
@@ -638,20 +647,24 @@ def load_ow_overheid(overheid_code: str, naam: str, bronhouder_code: str,
 def load_ow_from_zip(zip_path: str, cbs_code: str, naam: str):
     """Load from an already-downloaded ZIP file."""
     from pathlib import Path
+    from src.db import normalize_bronhouder_code
+    cbs_code = normalize_bronhouder_code(cbs_code)
+
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO core.bronhouder (overheidscode, naam) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                "INSERT INTO core.bronhouder (overheidscode, naam, bestuurslaag) VALUES (%s, %s, 'gemeente') ON CONFLICT DO NOTHING",
                 (cbs_code, naam),
             )
         conn.commit()
 
+        bare_code = cbs_code.removeprefix("gm")
         reg_info = {
-            "identificatie": f"/akn/nl/act/gm{cbs_code}/2020/omgevingsplan",
+            "identificatie": f"/akn/nl/act/gm{bare_code}/2020/omgevingsplan",
             "titel": f"Omgevingsplan gemeente {naam}",
             "type": "Omgevingsplan",
-            "expressionId": f"/akn/nl/act/gm{cbs_code}/2020/omgevingsplan",
+            "expressionId": f"/akn/nl/act/gm{bare_code}/2020/omgevingsplan",
         }
 
         _load_from_zip(conn, Path(zip_path), reg_info)
