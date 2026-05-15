@@ -1,7 +1,8 @@
 # p2pwijziging — aankomende wijzigingen
 
 **Status:** geïmplementeerd
-**Datum:** 2026-05-04
+**Datum:** 2026-05-04 (v1: sparse `tekst_delta`)
+**Laatste wijziging:** 2026-05-15 (v2: volle `tekst_element`-mirror — zie onder)
 
 ---
 
@@ -47,10 +48,12 @@ p2pwijziging.besluit
 p2pwijziging.procedurestap
    ontwerpbesluit_id, soort, voltooid_op, plaats
 
-p2pwijziging.tekst_delta
+p2pwijziging.tekst_element        -- volle boom, mirror van p2p.tekst_element
    ontwerpbesluit_id, eid, wid, element_type,
-   bewerking ENUM('toevoegen' | 'wijzigen' | 'verwijderen'),
-   nummer, opschrift, inhoud_nieuw, parent_eid, volgorde
+   parent_id (FK self), nummer, opschrift, inhoud,
+   inhoud_plain (GENERATED), volgorde,
+   wijzigactie ∈ {voegtoe, verwijder, nieuweContainer, verwijderContainer} | NULL,
+   vervallen, bevat_renvooi, bevat_ontwerp_informatie
 
 p2pwijziging.annotatie_delta
    ontwerpbesluit_id, type, identificatie,
@@ -67,11 +70,62 @@ p2pwijziging.besluitversie  = SELECT * FROM besluit WHERE soort = 'besluitversie
 
 ### Waarom één tabel met `soort` en geen aparte tabellen
 
-De delta-tabellen (`tekst_delta`, `annotatie_delta`, `locatie_delta`)
-zijn voor beide soorten **structureel identiek**. Twee parallelle
-tabelsets zou alleen duplicatie geven of polymorfe FK's vereisen
-(beide lelijker dan een index op `soort`). De views maken het
-expliciet.
+De delta-tabellen (`annotatie_delta`, `locatie_delta`) zijn voor beide
+soorten **structureel identiek**. Twee parallelle tabelsets zou alleen
+duplicatie geven of polymorfe FK's vereisen (beide lelijker dan een
+index op `soort`). De views maken het expliciet.
+
+### Waarom `tekst_element` als volle boom i.p.v. sparse delta (v2, 2026-05-15)
+
+Eerste implementatie was een sparse `tekst_delta` met enum
+`bewerking ∈ {toevoegen, wijzigen, verwijderen}`. Bij debug van een
+lege tabel bleek:
+
+1. De DSO-API levert de documentstructuur onder soort-specifieke keys
+   (`_embedded.ontwerpDocumentComponenten` resp.
+   `besluitversieDocumentComponenten`), niet `documentComponenten`.
+   De loader zocht naar de verkeerde key — alle 214 wijzigingen kregen
+   stilzwijgend 0 rijen.
+2. De aangenomen `_delta.bewerking`-key bestaat niet in de payload.
+   De echte renvooi zit als JSON-attribuut `wijzigactie` op de
+   `DocumentComponent`-nodes met waardenset
+   `{voegtoe, verwijder, nieuweContainer, verwijderContainer}` —
+   plus `vervallen=true`, `bevatRenvooi`, `bevatOntwerpInformatie`.
+3. De API levert sowieso de volle boom (incl. ongewijzigde nodes voor
+   context). Sparse opslag betekent voor elke "toon mij wat er wijzigt
+   in artikel X met zijn leden ernaast"-query een LEFT JOIN met
+   `p2p.tekst_element`.
+
+v2 schrijft daarom de volle boom weg met de echte renvooi-attributen
+op de gewijzigde nodes (NULL/FALSE = ongewijzigd), als mirror van
+`p2p.tekst_element`. Voordelen:
+
+- Renvooi-namen 1-op-1 zoals STOP ze gebruikt — geen lossy enum.
+- Viewer-symmetrie: dezelfde shape als `p2p.tekst_element` (parent_id,
+  inhoud_plain GENERATED, FTS-index).
+- "Hoe ziet de regeling eruit na vaststelling": filter
+  `wijzigactie IS DISTINCT FROM 'verwijder'`.
+- Inline renvooi (`<NieuweTekst>`/`<VerwijderdeTekst>` in `Kop`,
+  `wijzigactie="voegtoe|verwijder"` op `<Al>` in inhoud) blijft gewoon
+  als XML in de `inhoud`/`opschrift`-velden — viewer kan die direct
+  stylen, geen aparte tabel.
+
+Migratie: `scripts/2026-05-refactor-p2pwijziging-tekst.sql`. Veilig
+om te draaien — `tekst_delta` was leeg.
+
+### Renvooi vs vervangRegeling
+
+Niet elke wijziging is een delta — sommige besluiten vervangen de
+hele regeling. Detectie uit de Presenteren-API listing zelf:
+
+| Soort | Renvooi (delta) | VervangRegeling |
+|---|---|---|
+| Ontwerp | `_links.beoogdeOpvolgerVan` aanwezig | link ontbreekt |
+| Besluitversie | `_links.wijzigtRegelingversie` aanwezig | link ontbreekt |
+
+`p2pwijziging.besluit.is_vervang_regeling` houdt dit vast, zodat de
+viewer "alles in deze boom is nieuw" weet zonder over alle nodes te
+lopen om te checken op `bevat_renvooi`.
 
 ### Waarom JSONB voor annotatie-payload
 
@@ -177,26 +231,43 @@ python -m src.cli wijziging status      # overzicht per soort + status
 
 ```sql
 SELECT b.soort, b.opschrift, b.bekend_op, b.begin_inwerking,
-       b.status,
-       count(td.id) AS tekst_wijzigingen,
+       b.status, b.is_vervang_regeling,
+       count(te.id) FILTER (WHERE te.wijzigactie IS NOT NULL OR te.vervallen) AS tekst_wijzigingen,
        count(ad.id) AS annotatie_wijzigingen
 FROM p2pwijziging.besluit b
-LEFT JOIN p2pwijziging.tekst_delta td ON td.ontwerpbesluit_id = b.ontwerpbesluit_id
+LEFT JOIN p2pwijziging.tekst_element te ON te.ontwerpbesluit_id = b.ontwerpbesluit_id
 LEFT JOIN p2pwijziging.annotatie_delta ad ON ad.ontwerpbesluit_id = b.ontwerpbesluit_id
 WHERE b.regeling_work = '/akn/nl/act/gm0344/2020/omgevingsplan'
 GROUP BY b.ontwerpbesluit_id, b.soort, b.opschrift, b.bekend_op,
-         b.begin_inwerking, b.status
+         b.begin_inwerking, b.status, b.is_vervang_regeling
 ORDER BY b.begin_inwerking NULLS LAST;
 ```
 
 ### Welke artikelen krijgen wijzigingen?
 
 ```sql
-SELECT b.opschrift AS besluit, td.bewerking, td.nummer, td.opschrift AS artikel
+SELECT b.opschrift AS besluit,
+       te.wijzigactie, te.vervallen, te.nummer, te.opschrift AS artikel
 FROM p2pwijziging.besluit b
-JOIN p2pwijziging.tekst_delta td ON td.ontwerpbesluit_id = b.ontwerpbesluit_id
+JOIN p2pwijziging.tekst_element te ON te.ontwerpbesluit_id = b.ontwerpbesluit_id
 WHERE b.regeling_work = '/akn/nl/act/gm0344/2020/omgevingsplan'
-ORDER BY td.bewerking, td.nummer;
+  AND te.element_type = 'Artikel'
+  AND (te.wijzigactie IS NOT NULL OR te.vervallen)
+ORDER BY te.wijzigactie NULLS LAST, te.nummer;
+```
+
+### Hoe ziet de regeling eruit ná vaststelling?
+
+```sql
+-- "Toon de regeling-na-besluit": laat verwijderde nodes weg, behoud
+-- de rest van de boom in volgorde.
+SELECT te.element_type, te.nummer, te.opschrift, te.inhoud_plain
+FROM p2pwijziging.tekst_element te
+JOIN p2pwijziging.besluit b ON b.ontwerpbesluit_id = te.ontwerpbesluit_id
+WHERE b.ontwerpbesluit_id = :besluit_id
+  AND te.wijzigactie IS DISTINCT FROM 'verwijder'
+  AND NOT te.vervallen
+ORDER BY te.volgorde;
 ```
 
 ### Welke nieuwe activiteiten worden voorgesteld?

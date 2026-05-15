@@ -524,6 +524,7 @@ CREATE TABLE IF NOT EXISTS p2pwijziging.besluit (
     opschrift                TEXT,
     citeertitel              TEXT,
     publicatie_id            TEXT,
+    is_vervang_regeling      BOOLEAN NOT NULL DEFAULT FALSE,
     beschikbaar_op           TIMESTAMP NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_ontwerp_besluit_work ON p2pwijziging.besluit(regeling_work);
@@ -540,22 +541,52 @@ CREATE TABLE IF NOT EXISTS p2pwijziging.procedurestap (
 );
 CREATE INDEX IF NOT EXISTS idx_ontwerp_procedurestap ON p2pwijziging.procedurestap(ontwerpbesluit_id);
 
-CREATE TABLE IF NOT EXISTS p2pwijziging.tekst_delta (
+-- Documentstructuur als volle boom (mirror van p2p.tekst_element) met
+-- renvooi-attributen op de gewijzigde nodes. Geen sparse delta-tabel —
+-- de DSO-API levert sowieso de volle boom, en mirror geeft viewer-
+-- symmetrie + FTS gratis. Zie 2026-05-refactor-p2pwijziging-tekst.sql
+-- voor de motivatie.
+CREATE TABLE IF NOT EXISTS p2pwijziging.tekst_element (
     id                       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    ontwerpbesluit_id        TEXT NOT NULL REFERENCES p2pwijziging.besluit(ontwerpbesluit_id) ON DELETE CASCADE,
+    ontwerpbesluit_id        TEXT NOT NULL
+        REFERENCES p2pwijziging.besluit(ontwerpbesluit_id) ON DELETE CASCADE,
     eid                      TEXT NOT NULL,
     wid                      TEXT NOT NULL,
-    element_type             TEXT,
-    bewerking                TEXT NOT NULL CHECK (bewerking IN ('toevoegen', 'wijzigen', 'verwijderen')),
-    nummer                   TEXT,
-    opschrift                TEXT,
-    inhoud_nieuw             TEXT,
-    parent_eid               TEXT,
+    element_type             TEXT NOT NULL,
+    parent_id                BIGINT NULL
+        REFERENCES p2pwijziging.tekst_element(id) ON DELETE CASCADE,
+    nummer                   TEXT NULL,
+    opschrift                TEXT NULL,
+    inhoud                   TEXT NULL,
+    inhoud_plain             TEXT GENERATED ALWAYS AS (
+        regexp_replace(
+            regexp_replace(COALESCE(inhoud, ''), '<[^>]+>', ' ', 'g'),
+            '\s+', ' ', 'g'
+        )
+    ) STORED,
     volgorde                 INT NOT NULL DEFAULT 0,
+    wijzigactie              TEXT NULL CHECK (wijzigactie IN
+        ('voegtoe', 'verwijder', 'nieuweContainer', 'verwijderContainer')),
+    vervallen                BOOLEAN NOT NULL DEFAULT FALSE,
+    bevat_renvooi            BOOLEAN NOT NULL DEFAULT FALSE,
+    bevat_ontwerp_informatie BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE (ontwerpbesluit_id, eid)
 );
-CREATE INDEX IF NOT EXISTS idx_ontwerp_tekst_besluit ON p2pwijziging.tekst_delta(ontwerpbesluit_id);
-CREATE INDEX IF NOT EXISTS idx_ontwerp_tekst_wid ON p2pwijziging.tekst_delta(wid);
+CREATE INDEX IF NOT EXISTS idx_pw_tekst_element_besluit
+    ON p2pwijziging.tekst_element(ontwerpbesluit_id);
+CREATE INDEX IF NOT EXISTS idx_pw_tekst_element_parent
+    ON p2pwijziging.tekst_element(parent_id);
+CREATE INDEX IF NOT EXISTS idx_pw_tekst_element_wid
+    ON p2pwijziging.tekst_element(wid);
+CREATE INDEX IF NOT EXISTS idx_pw_tekst_element_wijzigactie
+    ON p2pwijziging.tekst_element(ontwerpbesluit_id, wijzigactie)
+    WHERE wijzigactie IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_pw_tekst_element_renvooi
+    ON p2pwijziging.tekst_element(ontwerpbesluit_id)
+    WHERE bevat_renvooi = TRUE;
+CREATE INDEX IF NOT EXISTS idx_pw_tekst_element_inhoud_fts
+    ON p2pwijziging.tekst_element
+    USING gin (to_tsvector('dutch', coalesce(inhoud_plain, '')));
 
 CREATE TABLE IF NOT EXISTS p2pwijziging.annotatie_delta (
     id                       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

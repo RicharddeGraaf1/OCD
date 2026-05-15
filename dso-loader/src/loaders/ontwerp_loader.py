@@ -18,7 +18,25 @@ from rich.console import Console
 
 from src.config import cfg
 from src.db import get_conn, normalize_bronhouder_code
-from src.loaders.api_loader import _get as _api_get, _parse_kop
+from src.loaders.api_loader import _get as _api_get, _parse_kop, API_TYPE_TO_STOP
+
+
+# DSO Presenteren-API levert de documentstructuur onder een soort-specifieke
+# _embedded-key — niet onder het generieke `documentComponenten` zoals
+# /regelingen/{id}/documentstructuur dat doet. De vorige loader-versie
+# zocht naar de verkeerde key en schreef daarom 0 rijen voor 214/214 wijzigingen.
+DOC_EMBED_KEY = {
+    "ontwerp": "ontwerpDocumentComponenten",
+    "besluitversie": "besluitversieDocumentComponenten",
+}
+
+# Renvooi-stijl is detecteerbaar uit de listing zelf: een echte delta heeft
+# een link naar de versie waarop hij voortbouwt. Een vervangRegeling-stijl
+# besluit heeft die link niet — het hele document is dan "nieuw".
+VERVANG_LINK = {
+    "ontwerp": "beoogdeOpvolgerVan",
+    "besluitversie": "wijzigtRegelingversie",
+}
 
 
 def _get(url: str, params: dict | None = None, max_retries: int = 3) -> dict:
@@ -206,38 +224,94 @@ def _store_locaties(cur, ontwerpbesluit_id: str, locaties: list,
               geom_geojson, geom_geojson))
 
 
-def _store_documentstructuur(cur, ontwerpbesluit_id: str, doc_data: dict):
-    """Sla document-structuur als tekst_delta op."""
-    cur.execute("DELETE FROM p2pwijziging.tekst_delta WHERE ontwerpbesluit_id = %s",
+def _flatten_doc_components(components: list[dict], embed_key: str,
+                            parent_eid: str | None = None,
+                            offset: int = 0) -> list[dict]:
+    """Plat een ontwerp/besluit-document tree uit naar één lijst, met renvooi-info.
+
+    De DSO-API levert per node:
+      - `expressie` / `identificatie` → eid / wid
+      - `type` → STOP-element-type (UPPER, soms met '_')
+      - `kop` (XML) en `inhoud` (XML)
+      - optioneel `wijzigactie` ∈ {voegtoe, verwijder, nieuweContainer,
+        verwijderContainer} en `vervallen=true` op gewijzigde nodes
+      - `bevatRenvooi` / `bevatOntwerpInformatie` als boolean
+    Children hangen onder `_embedded.<embed_key>` (verschilt per soort).
+    """
+    flat: list[dict] = []
+    for i, comp in enumerate(components):
+        eid = comp.get("expressie")
+        wid = comp.get("identificatie", eid)
+        if not eid:
+            continue
+        raw_type = comp.get("type", "ONBEKEND")
+        nummer, opschrift = _parse_kop(comp.get("kop"))
+        flat.append({
+            "eid": eid,
+            "wid": wid,
+            "element_type": API_TYPE_TO_STOP.get(raw_type, raw_type),
+            "parent_eid": parent_eid,
+            "nummer": nummer,
+            "opschrift": opschrift,
+            "inhoud": comp.get("inhoud"),
+            "volgorde": offset + i,
+            "wijzigactie": comp.get("wijzigactie"),
+            "vervallen": bool(comp.get("vervallen")),
+            "bevat_renvooi": bool(comp.get("bevatRenvooi")),
+            "bevat_ontwerp_informatie": bool(comp.get("bevatOntwerpInformatie")),
+        })
+        children = (comp.get("_embedded") or {}).get(embed_key) or []
+        if children:
+            flat.extend(_flatten_doc_components(children, embed_key, parent_eid=eid))
+    return flat
+
+
+def _store_documentstructuur(cur, ontwerpbesluit_id: str, doc_data: dict,
+                             soort: str) -> int:
+    """Sla document-structuur als tekst_element-rijen op. Returns aantal rijen.
+
+    `soort` ∈ {'ontwerp', 'besluitversie'} — bepaalt onder welke
+    `_embedded`-key de DocumentComponenten hangen. Twee-pass insert om
+    parent_id correct te zetten (zelfde patroon als api_loader).
+    """
+    cur.execute("DELETE FROM p2pwijziging.tekst_element WHERE ontwerpbesluit_id = %s",
                 (ontwerpbesluit_id,))
-    components = doc_data.get("_embedded", {}).get("documentComponenten", [])
 
-    def walk(comps, parent_eid=None, offset=0):
-        for i, comp in enumerate(comps):
-            eid = comp.get("expressie")
-            wid = comp.get("identificatie", eid)
-            if not eid:
-                continue
-            delta = comp.get("_delta", {})
-            bewerking = delta.get("bewerking", "toevoegen")
-            comp_type = comp.get("type", "ONBEKEND")
-            nummer, opschrift = _parse_kop(comp.get("kop"))
+    embed_key = DOC_EMBED_KEY[soort]
+    top = (doc_data.get("_embedded") or {}).get(embed_key) or []
+    elements = _flatten_doc_components(top, embed_key)
+    if not elements:
+        return 0
 
-            cur.execute("""
-                INSERT INTO p2pwijziging.tekst_delta
-                    (ontwerpbesluit_id, eid, wid, element_type, bewerking,
-                     nummer, opschrift, inhoud_nieuw, parent_eid, volgorde)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (ontwerpbesluit_id, eid) DO NOTHING
-            """, (ontwerpbesluit_id, eid, wid, comp_type, bewerking,
-                  nummer, opschrift,
-                  comp.get("inhoud"), parent_eid, offset + i))
+    # Pass 1: insert zonder parent_id, bouw eid → id mapping
+    eid_to_id: dict[str, int] = {}
+    for elem in elements:
+        cur.execute("""
+            INSERT INTO p2pwijziging.tekst_element
+                (ontwerpbesluit_id, eid, wid, element_type,
+                 nummer, opschrift, inhoud, volgorde,
+                 wijzigactie, vervallen, bevat_renvooi, bevat_ontwerp_informatie)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (ontwerpbesluit_id, eid) DO NOTHING
+            RETURNING id
+        """, (ontwerpbesluit_id, elem["eid"], elem["wid"], elem["element_type"],
+              elem["nummer"], elem["opschrift"], elem["inhoud"], elem["volgorde"],
+              elem["wijzigactie"], elem["vervallen"],
+              elem["bevat_renvooi"], elem["bevat_ontwerp_informatie"]))
+        row = cur.fetchone()
+        if row:
+            eid_to_id[elem["eid"]] = row["id"]
 
-            children = comp.get("_embedded", {}).get("documentComponenten", [])
-            if children:
-                walk(children, parent_eid=eid)
+    # Pass 2: parent_id koppelen
+    for elem in elements:
+        pe = elem["parent_eid"]
+        if pe and pe in eid_to_id and elem["eid"] in eid_to_id:
+            cur.execute(
+                "UPDATE p2pwijziging.tekst_element SET parent_id = %s WHERE id = %s",
+                (eid_to_id[pe], eid_to_id[elem["eid"]]),
+            )
 
-    walk(components)
+    return len(elements)
 
 
 # ── Ontwerp ophalen + opslaan ────────────────────────────────────────
@@ -272,6 +346,12 @@ def load_ontwerp(item: dict, conn: psycopg.Connection) -> str | None:
         except ValueError:
             pass
 
+    # Renvooi vs vervangRegeling: een echt wijzigingsontwerp heeft een
+    # _links.beoogdeOpvolgerVan; ontbreekt die, dan vervangt het besluit
+    # de hele regeling.
+    links = item.get("_links", {}) or {}
+    is_vervang = VERVANG_LINK["ontwerp"] not in links
+
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO p2pwijziging.besluit
@@ -279,19 +359,20 @@ def load_ontwerp(item: dict, conn: psycopg.Connection) -> str | None:
                  wijzigt_expression, nieuwe_expression,
                  soort, status, bekend_op, ontvangen_op,
                  bronhouder, documenttype, opschrift, citeertitel,
-                 publicatie_id)
-            VALUES (%s, %s, %s, %s, %s, 'ontwerp', 'ontwerp', %s, %s, %s, %s, %s, %s, %s)
+                 publicatie_id, is_vervang_regeling)
+            VALUES (%s, %s, %s, %s, %s, 'ontwerp', 'ontwerp', %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (ontwerpbesluit_id) DO UPDATE SET
                 wijzigt_expression = EXCLUDED.wijzigt_expression,
                 nieuwe_expression = EXCLUDED.nieuwe_expression,
                 opschrift = EXCLUDED.opschrift,
+                is_vervang_regeling = EXCLUDED.is_vervang_regeling,
                 beschikbaar_op = NOW()
         """, (ontwerpbesluit_id, item.get("technischId"),
               item.get("identificatie"), expression_id, expression_id,
               bekend_op, ontvangen_op, bronhouder_code,
               item.get("type", {}).get("waarde"),
               item.get("opschrift"), item.get("citeerTitel"),
-              item.get("publicatieID")))
+              item.get("publicatieID"), is_vervang))
 
         # Procedurestappen
         for stap in item.get("procedureverloop", {}).get("procedurestappen", []):
@@ -304,24 +385,28 @@ def load_ontwerp(item: dict, conn: psycopg.Connection) -> str | None:
                   stap.get("voltooidOp"),
                   stap.get("plaatsAanduiding")))
 
-        # Documentstructuur ophalen
-        try:
-            doc_url = item["_links"]["documentstructuur"]["href"]
+        # Documentstructuur. Geen silent-except meer — als de fetch faalt
+        # wil je dat horen, anders krijg je weer 214 lege bomen zonder
+        # signaal. Een ontbrekende link is wel OK (sommige soorten besluiten
+        # hebben geen documentstructuur-link in de listing).
+        doc_url = (links.get("documentstructuur") or {}).get("href")
+        if doc_url:
             doc_data = _get(doc_url)
-            _store_documentstructuur(cur, ontwerpbesluit_id, doc_data)
-        except Exception as e:
-            console.print(f"      [dim]documentstructuur: {e}[/dim]")
+            _store_documentstructuur(cur, ontwerpbesluit_id, doc_data, "ontwerp")
+        else:
+            console.print(f"      [yellow]geen documentstructuur-link voor {ontwerpbesluit_id}[/yellow]")
 
         # Annotaties (renvooi)
-        try:
-            ann_url = item["_links"]["annotaties"]["href"]
-            ann_data = _get(ann_url)
-            _store_annotaties(cur, ontwerpbesluit_id, ann_data)
-            _store_locaties(cur, ontwerpbesluit_id, ann_data.get("locaties", []))
-        except Exception as e:
-            import traceback
-            console.print(f"      [dim]annotaties: {e}[/dim]")
-            console.print(f"      [dim]{traceback.format_exc().splitlines()[-3]}[/dim]")
+        ann_url = (links.get("annotaties") or {}).get("href")
+        if ann_url:
+            try:
+                ann_data = _get(ann_url)
+                _store_annotaties(cur, ontwerpbesluit_id, ann_data)
+                _store_locaties(cur, ontwerpbesluit_id, ann_data.get("locaties", []))
+            except Exception as e:
+                import traceback
+                console.print(f"      [red]annotaties faalden: {e}[/red]")
+                console.print(f"      [dim]{traceback.format_exc().splitlines()[-3]}[/dim]")
 
     return ontwerpbesluit_id
 
@@ -349,6 +434,12 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
     ontvangen_op = item.get("ontvangenOp")
     begin_geldigheid = item.get("geregistreerdMet", {}).get("beginGeldigheid")
 
+    # Renvooi vs vervangRegeling: een besluit dat een bestaande regeling
+    # wijzigt heeft een _links.wijzigtRegelingversie; ontbreekt die,
+    # dan is het een vervang-besluit (volledig nieuwe regeling).
+    links = item.get("_links", {}) or {}
+    is_vervang = VERVANG_LINK["besluitversie"] not in links
+
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO p2pwijziging.besluit
@@ -357,14 +448,15 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
                  soort, status, bekend_op, ontvangen_op,
                  begin_geldigheid, begin_inwerking,
                  eindverantwoordelijke, bronhouder, documenttype,
-                 opschrift, citeertitel, publicatie_id)
+                 opschrift, citeertitel, publicatie_id, is_vervang_regeling)
             VALUES (%s, %s, %s, %s, %s, 'besluitversie', 'vastgesteld',
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (ontwerpbesluit_id) DO UPDATE SET
                 wijzigt_expression = EXCLUDED.wijzigt_expression,
                 nieuwe_expression = EXCLUDED.nieuwe_expression,
                 begin_inwerking = EXCLUDED.begin_inwerking,
                 begin_geldigheid = EXCLUDED.begin_geldigheid,
+                is_vervang_regeling = EXCLUDED.is_vervang_regeling,
                 beschikbaar_op = NOW()
         """, (besluit_id, technisch_id, item.get("identificatie"),
               instrumentversie, expression_id,
@@ -372,7 +464,7 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
               item.get("eindverantwoordelijke"), bronhouder_code,
               item.get("type", {}).get("waarde"),
               item.get("opschrift"), item.get("citeerTitel"),
-              item.get("publicatieID")))
+              item.get("publicatieID"), is_vervang))
 
         # Procedurestappen
         for stap in item.get("procedureverloop", {}).get("procedurestappen", []):
@@ -383,22 +475,23 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
             """, (besluit_id, stap.get("soortStap", {}).get("waarde", ""),
                   stap.get("voltooidOp"), stap.get("plaatsAanduiding")))
 
-        # Documentstructuur
-        try:
-            doc_url = item["_links"]["documentstructuur"]["href"]
+        # Documentstructuur — geen silent-except, zie load_ontwerp.
+        doc_url = (links.get("documentstructuur") or {}).get("href")
+        if doc_url:
             doc_data = _get(doc_url)
-            _store_documentstructuur(cur, besluit_id, doc_data)
-        except Exception as e:
-            console.print(f"      [dim]documentstructuur: {e}[/dim]")
+            _store_documentstructuur(cur, besluit_id, doc_data, "besluitversie")
+        else:
+            console.print(f"      [yellow]geen documentstructuur-link voor {besluit_id}[/yellow]")
 
         # Annotaties
-        try:
-            ann_url = item["_links"]["annotaties"]["href"]
-            ann_data = _get(ann_url)
-            _store_annotaties(cur, besluit_id, ann_data)
-            _store_locaties(cur, besluit_id, ann_data.get("locaties", []))
-        except Exception as e:
-            console.print(f"      [dim]annotaties: {e}[/dim]")
+        ann_url = (links.get("annotaties") or {}).get("href")
+        if ann_url:
+            try:
+                ann_data = _get(ann_url)
+                _store_annotaties(cur, besluit_id, ann_data)
+                _store_locaties(cur, besluit_id, ann_data.get("locaties", []))
+            except Exception as e:
+                console.print(f"      [red]annotaties faalden: {e}[/red]")
 
     return besluit_id
 
