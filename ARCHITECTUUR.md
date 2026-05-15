@@ -163,7 +163,7 @@ soorten identiek.
 **Tabellen:**
 - `besluit` — metadata (work, expression, status, inwerkingtreding, …)
 - `procedurestap` — bekendmaking, vaststelling, ondertekening, …
-- `tekst_delta` — gewijzigde tekst-elementen met `bewerking` (toevoegen/wijzigen/verwijderen)
+- `tekst_element` — volledige documentstructuur als boom (mirror van `p2p.tekst_element`) met renvooi-attributen `wijzigactie` (voegtoe / verwijder / nieuweContainer / verwijderContainer), `vervallen`, `bevat_renvooi` op gewijzigde nodes
 - `annotatie_delta` — gewijzigde IMOW-annotaties (JSONB payload)
 - `locatie_delta` — gewijzigde geometrieën (PostGIS, optioneel ingeladen)
 

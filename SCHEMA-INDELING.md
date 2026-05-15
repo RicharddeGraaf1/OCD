@@ -161,7 +161,7 @@ teksten / locaties die `toegevoegd | gewijzigd | verwijderd` worden.
 |---|---|
 | `besluit` | Eén tabel voor beide soorten met `soort` discriminator (`'ontwerp'` / `'besluitversie'`) — delta-tabellen zijn voor beide identiek dus splitsen geeft alleen duplicatie |
 | `procedurestap` | Bekendmaking, vaststelling, ondertekening per besluit |
-| `tekst_delta` | Gewijzigde tekst-elementen met `bewerking` |
+| `tekst_element` | Volledige documentstructuur (mirror van `p2p.tekst_element`) met renvooi-attributen op gewijzigde nodes |
 | `annotatie_delta` | Gewijzigde IMOW-annotaties (JSONB payload) |
 | `locatie_delta` | Gewijzigde geometrieën (PostGIS, optioneel) |
 

@@ -427,13 +427,18 @@ def wijziging_status():
                 tbl.add_row(r["soort"], r["status"], str(r["count"]), str(r["toekomstig"]))
             console.print(tbl)
 
-            cur.execute("""SELECT count(*) FROM p2pwijziging.tekst_delta""")
-            tekst = cur.fetchone()["count"]
+            cur.execute("""SELECT count(*) AS n,
+                                  count(*) FILTER (WHERE wijzigactie IS NOT NULL OR vervallen) AS n_wij
+                           FROM p2pwijziging.tekst_element""")
+            te = cur.fetchone()
             cur.execute("""SELECT count(*) FROM p2pwijziging.annotatie_delta""")
             ann = cur.fetchone()["count"]
             cur.execute("""SELECT count(*) FROM p2pwijziging.locatie_delta""")
             loc = cur.fetchone()["count"]
-            console.print(f"\n  tekst_delta: {tekst}, annotatie_delta: {ann}, locatie_delta: {loc}")
+            console.print(
+                f"\n  tekst_element: {te['n']} ({te['n_wij']} met renvooi), "
+                f"annotatie_delta: {ann}, locatie_delta: {loc}"
+            )
     finally:
         conn.close()
 
