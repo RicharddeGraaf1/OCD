@@ -561,7 +561,7 @@ CREATE TABLE IF NOT EXISTS p2pwijziging.tekst_element (
     inhoud_plain             TEXT GENERATED ALWAYS AS (
         regexp_replace(
             regexp_replace(COALESCE(inhoud, ''), '<[^>]+>', ' ', 'g'),
-            '\s+', ' ', 'g'
+            '\\s+', ' ', 'g'
         )
     ) STORED,
     volgorde                 INT NOT NULL DEFAULT 0,
