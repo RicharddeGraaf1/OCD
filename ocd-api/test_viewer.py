@@ -382,3 +382,80 @@ class TestConvBoom:
     def test_niet_bestaande_conv_geeft_404(self):
         r = client.get("/v1/viewer/conv/niet-bestaand/boom")
         assert r.status_code == 404
+
+
+# ══════════════════════════════════════════════════════════
+# /v1/viewer/regeling/{expression}/wijzigingen
+# ══════════════════════════════════════════════════════════
+
+from urllib.parse import quote as _q
+
+# gm0353 (IJsselstein) — bekende regeling met 2 ontwerp-bronnen in p2pwijziging
+# (zie ../../OCDviewer/docs/plans/complete/20260516-wijzigingen-overlay.md).
+GM0353_EXPR = "/akn/nl/act/gm0353/2020/omgevingsplan/nld@2024-03-19;1"
+GM0353_WORK = "/akn/nl/act/gm0353/2020/omgevingsplan"
+
+
+def _wijz_url(expr: str) -> str:
+    """URL-encoded path zoals de frontend hem aanroept (encodeURIComponent).
+    Zonder encoding ziet de FastAPI-path-param de leading-slash niet als
+    onderdeel van de expression."""
+    return f"/v1/viewer/regeling/{_q(expr, safe='')}/wijzigingen"
+
+
+class TestWijzigingen:
+    def test_onbekende_expression_geeft_404(self):
+        r = client.get(_wijz_url("/akn/nl/act/niet-bestaand"))
+        assert r.status_code == 404
+
+    def test_gm0353_response_structuur(self):
+        r = client.get(_wijz_url(GM0353_EXPR))
+        assert r.status_code == 200
+        data = r.json()
+        assert data["regelingWork"] == GM0353_WORK
+        assert isinstance(data["wijzigingen"], list)
+
+    def test_gm0353_heeft_bronnen(self):
+        r = client.get(_wijz_url(GM0353_EXPR))
+        wijzigingen = r.json()["wijzigingen"]
+        # Mock-fixture en database hebben 2 ontwerpen bekend. Hou de assert
+        # zacht (>= 1) zodat een latere extra bron de test niet breekt.
+        assert len(wijzigingen) >= 1
+
+    def test_wijziging_velden(self):
+        r = client.get(_wijz_url(GM0353_EXPR))
+        w = r.json()["wijzigingen"][0]
+        for key in ("ontwerpbesluitId", "soort", "status", "opschrift",
+                    "bekendOp", "beginInwerking", "bronhouder",
+                    "documenttype", "isVervangRegeling",
+                    "tekstElementen", "annotatieDeltas", "locatieDeltas"):
+            assert key in w, f"Veld {key} ontbreekt"
+        assert w["soort"] in ("ontwerp", "besluitversie")
+        assert isinstance(w["tekstElementen"], list)
+        assert isinstance(w["annotatieDeltas"], list)
+
+    def test_tekst_elementen_gestript_naar_gewijzigd_plus_parents(self):
+        """Strip-logica: alle wid-knopen die we leveren bevatten ofwel een
+        renvooi-signaal, ofwel zijn een ancestor van zo'n knoop. Ongewijzigde
+        broertjes/zusters horen er niet in."""
+        r = client.get(_wijz_url(GM0353_EXPR))
+        for w in r.json()["wijzigingen"]:
+            tekst_els = w["tekstElementen"]
+            assert len(tekst_els) > 0
+            # Volle-boom-mirror zou ~1500 zijn; gestript verwachten we onder 100.
+            assert len(tekst_els) < 100, \
+                f"Strip lijkt niet te werken: {len(tekst_els)} elementen"
+
+    def test_annotaties_gefilterd_op_imow_types(self):
+        r = client.get(_wijz_url(GM0353_EXPR))
+        toegestaan = {"activiteit", "gebiedsaanwijzing", "omgevingsnorm",
+                       "omgevingswaarde", "locatie", "tekstdeel"}
+        for w in r.json()["wijzigingen"]:
+            for ad in w["annotatieDeltas"]:
+                assert ad["type"] in toegestaan, \
+                    f"SKOS-pipeline-type lekt door: {ad['type']}"
+
+    def test_vervang_regeling_wordt_uitgesloten(self):
+        r = client.get(_wijz_url(GM0353_EXPR))
+        for w in r.json()["wijzigingen"]:
+            assert w["isVervangRegeling"] is False

@@ -89,12 +89,38 @@ class ExtractTrace(BaseModel):
     sql_match_rows: int
 
 
+class ScoredKeyword(BaseModel):
+    """V7: trefwoord met relevantie-score en bron-tag.
+
+    Bedoeld voor weighted scoring in `/v1/objecten` en `/v1/regels`. Termen
+    met hoge `relevantie` moeten zwaarder wegen bij het ranken van objecten/
+    regels dan termen met lage relevantie (synoniemen / broader / related).
+
+    Bron-tags:
+    - `letterlijk`: exact token uit de vraag (≥4 chars)
+    - `letterlijk-kort`: token van 3 chars uit de vraag
+    - `letterlijk-phrase`: multi-woord-fragment uit de vraag
+    - `skos-exact`: concept-naam uit SKOS-match
+    - `skos-trefwoord`: trefwoord/synoniem van matched concept
+    - `skos-broader`: broader concept-naam (1 stap omhoog)
+    - `skos-related`: related concept-naam
+    """
+    term: str
+    relevantie: float = Field(..., ge=0.0, le=1.0)
+    bron: str
+
+
 class ExtractResponse(BaseModel):
     matched_concepts: list[MatchedConcept]
     expanded_keywords: list[str] = Field(
         ...,
         description="Vlakke deduped lijst zoektermen — klaar voor downstream "
                     "retrieval. Bevat namen + trefwoorden van alle matches.",
+    )
+    keywords: list[ScoredKeyword] = Field(
+        default_factory=list,
+        description="V7: gewogen trefwoorden met bron-tag. Bedoeld als input "
+                    "voor /v1/objecten en /v1/regels (passeer als term:gewicht-paren).",
     )
     trace: ExtractTrace
 
@@ -291,6 +317,79 @@ def extract_vraag_chips(cur, question: str, max_freq_for_1gram: int = 5) -> list
     return out
 
 
+# V7 weights — kalibreerbaar, zie objecten-regels-retrieve-endpoint.md §"Open punt 1"
+_KW_WEIGHT_LETTERLIJK         = 1.00  # exact woord uit vraag, ≥4 chars
+_KW_WEIGHT_LETTERLIJK_PHRASE  = 0.95  # multi-woord uit vraag
+_KW_WEIGHT_LETTERLIJK_KORT    = 0.80  # 3-letter woord uit vraag
+_KW_WEIGHT_SKOS_EXACT         = 0.80  # SKOS concept-naam (matched)
+_KW_WEIGHT_SKOS_TREFWOORD     = 0.70  # trefwoord/synoniem van matched concept
+_KW_WEIGHT_SKOS_BROADER       = 0.60  # broader concept-naam
+_KW_WEIGHT_SKOS_RELATED       = 0.40  # related concept-naam
+
+
+def build_scored_keywords(
+    question: str,
+    matched_rows: list[dict],
+    trefw_by_uri: dict[str, list[str]],
+    broader_by_uri: dict[str, list],
+) -> list[dict]:
+    """V7: bouw gewogen trefwoord-lijst uit vraag + SKOS-matches.
+
+    Geeft een lijst dicts met `term`, `relevantie`, `bron` — gesorteerd op
+    relevantie aflopend, gededupeerd op lowercase-term (eerste-wint).
+    """
+    keywords: list[dict] = []
+    seen: set[str] = set()
+
+    def add(term: str, relevantie: float, bron: str) -> None:
+        term = term.strip()
+        if not term:
+            return
+        key = term.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        keywords.append({"term": term, "relevantie": relevantie, "bron": bron})
+
+    # 1. Letterlijke woorden uit de vraag
+    tokens = _tokenize(question)
+    for t in tokens:
+        if len(t) >= 4:
+            add(t, _KW_WEIGHT_LETTERLIJK, "letterlijk")
+        elif len(t) == 3:
+            add(t, _KW_WEIGHT_LETTERLIJK_KORT, "letterlijk-kort")
+
+    # 2. Letterlijke multi-woord-phrases (2- en 3-grams uit de vraag)
+    for n in (3, 2):
+        for i in range(len(tokens) - n + 1):
+            phrase = " ".join(tokens[i : i + n])
+            add(phrase, _KW_WEIGHT_LETTERLIJK_PHRASE, "letterlijk-phrase")
+
+    # 3. SKOS concept-namen (exact match op de vraag)
+    for r in matched_rows:
+        naam = (r.get("naam") or "").strip()
+        if naam:
+            add(naam, _KW_WEIGHT_SKOS_EXACT, "skos-exact")
+
+    # 4. Trefwoorden / synoniemen van de matched concepten
+    for r in matched_rows:
+        uri = r.get("uri")
+        for tw in trefw_by_uri.get(uri, []) if uri else []:
+            add(tw, _KW_WEIGHT_SKOS_TREFWOORD, "skos-trefwoord")
+
+    # 5. Broader concept-namen
+    for r in matched_rows:
+        uri = r.get("uri")
+        for br in broader_by_uri.get(uri, []) if uri else []:
+            br_naam = br.naam if hasattr(br, "naam") else br.get("naam")
+            if br_naam:
+                add(br_naam, _KW_WEIGHT_SKOS_BROADER, "skos-broader")
+
+    # Sort op relevantie aflopend; bij gelijkspel langere term eerst (specifieker)
+    keywords.sort(key=lambda k: (k["relevantie"], len(k["term"])), reverse=True)
+    return keywords
+
+
 def match_skos_concepts(cur, question: str, max_concepts: int = 5) -> tuple[list[dict], list[str]]:
     """SKOS-match-helper, herbruikbaar door meerdere endpoints.
 
@@ -364,9 +463,14 @@ def extract(req: ExtractRequest):
         tokens = _tokenize(req.question)
 
         if not rows:
+            # V7: ook bij 0 SKOS-matches geven we de letterlijke woorden uit de
+            # vraag terug — die zijn nog steeds bruikbaar als zoektermen voor
+            # /v1/objecten en /v1/regels (FTS- en ILIKE-match op naam-velden).
+            scored = build_scored_keywords(req.question, [], {}, {})
             return ExtractResponse(
                 matched_concepts=[],
                 expanded_keywords=[],
+                keywords=[ScoredKeyword(**k) for k in scored],
                 trace=ExtractTrace(
                     tokens=tokens, ngrams_tried=len(ngrams),
                     ngrams_matched=0, sql_match_rows=0,
@@ -424,9 +528,13 @@ def extract(req: ExtractRequest):
                     seen.add(key)
                     expanded.append(term)
 
+        # V7: gewogen scored-keywords-output
+        scored = build_scored_keywords(req.question, rows, trefw_by_uri, broader_by_uri)
+
         return ExtractResponse(
             matched_concepts=matched_concepts,
             expanded_keywords=expanded,
+            keywords=[ScoredKeyword(**k) for k in scored],
             trace=ExtractTrace(
                 tokens=tokens,
                 ngrams_tried=len(ngrams),

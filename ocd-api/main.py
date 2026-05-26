@@ -1,27 +1,92 @@
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, Security
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from starlette.responses import JSONResponse
 
 from db import get_conn, pool
 from keywords import router as keywords_router
+from ponsenkaart import router as ponsenkaart_router
 from regelteksten_bij_vraag import router as regelteksten_router
+from vergunningen import router as vergunningen_router
 
 load_dotenv()
 
-API_KEY = os.environ.get("OCD_API_KEY", "")
+logger = logging.getLogger("ocd_api")
+logging.basicConfig(
+    level=os.environ.get("OCD_LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+
+# Twee-keys-strategie:
+# - OCD_API_KEY_PUBLIC: zit in client-side HTML van publieke viewers
+#   (ponsenkaart.nl, omgevingsvergunningenregister.nl). Bij scraper-misbruik
+#   kun je deze invalideren zonder backend-clients te raken.
+# - OCD_API_KEY_PRIVATE: voor backend-clients (Omgevingsbot etc.). Komt
+#   nooit in browser-code.
+# - OCD_API_KEY: legacy single-key, blijft werken als beide nieuwe leeg zijn.
+_LEGACY_KEY  = os.environ.get("OCD_API_KEY", "")
+_PUBLIC_KEY  = os.environ.get("OCD_API_KEY_PUBLIC", "")
+_PRIVATE_KEY = os.environ.get("OCD_API_KEY_PRIVATE", "")
+
+# Dict-mapping zodat we kunnen loggen welke tier een call gebruikte.
+ALLOWED_KEYS: dict[str, str] = {}
+if _PUBLIC_KEY:  ALLOWED_KEYS[_PUBLIC_KEY]  = "public"
+if _PRIVATE_KEY: ALLOWED_KEYS[_PRIVATE_KEY] = "private"
+if _LEGACY_KEY and _LEGACY_KEY not in ALLOWED_KEYS:
+    ALLOWED_KEYS[_LEGACY_KEY] = "legacy"
+
+# Fail-closed: in productie weigert de container te starten als auth aan
+# moet staan maar er zijn geen keys. Lokaal/test kun je dit uit laten (default
+# false) zodat tests met lege keys blijven werken.
+REQUIRE_AUTH = os.environ.get("OCD_REQUIRE_AUTH", "false").lower() in ("1", "true", "yes")
+if REQUIRE_AUTH and not ALLOWED_KEYS:
+    raise RuntimeError(
+        "OCD_REQUIRE_AUTH=true maar geen OCD_API_KEY_PUBLIC/PRIVATE/OCD_API_KEY "
+        "geconfigureerd. Container weigert te starten."
+    )
+
+# Swagger/OpenAPI configurable — in productie kun je ze uit zetten.
+ENABLE_DOCS = os.environ.get("OCD_ENABLE_DOCS", "true").lower() in ("1", "true", "yes")
+ENABLE_OPENAPI = os.environ.get("OCD_ENABLE_OPENAPI", "true").lower() in ("1", "true", "yes")
+
+# Rate limit per IP. v1 gebruikt één globale limit voor alle tiers; per-tier
+# differentiatie (public/private) is nice-to-have voor v2 — zie
+# PRODUCTION-CHECKLIST.md §4. Overrideable via env-var zonder redeploy.
+RATE_DEFAULT = os.environ.get("OCD_RATE_DEFAULT", "120/minute")
+
 LOCATIESERVER = "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free"
+
+
+def _client_ip(request: Request) -> str:
+    """Resolve client-IP achter Railway's proxy. Eerste IP in X-Forwarded-For
+    is de origin, fallback op request.client.host."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+limiter = Limiter(key_func=_client_ip, default_limits=[RATE_DEFAULT])
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     pool.open()
+    logger.info(
+        "ocd_api startup require_auth=%s keys_configured=%d docs=%s",
+        REQUIRE_AUTH, len(ALLOWED_KEYS), ENABLE_DOCS,
+    )
     try:
         yield
     finally:
@@ -33,7 +98,29 @@ app = FastAPI(
     description="Omgevingswet Centraal Datamodel — alle regelgeving van Nederland",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_OPENAPI else None,
 )
+
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+
+@app.exception_handler(RateLimitExceeded)
+async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    logger.warning(
+        "rate_limit_exceeded tier=%s ip=%s path=%s limit=%s",
+        getattr(request.state, "tier", "anonymous"),
+        _client_ip(request),
+        request.url.path,
+        exc.detail,
+    )
+    return JSONResponse(
+        status_code=429,
+        content={"detail": f"Rate limit exceeded: {exc.detail}"},
+    )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,6 +128,20 @@ app.add_middleware(
         "http://localhost:4200",
         "http://localhost:4201",
         "http://localhost:4202",
+        # omgevingsvergunning-register.nl viewer (static dev-server)
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8000",
+        "http://localhost:8080",
+        # ponsenkaart.nl viewer (static dev-server)
+        "http://localhost:8766",
+        # Productie-domeinen (Hostnet-registratie 2026-05-23)
+        "https://ponsenkaart.nl",
+        "https://www.ponsenkaart.nl",
+        "https://omgevingsvergunningenregister.nl",       # canoniek
+        "https://www.omgevingsvergunningenregister.nl",
+        "https://omgevingsvergunning-register.nl",        # legacy/typo-redirect
+        "https://www.omgevingsvergunning-register.nl",
     ],
     allow_methods=["GET", "POST"],
     allow_headers=["X-Api-Key", "Content-Type"],
@@ -49,13 +150,41 @@ app.add_middleware(
 api_key_header = APIKeyHeader(name="X-Api-Key", auto_error=False)
 
 
-async def verify_key(key: str | None = Security(api_key_header)):
-    if API_KEY and key != API_KEY:
+async def verify_key(
+    request: Request,
+    key: str | None = Security(api_key_header),
+) -> str | None:
+    """Valideer X-Api-Key. Retourneert de tier ('public'/'private'/'legacy')
+    of None als er geen keys geconfigureerd zijn (open access in dev).
+
+    Zet `request.state.tier` zodat logging/middleware weet welke tier de
+    call gebruikte. Logt elke geauthenticeerde call op DEBUG-niveau zodat
+    je bij scraper-misbruik kunt achterhalen welke key lekt.
+    """
+    if not ALLOWED_KEYS:
+        request.state.tier = "anonymous"
+        return None
+
+    tier = ALLOWED_KEYS.get(key or "")
+    if tier is None:
+        logger.info(
+            "auth_fail ip=%s path=%s",
+            _client_ip(request), request.url.path,
+        )
         raise HTTPException(status_code=403, detail="Invalid API key")
+
+    request.state.tier = tier
+    logger.debug(
+        "auth_ok tier=%s ip=%s path=%s",
+        tier, _client_ip(request), request.url.path,
+    )
+    return tier
 
 
 app.include_router(keywords_router, dependencies=[Depends(verify_key)])
 app.include_router(regelteksten_router, dependencies=[Depends(verify_key)])
+app.include_router(vergunningen_router, dependencies=[Depends(verify_key)])
+app.include_router(ponsenkaart_router, dependencies=[Depends(verify_key)])
 
 
 @app.get("/health")
@@ -117,7 +246,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
         cur.execute(
             f"""
             SELECT r.opschrift AS regeling, r.documenttype,
-                   te.opschrift AS artikel, te.inhoud,
+                   ocd_artikel_label(te.opschrift, te.wid) AS artikel, te.inhoud,
                    string_agg(DISTINCT a.naam, ' | ') AS activiteit,
                    string_agg(DISTINCT ala.kwalificatie, ' | ') AS kwalificatie
             FROM p2p.activiteit_locatieaanduiding ala
@@ -128,7 +257,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
             JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
             WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
             {combined_filter}
-            GROUP BY r.opschrift, r.documenttype, te.opschrift, te.inhoud
+            GROUP BY r.opschrift, r.documenttype, te.opschrift, te.wid, te.inhoud
             """,
             (x, y, *combined_params),
         )
@@ -166,7 +295,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                     cur.execute(
                         f"""
                         SELECT r.opschrift AS regeling, r.documenttype,
-                               te.opschrift AS artikel, te.inhoud
+                               ocd_artikel_label(te.opschrift, te.wid) AS artikel, te.inhoud
                         FROM p2p.tekst_element te
                         JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
                         WHERE r.frbr_work = %s
@@ -187,7 +316,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                     cur.execute(
                         """
                         SELECT r.opschrift AS regeling, r.documenttype,
-                               te.opschrift AS artikel, te.inhoud,
+                               ocd_artikel_label(te.opschrift, te.wid) AS artikel, te.inhoud,
                                ts_rank(
                                  to_tsvector('dutch', coalesce(te.inhoud_plain, '')),
                                  to_tsquery('dutch', %s)
@@ -229,7 +358,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
         cur.execute(
             f"""
             SELECT r.opschrift AS regeling, r.documenttype,
-                   te.opschrift AS artikel, te.inhoud
+                   ocd_artikel_label(te.opschrift, te.wid) AS artikel, te.inhoud
             FROM p2p.tekst_element te
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE r.documenttype IN ('Omgevingsvisie', 'Programma')
@@ -332,7 +461,7 @@ def zoek(q: str = Query(..., min_length=2), limit: int = Query(20, le=100)):
             """
             (SELECT 'Ow' AS regime,
                     r.opschrift AS document,
-                    te.opschrift AS artikel,
+                    ocd_artikel_label(te.opschrift, te.wid) AS artikel,
                     LEFT(te.inhoud_plain, 500) AS tekst
              FROM p2p.tekst_element te
              JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
@@ -433,7 +562,10 @@ def normwaarde(
                         l.locatie_type,
                         r.opschrift                         AS regeling,
                         r.frbr_expression,
-                        te.opschrift                        AS artikel,
+                        -- V6.19: artikel via ocd_artikel_label() — opschrift indien gevuld,
+                        -- anders 'Artikel X.Y' uit wid. Zie
+                        -- dso-loader/scripts/2026-05-add-ocd-artikel-label-fn.sql.
+                        ocd_artikel_label(te.opschrift, te.wid)                                   AS artikel,
                         te.wid                              AS artikel_wid,
                         LEFT(te.inhoud_plain, 800)          AS regeltekst_excerpt
                 FROM    p2p.normwaarde                  nw
@@ -637,7 +769,7 @@ def activiteit(
                         l.locatie_type,
                         r.opschrift                             AS regeling,
                         r.frbr_expression,
-                        te.opschrift                            AS artikel,
+                        ocd_artikel_label(te.opschrift, te.wid)                            AS artikel,
                         te.wid                                  AS artikel_wid,
                         LEFT(te.inhoud_plain, 800)              AS regeltekst_excerpt
                 FROM    p2p.activiteit_locatieaanduiding ala
@@ -894,7 +1026,7 @@ def regeltekst(
             """
             WITH matched AS (
                 SELECT  jr.identificatie                    AS juridische_regel_id,
-                        te.opschrift                        AS artikel,
+                        ocd_artikel_label(te.opschrift, te.wid)                        AS artikel,
                         te.wid                              AS artikel_wid,
                         LEFT(te.inhoud_plain, 800)          AS regeltekst_excerpt,
                         te.regeling_expression,
@@ -943,6 +1075,543 @@ def regeltekst(
         "ts_query": ts_query_str,
         "count": len(rows),
         "matches": rows,
+    }
+
+
+def _parse_scored_keyword(kw: str) -> tuple[str, float] | None:
+    """V7: parse 'term:weight' input van /v1/objecten + /v1/regels.
+
+    Voorbeelden: `bouwhoogte:1.00`, `hoogte:0.70`, `gebouw` (zonder ':weight'
+    → default 1.0). Geeft None bij parse-fout zodat caller 'm kan overslaan.
+    """
+    if not kw:
+        return None
+    if ":" in kw:
+        term, _, w = kw.rpartition(":")
+        try:
+            weight = float(w)
+        except ValueError:
+            return None
+    else:
+        term, weight = kw, 1.0
+    term = term.strip()
+    if not term or weight <= 0:
+        return None
+    return term, max(0.0, min(1.0, weight))
+
+
+def _aggregate_objecten_per_object_id(scored: list[dict]) -> list[dict]:
+    """V7: aggregeer scored cross-product rows naar één match per object_id.
+
+    Input: lijst van {type, score, matched_keywords, object} waar dezelfde
+    object_id meerdere keren voorkomt (één rij per artikel-lid).
+    Output: één rij per object_id met:
+    - score: max() over de groep
+    - matched_keywords: union per (term, veld) met max gewicht_bijdrage
+    - object.artikelen: array van {artikel, artikel_wid, regeltekst_excerpt}
+      gesorteerd op artikel_wid; artikel/artikel_wid/regeltekst_excerpt
+      verdwijnen van het object-niveau.
+
+    Volgorde-stabiel: groepen verschijnen in volgorde van eerste optreden in
+    `scored` (caller sorteert daarna alsnog op score).
+    """
+    groups: dict[str, dict] = {}
+    order: list[str] = []
+    for item in scored:
+        obj = item["object"]
+        oid = obj["object_id"]
+        if oid not in groups:
+            order.append(oid)
+            # Object-niveau payload zonder artikel-velden
+            obj_level = {k: v for k, v in obj.items() if k not in (
+                "artikel", "artikel_wid", "regeltekst_excerpt",
+            )}
+            obj_level["artikelen"] = []
+            groups[oid] = {
+                "type": item["type"],
+                "score": item["score"],
+                "matched_keywords": list(item["matched_keywords"]),
+                "object": obj_level,
+                # Tracking voor matched_keywords-merge
+                "_mk_index": {
+                    (mk["term"], mk["veld"]): mk for mk in item["matched_keywords"]
+                },
+                # Tracking voor artikel-dedupe binnen group
+                "_art_wids": set(),
+            }
+        g = groups[oid]
+        # Score: max over de groep
+        if item["score"] > g["score"]:
+            g["score"] = item["score"]
+        # matched_keywords: union, max gewicht_bijdrage per (term, veld)
+        for mk in item["matched_keywords"]:
+            key = (mk["term"], mk["veld"])
+            existing = g["_mk_index"].get(key)
+            if existing is None or mk.get("gewicht_bijdrage", 0) > existing.get("gewicht_bijdrage", 0):
+                g["_mk_index"][key] = mk
+        # artikel-verwijzing toevoegen (uniek op artikel_wid)
+        art_wid = obj.get("artikel_wid")
+        if art_wid and art_wid not in g["_art_wids"]:
+            g["_art_wids"].add(art_wid)
+            g["object"]["artikelen"].append({
+                "artikel": obj.get("artikel"),
+                "artikel_wid": art_wid,
+                "regeltekst_excerpt": obj.get("regeltekst_excerpt"),
+            })
+
+    # Finalize: rebuild matched_keywords from index, drop tracking-keys, sort artikelen
+    result: list[dict] = []
+    for oid in order:
+        g = groups[oid]
+        g["matched_keywords"] = list(g["_mk_index"].values())
+        g["object"]["artikelen"].sort(key=lambda a: a.get("artikel_wid") or "")
+        del g["_mk_index"]
+        del g["_art_wids"]
+        result.append(g)
+    return result
+
+
+# V7 — veld-gewichten voor /v1/objecten scoring. Zie objecten-regels-retrieve-endpoint.md §"Open punt 2"
+_OBJ_FIELD_WEIGHT_NAAM         = 1.00  # primary_naam (norm_naam/activiteit_naam/bestemming_naam/onderwerp_naam)
+_OBJ_FIELD_WEIGHT_GROEP        = 0.50  # secondary categorie
+_OBJ_FIELD_WEIGHT_KWALIFICATIE = 0.70  # activiteit-kwalificatie of bestemming-hoofdgroep
+_OBJ_FIELD_WEIGHT_REGELING     = 0.30  # regeling-naam
+_OBJ_FIELD_WEIGHT_EXCERPT      = 0.30  # regeltekst_excerpt FTS-achtig
+_OBJ_FIELD_WEIGHT_ARTIKEL      = 0.20  # artikel-naam (meestal toevallig)
+
+
+def _score_object_against_keywords(
+    obj_fields: dict[str, str | None],
+    keywords: list[tuple[str, float]],
+) -> tuple[float, list[dict]]:
+    """V7: scoor een object tegen gewogen trefwoorden.
+
+    `obj_fields` heeft sleutels die overeenkomen met de veld-gewichten (naam,
+    groep, kwalificatie, regeling, excerpt, artikel) en string-waarden.
+    Score = Σ over (keyword × field × match_strength).
+    """
+    field_weights = {
+        "naam":         _OBJ_FIELD_WEIGHT_NAAM,
+        "groep":        _OBJ_FIELD_WEIGHT_GROEP,
+        "kwalificatie": _OBJ_FIELD_WEIGHT_KWALIFICATIE,
+        "regeling":     _OBJ_FIELD_WEIGHT_REGELING,
+        "excerpt":      _OBJ_FIELD_WEIGHT_EXCERPT,
+        "artikel":      _OBJ_FIELD_WEIGHT_ARTIKEL,
+    }
+    score = 0.0
+    matched: list[dict] = []
+    for term, kw_weight in keywords:
+        term_l = term.lower()
+        if not term_l or len(term_l) < 2:
+            continue
+        for field_name, field_weight in field_weights.items():
+            content = (obj_fields.get(field_name) or "").lower()
+            if not content:
+                continue
+            if re.search(rf"\b{re.escape(term_l)}\b", content):
+                ms = 1.0
+            elif term_l in content:
+                ms = 0.7
+            else:
+                continue
+            contribution = kw_weight * field_weight * ms
+            score += contribution
+            matched.append({
+                "term": term,
+                "veld": field_name,
+                "match_strength": ms,
+                "gewicht_bijdrage": round(contribution, 4),
+            })
+    return score, matched
+
+
+# V7 performance-bound: per type max N rows uit de DB pakken voor scoring.
+# Adres-cases kunnen 8000+ rijen retourneren wat scoring in Python te traag maakt.
+# 200/type × 4 types = 800 max objecten, ruim voldoende voor ranking.
+_OBJ_FETCH_LIMIT_PER_TYPE = 200
+
+
+def _fetch_objecten_normwaarde(cur, x: float, y: float) -> list[dict]:
+    cur.execute(
+        """
+        SELECT  'normwaarde'::text                          AS type,
+                n.identificatie                              AS object_id,
+                n.naam                                       AS naam,
+                n.groep                                      AS groep,
+                NULL::text                                   AS kwalificatie,
+                nw.kwantitatieve_waarde,
+                nw.kwalitatieve_waarde,
+                n.eenheid,
+                l.identificatie                              AS locatie_id,
+                l.noemer                                     AS locatie_naam,
+                l.locatie_type,
+                r.opschrift                                  AS regeling,
+                r.frbr_expression,
+                ocd_artikel_label(te.opschrift, te.wid)      AS artikel,
+                te.wid                                       AS artikel_wid,
+                LEFT(te.inhoud_plain, 800)                   AS regeltekst_excerpt
+        FROM    p2p.normwaarde nw
+        JOIN    p2p.norm n ON n.identificatie = nw.norm_id
+        JOIN    p2p.locatie l ON l.identificatie = nw.locatie_id
+        LEFT JOIN p2p.juridische_regel_norm jrn ON jrn.norm_id = n.identificatie
+        LEFT JOIN p2p.juridische_regel jr ON jr.identificatie = jrn.juridische_regel_id
+        LEFT JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+        LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+        WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+        LIMIT %s
+        """,
+        (x, y, _OBJ_FETCH_LIMIT_PER_TYPE),
+    )
+    return cur.fetchall()
+
+
+def _fetch_objecten_activiteit(cur, x: float, y: float) -> list[dict]:
+    cur.execute(
+        """
+        SELECT  'activiteit'::text                          AS type,
+                a.identificatie                              AS object_id,
+                a.naam                                       AS naam,
+                a.groep                                      AS groep,
+                ala.kwalificatie                             AS kwalificatie,
+                NULL::numeric                                AS kwantitatieve_waarde,
+                NULL::text                                   AS kwalitatieve_waarde,
+                NULL::text                                   AS eenheid,
+                l.identificatie                              AS locatie_id,
+                l.noemer                                     AS locatie_naam,
+                l.locatie_type,
+                r.opschrift                                  AS regeling,
+                r.frbr_expression,
+                ocd_artikel_label(te.opschrift, te.wid)      AS artikel,
+                te.wid                                       AS artikel_wid,
+                LEFT(te.inhoud_plain, 800)                   AS regeltekst_excerpt
+        FROM    p2p.activiteit_locatieaanduiding ala
+        JOIN    p2p.activiteit a ON a.identificatie = ala.activiteit_id
+        JOIN    p2p.locatie l ON l.identificatie = ala.locatie_id
+        JOIN    p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+        LEFT JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+        LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+        WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+        LIMIT %s
+        """,
+        (x, y, _OBJ_FETCH_LIMIT_PER_TYPE),
+    )
+    return cur.fetchall()
+
+
+def _fetch_objecten_bestemming(cur, x: float, y: float) -> list[dict]:
+    cur.execute(
+        """
+        SELECT  'bestemming'::text                          AS type,
+                po.identificatie                             AS object_id,
+                po.naam                                      AS naam,
+                po.bestemmingshoofdgroep                     AS groep,
+                po.object_type                               AS kwalificatie,
+                NULL::numeric                                AS kwantitatieve_waarde,
+                NULL::text                                   AS kwalitatieve_waarde,
+                NULL::text                                   AS eenheid,
+                NULL::text                                   AS locatie_id,
+                NULL::text                                   AS locatie_naam,
+                NULL::text                                   AS locatie_type,
+                ri.naam                                      AS regeling,
+                NULL::text                                   AS frbr_expression,
+                po.artikelnummer                             AS artikel,
+                NULL::text                                   AS artikel_wid,
+                NULL::text                                   AS regeltekst_excerpt
+        FROM    wro.planobject po
+        JOIN    wro.ruimtelijk_instrument ri ON ri.idn = po.instrument_idn
+        WHERE   ST_Intersects(po.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+          AND   LOWER(po.object_type) IN ('enkelbestemming', 'dubbelbestemming', 'gebiedsaanduiding', 'functieaanduiding')
+          AND   ri.pons_status = 'actief'
+        LIMIT %s
+        """,
+        (x, y, _OBJ_FETCH_LIMIT_PER_TYPE),
+    )
+    return cur.fetchall()
+
+
+def _fetch_objecten_gebiedsaanwijzing(cur, x: float, y: float) -> list[dict]:
+    cur.execute(
+        """
+        SELECT  'gebiedsaanwijzing'::text                   AS type,
+                ga.identificatie                             AS object_id,
+                ga.naam                                      AS naam,
+                ga.groep                                     AS groep,
+                NULL::text                                   AS kwalificatie,
+                NULL::numeric                                AS kwantitatieve_waarde,
+                NULL::text                                   AS kwalitatieve_waarde,
+                NULL::text                                   AS eenheid,
+                l.identificatie                              AS locatie_id,
+                l.noemer                                     AS locatie_naam,
+                l.locatie_type,
+                r.opschrift                                  AS regeling,
+                r.frbr_expression,
+                ocd_artikel_label(te.opschrift, te.wid)      AS artikel,
+                te.wid                                       AS artikel_wid,
+                LEFT(te.inhoud_plain, 800)                   AS regeltekst_excerpt
+        FROM    p2p.gebiedsaanwijzing ga
+        JOIN    p2p.locatie l ON l.identificatie = ga.locatie_id
+        LEFT JOIN p2p.juridische_regel_gebiedsaanwijzing jrg ON jrg.gebiedsaanwijzing_id = ga.identificatie
+        LEFT JOIN p2p.juridische_regel jr ON jr.identificatie = jrg.juridische_regel_id
+        LEFT JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+        LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+        WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+        LIMIT %s
+        """,
+        (x, y, _OBJ_FETCH_LIMIT_PER_TYPE),
+    )
+    return cur.fetchall()
+
+
+@app.get("/v1/objecten", dependencies=[Depends(verify_key)])
+def objecten(
+    x: float = Query(..., description="RD x-coordinaat (EPSG:28992)"),
+    y: float = Query(..., description="RD y-coordinaat (EPSG:28992)"),
+    keywords: list[str] = Query(
+        ...,
+        description="Gewogen trefwoorden als 'term:gewicht' (bv. keywords=bouwhoogte:1.00&keywords=hoogte:0.70)",
+    ),
+    min_score: float = Query(0.0, ge=0.0, description="Filter objecten met score < min_score weg"),
+    limit: int = Query(20, le=100),
+    include_types: str = Query(
+        "normwaarde,activiteit,bestemming,gebiedsaanwijzing",
+        description="Komma-gescheiden lijst objecttypes (default: alle vier)",
+    ),
+):
+    """V7: verenigd objecten-endpoint. Vervangt /v1/normwaarde + /v1/activiteit +
+    /v1/bestemming + /v1/onderwerp met één uniforme gewogen-scoring.
+
+    Per object op deze locatie wordt elke trefwoord-term gematcht tegen meerdere
+    velden (naam, groep, kwalificatie, regeling, excerpt, artikel). Score is een
+    gewogen som van alle veld-matches × keyword-gewicht × match_strength.
+
+    Match-strength heuristiek per veld:
+    - 1.0: term staat als heel-woord substring in het veld
+    - 0.7: term staat als substring (geen woordgrens)
+    - 0.0: geen match
+    """
+    parsed = [p for p in (_parse_scored_keyword(k) for k in keywords) if p]
+    if not parsed:
+        raise HTTPException(status_code=400, detail="Geef minimaal één geldige `keywords=term:gewicht`-parameter mee.")
+    types_set = {t.strip().lower() for t in include_types.split(",") if t.strip()}
+
+    with get_conn() as conn, conn.cursor() as cur:
+        rows: list[dict] = []
+        if "normwaarde" in types_set:
+            rows.extend(_fetch_objecten_normwaarde(cur, x, y))
+        if "activiteit" in types_set:
+            rows.extend(_fetch_objecten_activiteit(cur, x, y))
+        if "bestemming" in types_set:
+            rows.extend(_fetch_objecten_bestemming(cur, x, y))
+        if "gebiedsaanwijzing" in types_set:
+            rows.extend(_fetch_objecten_gebiedsaanwijzing(cur, x, y))
+
+    # Dedupe op (type, object_id, locatie_id, artikel_wid) — JOIN's kunnen
+    # dezelfde object/regel-combinatie meerdere keren teruggeven door multiple
+    # locaties (bv. norm gekoppeld aan 5 paragrafen van hetzelfde artikel).
+    seen_keys: set[tuple] = set()
+    deduped: list[dict] = []
+    for r in rows:
+        key = (r["type"], r["object_id"], r.get("locatie_id"), r.get("artikel_wid"))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(r)
+
+    # Score each object
+    scored: list[dict] = []
+    for r in deduped:
+        obj_fields = {
+            "naam":         r.get("naam"),
+            "groep":        r.get("groep"),
+            "kwalificatie": r.get("kwalificatie"),
+            "regeling":     r.get("regeling"),
+            "excerpt":      r.get("regeltekst_excerpt"),
+            "artikel":      r.get("artikel"),
+        }
+        score, matched = _score_object_against_keywords(obj_fields, parsed)
+        if score < min_score:
+            continue
+        # Compose response item — `object` veld bevat type-specifieke payload
+        obj_payload = {
+            "object_id": r["object_id"],
+            "naam": r["naam"],
+            "groep": r.get("groep"),
+            "regeling": r.get("regeling"),
+            "artikel": r.get("artikel"),
+            "artikel_wid": r.get("artikel_wid"),
+            "regeltekst_excerpt": r.get("regeltekst_excerpt"),
+        }
+        if r["type"] == "normwaarde":
+            obj_payload["kwantitatieve_waarde"] = r.get("kwantitatieve_waarde")
+            obj_payload["kwalitatieve_waarde"] = r.get("kwalitatieve_waarde")
+            obj_payload["eenheid"] = r.get("eenheid")
+        elif r["type"] == "activiteit":
+            obj_payload["kwalificatie"] = r.get("kwalificatie")
+        elif r["type"] == "bestemming":
+            obj_payload["object_type"] = r.get("kwalificatie")  # enkel/dubbel/functie/gebied
+            obj_payload["hoofdgroep"] = r.get("groep")
+        elif r["type"] == "gebiedsaanwijzing":
+            obj_payload["onderwerp_groep"] = r.get("groep")
+
+        scored.append({
+            "type": r["type"],
+            "score": round(score, 4),
+            "matched_keywords": matched,
+            "object": obj_payload,
+        })
+
+    # Aggregeer artikel-cross-product rijen naar één match per object_id.
+    aggregated = _aggregate_objecten_per_object_id(scored)
+    # Stable secondary sort op object_id zodat score-ties altijd dezelfde
+    # volgorde geven (reproduceerbaarheid van top-N selectie).
+    aggregated.sort(key=lambda r: (-r["score"], r["object"].get("object_id", "")))
+
+    return {
+        "x": x,
+        "y": y,
+        "keywords": [{"term": t, "gewicht": w} for t, w in parsed],
+        "min_score": min_score,
+        "include_types": sorted(types_set),
+        "count": len(aggregated[:limit]),
+        "matches": aggregated[:limit],
+    }
+
+
+@app.get("/v1/regels", dependencies=[Depends(verify_key)])
+def regels(
+    x: float = Query(..., description="RD x-coordinaat (EPSG:28992)"),
+    y: float = Query(..., description="RD y-coordinaat (EPSG:28992)"),
+    keywords: list[str] = Query(
+        ...,
+        description="Gewogen trefwoorden als 'term:gewicht' (bv. keywords=bouwhoogte:1.00&keywords=hoogte:0.70). "
+                    "Zonder ':gewicht' wordt 1.0 verondersteld.",
+    ),
+    min_score: float = Query(0.0, ge=0.0, description="Filter regels met composite score < min_score weg"),
+    limit: int = Query(10, le=50),
+):
+    """V7: gewogen FTS + keyword-match retrieval over juridische regels.
+
+    Vervanger van /v1/regeltekst. Verschil:
+    - Trefwoorden hebben individuele gewichten (relevantie uit /v1/keywords/extract)
+    - Composite score: ts_rank * 0.5 + Σ(keyword.gewicht * match_strength) * 0.5
+    - min_score-filter knipt zwakke matches weg vóór de top-N selectie
+
+    Match-strength heuristiek:
+    - 1.0 als de term als heel-woord substring in regeltekst-excerpt staat
+    - 0.5 als de term alleen via FTS-token-match wordt geraakt (case van plurals,
+      stemming) — wordt op rij-niveau geschat door substring-test op excerpt
+    """
+    parsed = [p for p in (_parse_scored_keyword(k) for k in keywords) if p]
+    if not parsed:
+        raise HTTPException(status_code=400, detail="Geef minimaal één geldige `keywords=term:gewicht`-parameter mee.")
+
+    # FTS-tsquery — sanitize per term tot alphanumeric+hyphen
+    sanitized_terms: list[tuple[str, float]] = []
+    for term, weight in parsed:
+        tok = re.sub(r"[^\wëïüöäáéíóú\-]+", " ", term, flags=re.IGNORECASE).strip()
+        if tok and len(tok) >= 2:
+            # Multi-word term → split tot losse FTS-tokens, behoud gewicht
+            for t in tok.split():
+                if len(t) >= 2:
+                    sanitized_terms.append((t.lower(), weight))
+    if not sanitized_terms:
+        raise HTTPException(status_code=400, detail="Geen geldige FTS-tokens uit de trefwoorden te halen.")
+
+    ts_query_str = " | ".join(sorted({t for t, _ in sanitized_terms}))
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH matched AS (
+                SELECT  jr.identificatie                    AS juridische_regel_id,
+                        ocd_artikel_label(te.opschrift, te.wid) AS artikel,
+                        te.wid                              AS artikel_wid,
+                        LEFT(te.inhoud_plain, 800)          AS regeltekst_excerpt,
+                        te.regeling_expression,
+                        ts_rank(
+                            to_tsvector('dutch'::regconfig, COALESCE(te.inhoud_plain, '')),
+                            to_tsquery('dutch'::regconfig, %s)
+                        )                                   AS ts_rank_score
+                FROM    p2p.juridische_regel               jr
+                JOIN    p2p.tekst_element                  te  ON te.wid = jr.regeltekst_wid
+                LEFT JOIN p2p.activiteit_locatieaanduiding ala ON ala.juridische_regel_id = jr.identificatie
+                LEFT JOIN p2p.juridische_regel_norm        jrn ON jrn.juridische_regel_id = jr.identificatie
+                LEFT JOIN p2p.norm                         n   ON n.identificatie = jrn.norm_id
+                LEFT JOIN p2p.juridische_regel_gebiedsaanwijzing jrg ON jrg.juridische_regel_id = jr.identificatie
+                LEFT JOIN p2p.gebiedsaanwijzing            ga  ON ga.identificatie = jrg.gebiedsaanwijzing_id
+                JOIN    p2p.locatie                        l
+                        ON l.identificatie IN (ala.locatie_id, n.identificatie, ga.locatie_id)
+                WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                  AND   to_tsvector('dutch'::regconfig, COALESCE(te.inhoud_plain, '')) @@ to_tsquery('dutch'::regconfig, %s)
+            ),
+            best_per_jr AS (
+                SELECT DISTINCT ON (juridische_regel_id)
+                       juridische_regel_id, artikel, artikel_wid,
+                       regeltekst_excerpt, regeling_expression, ts_rank_score
+                FROM   matched
+                ORDER  BY juridische_regel_id, ts_rank_score DESC
+            )
+            SELECT  b.juridische_regel_id,
+                    b.artikel,
+                    b.artikel_wid,
+                    b.regeltekst_excerpt,
+                    b.ts_rank_score,
+                    r.opschrift                             AS regeling,
+                    r.bronhouder
+            FROM    best_per_jr                        b
+            LEFT JOIN p2p.regeling                     r  ON r.frbr_expression = b.regeling_expression
+            ORDER BY b.ts_rank_score DESC
+            LIMIT %s
+            """,
+            (ts_query_str, x, y, ts_query_str, limit * 3),  # haal extra binnen, filter later
+        )
+        rows = cur.fetchall()
+
+    # Composite score in Python: ts_rank * 0.5 + Σ(weight * match_strength) * 0.5
+    scored: list[dict] = []
+    for row in rows:
+        excerpt_lower = (row.get("regeltekst_excerpt") or "").lower()
+        matched: list[dict] = []
+        keyword_score = 0.0
+        for term, weight in sanitized_terms:
+            term_lower = term.lower()
+            if not term_lower or len(term_lower) < 2:
+                continue
+            # match_strength: 1.0 voor heel-woord substring, 0.5 als alleen FTS-token-match
+            if re.search(rf"\b{re.escape(term_lower)}\b", excerpt_lower):
+                ms = 1.0
+            elif term_lower in excerpt_lower:
+                ms = 0.7
+            else:
+                ms = 0.5  # FTS heeft 'm geraakt via stemming/conjugatie
+            keyword_score += weight * ms
+            matched.append({"term": term, "weight": weight, "match_strength": ms})
+        ts_part = float(row.get("ts_rank_score") or 0.0)
+        composite = ts_part * 0.5 + keyword_score * 0.5
+        if composite < min_score:
+            continue
+        scored.append({
+            "score": round(composite, 4),
+            "ts_rank": round(ts_part, 4),
+            "keyword_score": round(keyword_score, 4),
+            "juridische_regel_id": row["juridische_regel_id"],
+            "regeling": row["regeling"],
+            "artikel": row["artikel"],
+            "artikel_wid": row["artikel_wid"],
+            "regeltekst_excerpt": row["regeltekst_excerpt"],
+            "matched_keywords": matched,
+        })
+
+    # Stable secondary sort op artikel_wid voor deterministische top-N.
+    scored.sort(key=lambda r: (-r["score"], r.get("artikel_wid") or ""))
+    return {
+        "x": x,
+        "y": y,
+        "keywords": [{"term": t, "gewicht": w} for t, w in parsed],
+        "min_score": min_score,
+        "ts_query": ts_query_str,
+        "count": len(scored[:limit]),
+        "matches": scored[:limit],
     }
 
 
@@ -2287,7 +2956,7 @@ def viewer_ala(
                 a.naam              AS activiteit,
                 a.groep             AS activiteit_groep,
                 ala.kwalificatie,
-                te.opschrift        AS artikel,
+                ocd_artikel_label(te.opschrift, te.wid)        AS artikel,
                 te.wid              AS artikel_wid,
                 l.identificatie     AS locatie_id,
                 l.noemer            AS locatie_noemer,
@@ -2587,6 +3256,191 @@ def viewer_conv_boom(expression: str):
             "model": conv_meta_row["llm_model"] if conv_meta_row else None,
         } if conv_meta_row else None,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Wijzigingen-overlay (Plan B)
+# ─────────────────────────────────────────────────────────────────────
+
+# Annotatie-types die in de viewer-overlay zichtbaar zijn. SKOS-pipeline-
+# types als `regeltekst` en `juridische_regel` zijn technische koppelingen
+# tussen tekst en object — geen IMOW-objecten waar de gebruiker als 'object'
+# naar kijkt. Filteren scheelt ~95% van de annotatie-deltas zonder UI-verlies.
+_WIJZIGING_IMOW_TYPES = (
+    "activiteit",
+    "gebiedsaanwijzing",
+    "omgevingsnorm",
+    "omgevingswaarde",
+    "locatie",
+    "tekstdeel",
+)
+
+
+def _strip_tekst_elementen(rows: list[dict]) -> list[dict]:
+    """Houd alleen elementen met `wijzigactie`/`vervallen`/`bevatRenvooi` +
+    hun parent-chain naar de root, zodat de boom-hiërarchie compleet blijft.
+
+    Spiegelt de fixture-strip uit Plan A — zonder deze filter krijgt de
+    frontend de volle-boom-mirror per bron (~1500 rijen voor een gemiddeld
+    omgevingsplan × N bronnen). Met filter typisch <50 rijen per bron."""
+    by_id = {r["id"]: r for r in rows}
+    keep_ids: set[int] = set()
+    for r in rows:
+        if not (r["wijzigactie"] or r["vervallen"] or r["bevat_renvooi"]):
+            continue
+        current = r
+        while current is not None:
+            keep_ids.add(current["id"])
+            pid = current.get("parent_id")
+            if pid is None:
+                break
+            current = by_id.get(pid)
+    return [r for r in rows if r["id"] in keep_ids]
+
+
+def _row_to_tekst_element(r: dict) -> dict:
+    """snake_case DB-rij → camelCase TS-shape (zie wijziging.model.ts)."""
+    return {
+        "id": r["id"],
+        "parentId": r["parent_id"],
+        "eid": r["eid"],
+        "wid": r["wid"],
+        "elementType": r["element_type"],
+        "nummer": r["nummer"],
+        "opschrift": r["opschrift"],
+        "inhoud": r["inhoud"],
+        "wijzigactie": r["wijzigactie"],
+        "vervallen": r["vervallen"],
+        "bevatRenvooi": r["bevat_renvooi"],
+        "bevatOntwerpInformatie": r["bevat_ontwerp_informatie"],
+        "volgorde": r["volgorde"],
+    }
+
+
+def _row_to_annotatie_delta(r: dict) -> dict:
+    return {
+        "type": r["type"],
+        "identificatie": r["identificatie"],
+        "bewerking": r["bewerking"],
+        "naam": r["naam"],
+        "payload": r["payload"],
+    }
+
+
+def _row_to_locatie_delta(r: dict) -> dict:
+    # ST_AsGeoJSON levert een JSON-string; psycopg returnt 'm als str.
+    # json.loads ééns hier zodat de response-laag een gestructureerd object
+    # zonder dubbel-encoded JSON-string-veld krijgt.
+    geom = r.get("geometrie_json")
+    if isinstance(geom, str):
+        import json
+        geom = json.loads(geom)
+    return {
+        "locatieId": r["locatie_id"],
+        "bewerking": r["bewerking"],
+        "locatieType": r["locatie_type"],
+        "noemer": r["noemer"],
+        "geometrie": geom,
+    }
+
+
+def _row_to_besluit_meta(r: dict) -> dict:
+    return {
+        "ontwerpbesluitId": r["ontwerpbesluit_id"],
+        "soort": r["soort"],
+        "status": r["status"],
+        "opschrift": r["opschrift"],
+        "bekendOp": r["bekend_op"].isoformat() if r["bekend_op"] else None,
+        "beginGeldigheid": r["begin_geldigheid"].isoformat() if r["begin_geldigheid"] else None,
+        "beginInwerking": r["begin_inwerking"].isoformat() if r["begin_inwerking"] else None,
+        "bronhouder": r["bronhouder"],
+        "documenttype": r["documenttype"],
+        "isVervangRegeling": r["is_vervang_regeling"],
+    }
+
+
+@app.get("/v1/viewer/regeling/{expression:path}/wijzigingen",
+        dependencies=[Depends(verify_key)])
+def viewer_wijzigingen(expression: str):
+    """Aankomende wijzigingen (ontwerpen + besluitversies) op een regeling.
+
+    Volgt de Plan A-TS-shape (`WijzigingenFixture`): één response met
+    `regelingWork` + `wijzigingen[]`. Per bron de gestripte tekst-elementen
+    (gewijzigd + parent-chain), IMOW-annotatie-deltas en locatie-deltas
+    (incl. NULL-geometrie waar de backfill nog niet liep — Plan D)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT frbr_work FROM p2p.regeling WHERE frbr_expression = %s",
+            (expression,),
+        )
+        reg = cur.fetchone()
+        if not reg:
+            raise HTTPException(404, "Regeling niet gevonden")
+        regeling_work = reg["frbr_work"]
+
+        # Bronnen — exclusief vervangRegeling-besluiten (die zijn geen
+        # renvooi-overlay; volledige nieuwe regeling).
+        cur.execute(
+            """
+            SELECT ontwerpbesluit_id, soort, status, opschrift,
+                   bekend_op, begin_geldigheid, begin_inwerking,
+                   bronhouder, documenttype, is_vervang_regeling
+            FROM   p2pwijziging.besluit
+            WHERE  regeling_work = %s
+              AND  is_vervang_regeling = FALSE
+            ORDER  BY bekend_op NULLS LAST
+            """,
+            (regeling_work,),
+        )
+        besluiten = cur.fetchall()
+
+        wijzigingen = []
+        for b in besluiten:
+            ob_id = b["ontwerpbesluit_id"]
+
+            cur.execute(
+                """
+                SELECT id, parent_id, eid, wid, element_type,
+                       nummer, opschrift, inhoud, wijzigactie, vervallen,
+                       bevat_renvooi, bevat_ontwerp_informatie, volgorde
+                FROM   p2pwijziging.tekst_element
+                WHERE  ontwerpbesluit_id = %s
+                ORDER  BY volgorde
+                """,
+                (ob_id,),
+            )
+            tekst_rows = cur.fetchall()
+            tekst_kept = _strip_tekst_elementen(tekst_rows)
+
+            cur.execute(
+                """
+                SELECT type, identificatie, bewerking, naam, payload
+                FROM   p2pwijziging.annotatie_delta
+                WHERE  ontwerpbesluit_id = %s
+                  AND  type = ANY(%s)
+                """,
+                (ob_id, list(_WIJZIGING_IMOW_TYPES)),
+            )
+            ann_rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT locatie_id, bewerking, locatie_type, noemer,
+                       ST_AsGeoJSON(geometrie) AS geometrie_json
+                FROM   p2pwijziging.locatie_delta
+                WHERE  ontwerpbesluit_id = %s
+                """,
+                (ob_id,),
+            )
+            loc_rows = cur.fetchall()
+
+            wijziging = _row_to_besluit_meta(b)
+            wijziging["tekstElementen"] = [_row_to_tekst_element(r) for r in tekst_kept]
+            wijziging["annotatieDeltas"] = [_row_to_annotatie_delta(r) for r in ann_rows]
+            wijziging["locatieDeltas"] = [_row_to_locatie_delta(r) for r in loc_rows]
+            wijzigingen.append(wijziging)
+
+    return {"regelingWork": regeling_work, "wijzigingen": wijzigingen}
 
 
 @app.get("/v1/overzicht", dependencies=[Depends(verify_key)])
