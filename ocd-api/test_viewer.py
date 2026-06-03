@@ -185,6 +185,61 @@ class TestTekst:
 
 
 # ══════════════════════════════════════════════════════════
+# /v1/viewer/teksten (batch)
+# ══════════════════════════════════════════════════════════
+
+class TestTekstenBatch:
+    def _vind_tekst_wids(self, limiet=3):
+        """Verzamel tot `limiet` wids van nodes met heeft_tekst=True."""
+        r = client.get(f"/v1/viewer/regelingen?x={UTR_X}&y={UTR_Y}")
+        expr = r.json()["regelingen"][0]["expression"]
+        r = client.get(f"/v1/viewer/regeling/{expr}/boom")
+        wids: list[str] = []
+
+        def walk(nodes):
+            for node in nodes:
+                if node.get("heeft_tekst"):
+                    wids.append(node["wid"])
+                if len(wids) >= limiet:
+                    return
+                walk(node.get("kinderen", []))
+
+        walk(r.json()["boom"])
+        return wids
+
+    def test_batch_laadt_meerdere_teksten(self):
+        wids = self._vind_tekst_wids()
+        assert wids, "Geen nodes met tekst gevonden"
+
+        r = client.post("/v1/viewer/teksten", json={"wids": wids})
+        assert r.status_code == 200
+        teksten = r.json()["teksten"]
+        # Elke wid komt precies één keer terug, met niet-lege tekst.
+        terug = {t["wid"]: t["tekst"] for t in teksten}
+        for wid in wids:
+            assert wid in terug
+            assert len(terug[wid]) > 0
+        assert len(teksten) == len(terug)  # geen dubbele wids
+
+    def test_batch_lege_lijst(self):
+        r = client.post("/v1/viewer/teksten", json={"wids": []})
+        assert r.status_code == 200
+        assert r.json()["teksten"] == []
+
+    def test_batch_onbekende_wid_wordt_stil_overgeslagen(self):
+        wids = self._vind_tekst_wids(limiet=1)
+        assert wids
+        r = client.post(
+            "/v1/viewer/teksten",
+            json={"wids": [wids[0], "niet-bestaand-wid"]},
+        )
+        assert r.status_code == 200
+        terug = {t["wid"] for t in r.json()["teksten"]}
+        assert wids[0] in terug
+        assert "niet-bestaand-wid" not in terug
+
+
+# ══════════════════════════════════════════════════════════
 # /v1/viewer/geometrie
 # ══════════════════════════════════════════════════════════
 
@@ -401,6 +456,79 @@ def _wijz_url(expr: str) -> str:
     Zonder encoding ziet de FastAPI-path-param de leading-slash niet als
     onderdeel van de expression."""
     return f"/v1/viewer/regeling/{_q(expr, safe='')}/wijzigingen"
+
+
+class TestRegelmix:
+    VERPLICHTE_VELDEN = (
+        "bron_type", "bron_id", "regeling", "documenttype", "bestuurslaag",
+        "artikel", "artikel_nummer", "artikel_opschrift", "hoofdstuk_nummer",
+        "activiteit_naam", "activiteit_id", "inhoud",
+    )
+
+    def test_amsterdam_retourneert_regelmix(self):
+        r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["locatie"]["x"] == AMS_X
+        assert len(data["regelmix"]) > 0
+
+    def test_rijen_hebben_verplichte_velden(self):
+        r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
+        for rij in r.json()["regelmix"]:
+            for veld in self.VERPLICHTE_VELDEN:
+                assert veld in rij, f"Veld {veld} ontbreekt"
+
+    def test_bevat_ow_rijen(self):
+        r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
+        bron_types = {rij["bron_type"] for rij in r.json()["regelmix"]}
+        assert "ow" in bron_types
+
+    def test_bron_type_alleen_ow_of_wro(self):
+        r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
+        for rij in r.json()["regelmix"]:
+            assert rij["bron_type"] in ("ow", "wro")
+
+    def test_inhoud_is_html_gestript(self):
+        r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
+        for rij in r.json()["regelmix"]:
+            assert "<" not in (rij["inhoud"] or ""), \
+                f"HTML niet gestript in {rij['bron_id']}: {rij['inhoud'][:80]}"
+
+    def test_wro_rijen_op_locatie_met_wro_plan(self):
+        """Op een locatie met een actief Wro-plan moet bron_type 'wro' voorkomen,
+        met lege activiteit-velden."""
+        # Vind een locatie met een Wro-plan via het regelingen-endpoint.
+        coords = [(AMS_X, AMS_Y), (UTR_X, UTR_Y)]
+        wro_coord = None
+        for cx, cy in coords:
+            rr = client.get(f"/v1/viewer/regelingen?x={cx}&y={cy}")
+            if rr.json()["wro_plannen"]:
+                wro_coord = (cx, cy)
+                break
+        if not wro_coord:
+            pytest.skip("Geen Wro-plan op de testcoördinaten")
+
+        r = client.get(f"/v1/viewer/regelmix?x={wro_coord[0]}&y={wro_coord[1]}")
+        wro_rijen = [rij for rij in r.json()["regelmix"] if rij["bron_type"] == "wro"]
+        # Een Wro-plan zonder tekst-objecten levert geen rijen; dan is er niets
+        # te asserten over de vorm. Maar als er rijen zijn, moeten ze kloppen.
+        for rij in wro_rijen:
+            assert rij["activiteit_naam"] is None
+            assert rij["activiteit_id"] is None
+            assert rij["bron_id"]
+
+    def test_limit_wordt_gerespecteerd(self):
+        r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}&limit=5")
+        assert r.status_code == 200
+        ow_rijen = [rij for rij in r.json()["regelmix"] if rij["bron_type"] == "ow"]
+        assert len(ow_rijen) <= 5
+
+    def test_zee_locatie_geen_gemeentelijke_rijen(self):
+        r = client.get(f"/v1/viewer/regelmix?x={ZEE_X}&y={ZEE_Y}")
+        assert r.status_code == 200
+        for rij in r.json()["regelmix"]:
+            assert rij["bestuurslaag"] in (None, "rijk"), \
+                f"Onverwachte bestuurslaag op zee: {rij['bestuurslaag']}"
 
 
 class TestWijzigingen:

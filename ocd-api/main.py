@@ -15,6 +15,8 @@ from slowapi.middleware import SlowAPIMiddleware
 from starlette.responses import JSONResponse
 
 from db import get_conn, pool
+from expand import router as expand_router
+from kennis import router as kennis_router
 from keywords import router as keywords_router
 from ponsenkaart import router as ponsenkaart_router
 from regelteksten_bij_vraag import router as regelteksten_router
@@ -185,6 +187,8 @@ app.include_router(keywords_router, dependencies=[Depends(verify_key)])
 app.include_router(regelteksten_router, dependencies=[Depends(verify_key)])
 app.include_router(vergunningen_router, dependencies=[Depends(verify_key)])
 app.include_router(ponsenkaart_router, dependencies=[Depends(verify_key)])
+app.include_router(expand_router, dependencies=[Depends(verify_key)])
+app.include_router(kennis_router, dependencies=[Depends(verify_key)])
 
 
 @app.get("/health")
@@ -355,6 +359,17 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
         #   B) regelingsgebied van de visie/programma bevat zelf de coords
         #      (landelijke + provinciale Programma's zoals PIRM, NOVI,
         #      Natuurbeheerplan — die hebben geen Omgevingsplan-bronhouder)
+        #
+        # Perf: beide ST_Intersects draaien tegen p2p.locatie_subdiv i.p.v.
+        # p2p.locatie. Regelingsgebieden zijn grote multipolygons (tot 326
+        # bbox-kandidaten per punt); op de volledige geometrie kost
+        # st_intersects ~3.4s/loop → ×3 parallelle loops over de 10s
+        # statement_timeout (r13 Earnewâld / r14 Hilversum, EXPLAIN 31 mei).
+        # locatie_subdiv bevat dezelfde geometrieën via ST_Subdivide(…,256)
+        # opgedeeld in kleine stukjes, waardoor de GiST-index veel preciezer
+        # pre-filtert. Identieke resultaatset, ~5-90x sneller per pad. Zelfde
+        # truc als Query 1. DISTINCT op pad B omdat één locatie meerdere
+        # subdiv-stukjes heeft.
         cur.execute(
             f"""
             SELECT r.opschrift AS regeling, r.documenttype,
@@ -366,15 +381,15 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                 r.bronhouder IN (
                     SELECT DISTINCT r2.bronhouder
                     FROM p2p.activiteit_locatieaanduiding ala2
-                    JOIN p2p.locatie l2 ON l2.identificatie = ala2.locatie_id
+                    JOIN p2p.locatie_subdiv ls2 ON ls2.identificatie = ala2.locatie_id
                     JOIN p2p.juridische_regel jr2 ON jr2.identificatie = ala2.juridische_regel_id
                     JOIN p2p.tekst_element te2 ON te2.wid = jr2.regeltekst_wid
                     JOIN p2p.regeling r2 ON r2.frbr_expression = te2.regeling_expression
-                    WHERE ST_Intersects(l2.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                    WHERE ST_Intersects(ls2.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
                       AND r2.documenttype = 'Omgevingsplan'
                 )
                 OR r.regelingsgebied_id IN (
-                    SELECT identificatie FROM p2p.locatie
+                    SELECT DISTINCT identificatie FROM p2p.locatie_subdiv
                     WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
                 )
               )
@@ -616,6 +631,123 @@ def normwaarde(
         rows = cur.fetchall()
     for r in rows:
         r.pop("rn", None)
+    count_detector = sum(1 for r in rows if r.get("match_bucket") == "detector")
+    count_keyword  = sum(1 for r in rows if r.get("match_bucket") == "keyword")
+    return {
+        "x": x,
+        "y": y,
+        "naam_query": naam,
+        "zoektermen_query": zoektermen,
+        "count": len(rows),
+        "count_detector": count_detector,
+        "count_keyword": count_keyword,
+        "matches": rows,
+    }
+
+
+@app.get("/v1/maatvoering", dependencies=[Depends(verify_key)])
+def maatvoering(
+    x: float = Query(..., description="RD x-coordinaat (EPSG:28992)"),
+    y: float = Query(..., description="RD y-coordinaat (EPSG:28992)"),
+    naam: str | None = Query(None, min_length=2, description="Detector: substring-match op maatvoering-key OF planobject-naam"),
+    zoektermen: list[str] | None = Query(None, description="Keyword: brede OR-match (repeated param)"),
+    limit_detector: int = Query(5, le=100),
+    limit_keyword: int = Query(15, le=100),
+):
+    """Wro-analoog van /v1/normwaarde: structurele maatvoeringen uit
+    bestemmingsplannen (bouwhoogte, goothoogte, bebouwingspercentage, ...).
+
+    Bron: `wro.planobject` (object_type='Maatvoering') met JSONB
+    `maatvoering_info`, uitgeklapt per key via `jsonb_each`. Eén planobject
+    met 3 keys → 3 rijen. Eenheid afgeleid uit key-suffix (_m, _pct, _m2, ...).
+
+    Lege response (count=0) is een eersterangs antwoord: geen Wro-maatvoering
+    op deze coord — combineer met `/v1/normwaarde` voor de Ow-kant.
+    """
+    if not naam and not zoektermen:
+        raise HTTPException(status_code=400, detail="Geef minimaal 'naam' of 'zoektermen' op.")
+
+    naam_pattern = f"%{naam}%" if naam else None
+    zoektermen_patterns = [f"%{kw}%" for kw in zoektermen] if zoektermen else None
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH maatvoering_op_locatie AS (
+                SELECT  po.identificatie                       AS planobject_id,
+                        po.naam                                AS planobject_naam,
+                        po.bestemmingshoofdgroep,
+                        ri.idn                                 AS plan_idn,
+                        ri.naam                                AS regeling,
+                        kv.key                                 AS maatvoering_key,
+                        CASE jsonb_typeof(kv.value)
+                            WHEN 'number' THEN (kv.value)::text::numeric
+                            ELSE NULL
+                        END                                    AS kwantitatieve_waarde,
+                        CASE jsonb_typeof(kv.value)
+                            WHEN 'string' THEN kv.value #>> '{}'
+                            ELSE NULL
+                        END                                    AS kwalitatieve_waarde,
+                        CASE
+                            WHEN kv.key LIKE %s THEN 'procent'
+                            WHEN kv.key LIKE %s  THEN 'vierkante meter'
+                            WHEN kv.key LIKE %s  THEN 'kubieke meter'
+                            WHEN kv.key LIKE %s  THEN 'hectare'
+                            WHEN kv.key LIKE %s   THEN 'meter'
+                            ELSE NULL
+                        END                                    AS eenheid
+                FROM    wro.planobject po
+                JOIN    wro.ruimtelijk_instrument ri ON ri.idn = po.instrument_idn
+                CROSS JOIN LATERAL jsonb_each(po.maatvoering_info) AS kv(key, value)
+                WHERE   po.object_type = 'Maatvoering'
+                  AND   po.maatvoering_info IS NOT NULL
+                  AND   ST_Intersects(po.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+            ),
+            bucketed AS (
+                SELECT *,
+                       CASE
+                           WHEN %s::text IS NOT NULL
+                                AND (maatvoering_key  ILIKE %s
+                                     OR planobject_naam ILIKE %s)
+                               THEN 'detector'
+                           WHEN %s::text[] IS NOT NULL
+                                AND (maatvoering_key  ILIKE ANY(%s::text[])
+                                     OR planobject_naam ILIKE ANY(%s::text[]))
+                               THEN 'keyword'
+                           ELSE NULL
+                       END AS match_bucket
+                FROM maatvoering_op_locatie
+            ),
+            ranked AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY match_bucket
+                           ORDER BY kwantitatieve_waarde DESC NULLS LAST,
+                                    maatvoering_key, planobject_id
+                       ) AS rn
+                FROM   bucketed
+                WHERE  match_bucket IS NOT NULL
+            )
+            SELECT planobject_id, planobject_naam, bestemmingshoofdgroep,
+                   plan_idn, regeling,
+                   maatvoering_key, eenheid,
+                   kwantitatieve_waarde, kwalitatieve_waarde,
+                   match_bucket
+            FROM   ranked
+            WHERE  (match_bucket = 'detector' AND rn <= %s)
+               OR  (match_bucket = 'keyword'  AND rn <= %s)
+            ORDER BY CASE match_bucket WHEN 'detector' THEN 0 ELSE 1 END,
+                     kwantitatieve_waarde DESC NULLS LAST,
+                     maatvoering_key, planobject_id
+            """,
+            ('%_pct', '%_m2', '%_m3', '%_ha', '%_m',
+             x, y,
+             naam, naam_pattern, naam_pattern,
+             zoektermen_patterns, zoektermen_patterns, zoektermen_patterns,
+             limit_detector, limit_keyword),
+        )
+        rows = cur.fetchall()
+
     count_detector = sum(1 for r in rows if r.get("match_bucket") == "detector")
     count_keyword  = sum(1 for r in rows if r.get("match_bucket") == "keyword")
     return {
@@ -1976,6 +2108,40 @@ def viewer_tekst(wid: str):
     return {"wid": wid, "tekst": row["tekst"]}
 
 
+class TekstenRequest(BaseModel):
+    wids: list[str]
+
+
+@app.post("/v1/viewer/teksten", dependencies=[Depends(verify_key)])
+def viewer_teksten(req: TekstenRequest = Body(...)):
+    """Batch-variant van /v1/viewer/tekst — haalt de tekst van meerdere
+    tekst_elementen in één round-trip op.
+
+    De frontend laadt bij het openen van een leestekst-tab alle artikelen
+    tegelijk; dat zou anders N losse GET-calls kosten (en op HTTP/1.1 ~6
+    tegelijk, dus meerdere sequentiële golven). Eén POST met de wid-lijst →
+    één SQL met `wid = ANY(...)` collapt dat naar één round-trip.
+
+    Onbekende wids worden stil overgeslagen (geen 404) — de frontend toont
+    daar zelf een fallback voor. Volgorde van de response is niet gegarandeerd;
+    de caller mapt op `wid`.
+    """
+    wids = [w.strip() for w in req.wids if w and w.strip()]
+    if not wids:
+        return {"teksten": []}
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (wid) wid, inhoud AS tekst
+            FROM p2p.tekst_element
+            WHERE wid = ANY(%s)
+            """,
+            (wids,),
+        )
+        rows = cur.fetchall()
+    return {"teksten": [{"wid": r["wid"], "tekst": r["tekst"]} for r in rows]}
+
+
 def _csv_param(value: str | None) -> list[str] | None:
     """Parse een comma-separated query-parameter naar list[str].
     Leeg → None (filter wordt geskipt)."""
@@ -2685,6 +2851,130 @@ def viewer_filter_options():
         "themas": themas,
         "gebiedsaanwijzingen": gebiedsaanwijzingen,
         "hoofdlijnen": hoofdlijnen,
+    }
+
+
+@app.get("/v1/viewer/regelmix", dependencies=[Depends(verify_key)])
+def viewer_regelmix(
+    x: float = Query(...),
+    y: float = Query(...),
+    limit: int = Query(500, le=2000),
+):
+    """Élke regel (artikel/tekst) die geldt op een RD-coördinaat, over alle
+    documenten heen — OW-regelingen én Wro-bestemmingsplannen — platgeslagen
+    tot één lijst.
+
+    Dit is de ongefilterde tegenhanger van POST /v1/regelteksten-bij-vraag:
+    zelfde rij-vorm, maar zónder SKOS/vraag-filtering. De frontend past chat-,
+    object- en bestuurslaag-filters client-side toe.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        # OW-deel: alle artikelen op het punt, met hun activiteit. Géén
+        # SKOS-filter. DISTINCT ON (regeling, wid) dedupliceert artikelen die
+        # via meerdere ALA-rijen (activiteiten) matchen; de DISTINCT ON-kolommen
+        # moeten daarom vooraan in de ORDER BY staan.
+        cur.execute(
+            """
+            WITH RECURSIVE base AS (
+                SELECT DISTINCT ON (r.frbr_expression, te.wid)
+                    te.id             AS te_id,
+                    r.frbr_expression AS bron_id,
+                    a.naam            AS activiteit_naam,
+                    a.identificatie   AS activiteit_id,
+                    te.opschrift      AS artikel,
+                    r.opschrift       AS regeling,
+                    r.documenttype    AS documenttype,
+                    REGEXP_REPLACE(te.inhoud, '<[^>]+>', '', 'g') AS inhoud,
+                    b.bestuurslaag    AS bestuurslaag
+                FROM p2p.activiteit_locatieaanduiding ala
+                JOIN p2p.activiteit a        ON a.identificatie = ala.activiteit_id
+                JOIN p2p.locatie_subdiv ls   ON ls.identificatie = ala.locatie_id
+                JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+                JOIN p2p.tekst_element te     ON te.wid = jr.regeltekst_wid
+                JOIN p2p.regeling r          ON r.frbr_expression = te.regeling_expression
+                JOIN core.bronhouder b       ON b.overheidscode = r.bronhouder
+                WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+                  AND te.inhoud IS NOT NULL
+                  AND length(te.inhoud) > 20
+                ORDER BY r.frbr_expression, te.wid, a.naam
+                LIMIT %(limit)s
+            ),
+            -- Loop omhoog door de tekst_element-boom vanaf elke regel (origin
+            -- meegedragen) om de Artikel- en Hoofdstuk-voorouder te vinden.
+            -- De regeltekst zelf is meestal een Lid zonder opschrift; nummer +
+            -- opschrift zitten op de Artikel-ouder, het hoofdstuknummer hoger op.
+            anc AS (
+                SELECT b.te_id AS origin, t.id, t.parent_id, t.element_type,
+                       t.nummer, t.opschrift, 0 AS depth
+                FROM base b
+                JOIN p2p.tekst_element t ON t.id = b.te_id
+                UNION ALL
+                SELECT a.origin, p.id, p.parent_id, p.element_type,
+                       p.nummer, p.opschrift, a.depth + 1
+                FROM anc a
+                JOIN p2p.tekst_element p ON p.id = a.parent_id
+            )
+            SELECT
+                'ow'          AS bron_type,
+                b.bron_id, b.activiteit_naam, b.activiteit_id, b.artikel,
+                b.regeling, b.documenttype, b.inhoud, b.bestuurslaag,
+                art.nummer    AS artikel_nummer,
+                art.opschrift AS artikel_opschrift,
+                hfd.nummer    AS hoofdstuk_nummer
+            FROM base b
+            LEFT JOIN LATERAL (
+                SELECT nummer, opschrift FROM anc
+                WHERE origin = b.te_id AND element_type = 'Artikel'
+                ORDER BY depth LIMIT 1
+            ) art ON true
+            LEFT JOIN LATERAL (
+                SELECT nummer FROM anc
+                WHERE origin = b.te_id AND element_type = 'Hoofdstuk'
+                ORDER BY depth LIMIT 1
+            ) hfd ON true
+            """,
+            {"x": x, "y": y, "limit": limit},
+        )
+        ow_rows = cur.fetchall()
+
+        # Wro-deel: teksten van de actieve plannen op het punt. Per plan beperkt,
+        # dus geen LIMIT nodig.
+        cur.execute(
+            """
+            SELECT
+                'wro'             AS bron_type,
+                ri.idn            AS bron_id,
+                NULL              AS activiteit_naam,
+                NULL              AS activiteit_id,
+                COALESCE(wt.label, wt.naam, 'Artikel ' || wt.nummer) AS artikel,
+                ri.naam           AS regeling,
+                ri.type_plan      AS documenttype,
+                REGEXP_REPLACE(COALESCE(wt.inhoud, ''), '<[^>]+>', '', 'g') AS inhoud,
+                b.bestuurslaag    AS bestuurslaag,
+                wt.nummer         AS artikel_nummer,
+                COALESCE(wt.label, wt.naam) AS artikel_opschrift,
+                NULL              AS hoofdstuk_nummer
+            FROM wro.ruimtelijk_instrument ri
+            JOIN core.bronhouder b        ON b.overheidscode = ri.bronhouder
+            JOIN wro.wro_tekst_object wt  ON wt.instrument_idn = ri.idn
+            WHERE ST_Intersects(ri.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+              AND ri.pons_status = 'actief'
+              AND wt.inhoud IS NOT NULL
+              AND length(wt.inhoud) > 20
+            ORDER BY ri.naam, wt.volgnummer
+            """,
+            {"x": x, "y": y},
+        )
+        wro_rows = cur.fetchall()
+
+    # Combineren + sorteren op bestuurslaag-volgorde, dan documenttitel.
+    rows = ow_rows + wro_rows
+    laag_order = {'gemeente': 0, 'provincie': 1, 'waterschap': 2, 'rijk': 3}
+    rows.sort(key=lambda r: (laag_order.get(r['bestuurslaag'] or '', 4), r['regeling'] or ''))
+
+    return {
+        "locatie": {"x": x, "y": y},
+        "regelmix": rows,
     }
 
 
