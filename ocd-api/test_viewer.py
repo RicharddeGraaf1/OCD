@@ -462,7 +462,7 @@ class TestRegelmix:
     VERPLICHTE_VELDEN = (
         "bron_type", "bron_id", "regeling", "documenttype", "bestuurslaag",
         "artikel", "artikel_nummer", "artikel_opschrift", "hoofdstuk_nummer",
-        "activiteit_naam", "activiteit_id", "inhoud",
+        "activiteit_naam", "activiteit_id", "wid", "inhoud",
     )
 
     def test_amsterdam_retourneert_regelmix(self):
@@ -493,6 +493,15 @@ class TestRegelmix:
         for rij in r.json()["regelmix"]:
             assert "<" not in (rij["inhoud"] or ""), \
                 f"HTML niet gestript in {rij['bron_id']}: {rij['inhoud'][:80]}"
+
+    def test_ow_rijen_zijn_koppen_met_wid_zonder_inhoud(self):
+        """OW-rijen worden lui geladen: ze dragen een wid maar geen inhoud."""
+        r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
+        ow = [rij for rij in r.json()["regelmix"] if rij["bron_type"] == "ow"]
+        assert ow, "verwacht OW-rijen op deze locatie"
+        for rij in ow:
+            assert rij["wid"], "OW-rij moet een wid hebben voor lazy tekst-load"
+            assert not rij["inhoud"], "OW-rij moet geen inline inhoud hebben"
 
     def test_wro_rijen_op_locatie_met_wro_plan(self):
         """Op een locatie met een actief Wro-plan moet bron_type 'wro' voorkomen,

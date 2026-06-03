@@ -1,0 +1,13 @@
+# Railway deploy-config voor OCD API.
+# Gebruikt de bestaande Dockerfile (geen nixpacks).
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# uvicorn-start zit in de Dockerfile CMD; Railway respecteert die.
+healthcheckPath = "/health"
+healthcheckTimeout = 10
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10

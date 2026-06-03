@@ -42,7 +42,7 @@ Als `OCD_API_KEY` gezet is, stuur `X-Api-Key: <key>` mee.
 
 ### Vergunningen-API (backend voor omgevingsvergunningenregister.nl)
 
-Leest uit `koop.vergunningkennisgeving`. Gedeelde query-parameters over
+Leest uit `vth.vergunningkennisgeving`. Gedeelde query-parameters over
 list / pins / facets:
 
 | Param | Type | Voorbeeld |

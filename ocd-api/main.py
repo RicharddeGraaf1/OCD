@@ -2858,7 +2858,7 @@ def viewer_filter_options():
 def viewer_regelmix(
     x: float = Query(...),
     y: float = Query(...),
-    limit: int = Query(500, le=2000),
+    limit: int = Query(2000, le=5000),
 ):
     """Élke regel (artikel/tekst) die geldt op een RD-coördinaat, over alle
     documenten heen — OW-regelingen én Wro-bestemmingsplannen — platgeslagen
@@ -2867,6 +2867,12 @@ def viewer_regelmix(
     Dit is de ongefilterde tegenhanger van POST /v1/regelteksten-bij-vraag:
     zelfde rij-vorm, maar zónder SKOS/vraag-filtering. De frontend past chat-,
     object- en bestuurslaag-filters client-side toe.
+
+    OW-rijen zijn *koppen* (artikel-nummer/opschrift, hoofdstuk, activiteit) met
+    een `wid` maar zónder `inhoud` — die laadt de frontend lui per uitgeklapte
+    regel via POST /v1/viewer/teksten. Zo blijft de payload licht en hoeft er
+    niet afgekapt te worden (limit is alleen een ruime veiligheidsbovengrens).
+    Wro-rijen houden hun `inhoud` inline (klein, en geen p2p-`wid`).
     """
     with get_conn() as conn, conn.cursor() as cur:
         # OW-deel: alle artikelen op het punt, met hun activiteit. Géén
@@ -2878,13 +2884,13 @@ def viewer_regelmix(
             WITH RECURSIVE base AS (
                 SELECT DISTINCT ON (r.frbr_expression, te.wid)
                     te.id             AS te_id,
+                    te.wid            AS wid,
                     r.frbr_expression AS bron_id,
                     a.naam            AS activiteit_naam,
                     a.identificatie   AS activiteit_id,
                     te.opschrift      AS artikel,
                     r.opschrift       AS regeling,
                     r.documenttype    AS documenttype,
-                    REGEXP_REPLACE(te.inhoud, '<[^>]+>', '', 'g') AS inhoud,
                     b.bestuurslaag    AS bestuurslaag
                 FROM p2p.activiteit_locatieaanduiding ala
                 JOIN p2p.activiteit a        ON a.identificatie = ala.activiteit_id
@@ -2917,7 +2923,9 @@ def viewer_regelmix(
             SELECT
                 'ow'          AS bron_type,
                 b.bron_id, b.activiteit_naam, b.activiteit_id, b.artikel,
-                b.regeling, b.documenttype, b.inhoud, b.bestuurslaag,
+                b.regeling, b.documenttype, b.bestuurslaag,
+                b.wid         AS wid,
+                NULL          AS inhoud,   -- lui geladen via /v1/viewer/teksten
                 art.nummer    AS artikel_nummer,
                 art.opschrift AS artikel_opschrift,
                 hfd.nummer    AS hoofdstuk_nummer
@@ -2949,8 +2957,9 @@ def viewer_regelmix(
                 COALESCE(wt.label, wt.naam, 'Artikel ' || wt.nummer) AS artikel,
                 ri.naam           AS regeling,
                 ri.type_plan      AS documenttype,
-                REGEXP_REPLACE(COALESCE(wt.inhoud, ''), '<[^>]+>', '', 'g') AS inhoud,
                 b.bestuurslaag    AS bestuurslaag,
+                NULL              AS wid,   -- Wro heeft geen p2p-wid; inhoud blijft inline
+                REGEXP_REPLACE(COALESCE(wt.inhoud, ''), '<[^>]+>', '', 'g') AS inhoud,
                 wt.nummer         AS artikel_nummer,
                 COALESCE(wt.label, wt.naam) AS artikel_opschrift,
                 NULL              AS hoofdstuk_nummer
@@ -2972,9 +2981,13 @@ def viewer_regelmix(
     laag_order = {'gemeente': 0, 'provincie': 1, 'waterschap': 2, 'rijk': 3}
     rows.sort(key=lambda r: (laag_order.get(r['bestuurslaag'] or '', 4), r['regeling'] or ''))
 
+    # Transparant signaal i.p.v. stil afkappen: als het OW-deel exact de limit
+    # raakt, zijn er waarschijnlijk meer regels dan getoond. De frontend toont
+    # dan een hint om te filteren (chat/object) i.p.v. de hele stapel te tonen.
     return {
         "locatie": {"x": x, "y": y},
         "regelmix": rows,
+        "afgekapt": len(ow_rows) >= limit,
     }
 
 
