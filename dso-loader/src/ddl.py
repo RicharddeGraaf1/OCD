@@ -244,6 +244,26 @@ CREATE TABLE IF NOT EXISTS p2p.locatie (
 );
 CREATE INDEX IF NOT EXISTS idx_locatie_geom ON p2p.locatie USING GIST(geometrie);
 
+-- Afgeleide ("gematerialiseerde") tabel: p2p.locatie.geometrie opgedeeld via
+-- ST_Subdivide(geometrie, 256), Ã©Ã©n rij per stukje (identificatie NIET uniek).
+-- Regelingsgebieden zijn grote multipolygons; st_intersects op de volledige
+-- geometrie kost seconden en duwt /v1/adres over de statement_timeout. Op de
+-- opgedeelde stukjes pre-filtert de GiST-index veel preciezer (~5-90x sneller,
+-- identieke resultaatset). Wordt gebruikt door _wat_geldt_hier (alle queries)
+-- en de meeste geo-endpoints in ocd-api.
+--
+-- LET OP: deze tabel wordt NIET door de normale loader-INSERT gevuld. Na elke
+-- (her)load van p2p.locatie moet hij herbouwd worden via ST_Subdivide â€” zie
+-- dso-loader/scripts/herstel_*.py (refresh_subdiv*). Een verse DB krijgt hier
+-- de lege tabel + indexen; de geo-queries geven dan lege resultaten tot een
+-- subdiv-refresh is gedraaid.
+CREATE TABLE IF NOT EXISTS p2p.locatie_subdiv (
+    identificatie       TEXT NOT NULL,
+    geometrie           GEOMETRY(Geometry, 28992) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_locatie_subdiv_geom ON p2p.locatie_subdiv USING GIST(geometrie);
+CREATE INDEX IF NOT EXISTS idx_locatie_subdiv_id   ON p2p.locatie_subdiv (identificatie);
+
 CREATE TABLE IF NOT EXISTS p2p.locatiegroep_lid (
     groep_identificatie TEXT NOT NULL REFERENCES p2p.locatie(identificatie) ON DELETE CASCADE,
     lid_identificatie   TEXT NOT NULL REFERENCES p2p.locatie(identificatie) ON DELETE CASCADE,

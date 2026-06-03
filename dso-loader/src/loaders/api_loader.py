@@ -816,6 +816,12 @@ def load_via_api(overheid_code: str, naam: str,
             except Exception as e:
                 console.print(f"    [red]Annotaties failed: {e}[/red]")
 
+        # Afgeleide subdiv-tabel bijwerken voor de zojuist geladen bronhouder
+        # (versnelt geo-queries in ocd-api; zie loaders/subdiv.py).
+        from src.loaders.subdiv import refresh_locatie_subdiv
+        n_sub = refresh_locatie_subdiv(conn, bronhouder_code)
+        console.print(f"  locatie_subdiv ververst: {n_sub} stukjes")
+
         console.print(f"\n[green]Done: {len(regelingen)} regelingen loaded for {naam}[/green]")
 
     finally:

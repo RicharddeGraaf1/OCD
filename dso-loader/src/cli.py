@@ -133,6 +133,19 @@ def load_api(types, gemeente, overheid):
                      bronhouder_code=cfg.POC_CBS_CODE, doc_types=doc_types)
 
 
+@cli.command("refresh-subdiv")
+@click.option("--bronhouder", "-b", default=None,
+              help="Beperk tot Ã©Ã©n bronhouder-code (bv. gm0344). Default: alle polygon-locaties (volledige rebuild).")
+def refresh_subdiv_cmd(bronhouder):
+    """(Her)bouw p2p.locatie_subdiv (afgeleide subdivided geometrie).
+
+    Wordt automatisch na elke OW-load gedraaid; gebruik dit command voor een
+    handmatige rebuild, bv. na een bulk-geometrie-correctie of een verse DB.
+    """
+    from src.loaders.subdiv import refresh_main
+    refresh_main(bronhouder)
+
+
 @cli.command()
 def status():
     """Show row counts per table."""

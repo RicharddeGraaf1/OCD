@@ -639,6 +639,12 @@ def load_ow_overheid(overheid_code: str, naam: str, bronhouder_code: str,
             if zip_path:
                 _load_from_zip(conn, zip_path, reg)
 
+        # Afgeleide subdiv-tabel bijwerken voor de zojuist geladen bronhouder
+        # (versnelt geo-queries in ocd-api; zie loaders/subdiv.py).
+        from src.loaders.subdiv import refresh_locatie_subdiv
+        n_sub = refresh_locatie_subdiv(conn, bronhouder_code)
+        console.print(f"  locatie_subdiv ververst: {n_sub} stukjes")
+
         console.print("\n[bold green]Ow loading complete![/bold green]")
     finally:
         conn.close()
@@ -668,6 +674,11 @@ def load_ow_from_zip(zip_path: str, cbs_code: str, naam: str):
         }
 
         _load_from_zip(conn, Path(zip_path), reg_info)
+
+        from src.loaders.subdiv import refresh_locatie_subdiv
+        n_sub = refresh_locatie_subdiv(conn, cbs_code)
+        console.print(f"  locatie_subdiv ververst: {n_sub} stukjes")
+
         console.print("\n[bold green]Ow loading from ZIP complete![/bold green]")
     finally:
         conn.close()
