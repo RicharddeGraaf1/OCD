@@ -459,85 +459,94 @@ def _wijz_url(expr: str) -> str:
 
 
 class TestRegelmix:
-    VERPLICHTE_VELDEN = (
-        "bron_type", "bron_id", "regeling", "documenttype", "bestuurslaag",
-        "artikel", "artikel_nummer", "artikel_opschrift", "hoofdstuk_nummer",
-        "activiteit_naam", "activiteit_id", "wid", "inhoud",
+    """Twee-laags regelmix: overzicht (documenten + aantallen) + detail per document."""
+
+    DOC_VELDEN = (
+        "bron_type", "bron_id", "regeling", "documenttype", "bestuurslaag", "aantal",
+    )
+    REGEL_VELDEN = (
+        "bron_type", "bron_id", "artikel", "artikel_nummer", "artikel_opschrift",
+        "hoofdstuk_nummer", "activiteit_naam", "activiteit_id", "wid", "inhoud",
     )
 
-    def test_amsterdam_retourneert_regelmix(self):
+    # ── Overzicht ──
+    def test_overzicht_retourneert_documenten(self):
         r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
         assert r.status_code == 200
         data = r.json()
         assert data["locatie"]["x"] == AMS_X
-        assert len(data["regelmix"]) > 0
+        assert len(data["documenten"]) > 0
 
-    def test_rijen_hebben_verplichte_velden(self):
+    def test_documenten_hebben_verplichte_velden_en_aantal(self):
         r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
-        for rij in r.json()["regelmix"]:
-            for veld in self.VERPLICHTE_VELDEN:
-                assert veld in rij, f"Veld {veld} ontbreekt"
+        for doc in r.json()["documenten"]:
+            for veld in self.DOC_VELDEN:
+                assert veld in doc, f"Veld {veld} ontbreekt"
+            assert doc["aantal"] > 0
+            assert doc["bron_type"] in ("ow", "wro")
 
-    def test_bevat_ow_rijen(self):
+    def test_overzicht_bevat_ow_document(self):
         r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
-        bron_types = {rij["bron_type"] for rij in r.json()["regelmix"]}
-        assert "ow" in bron_types
+        assert any(d["bron_type"] == "ow" for d in r.json()["documenten"])
 
-    def test_bron_type_alleen_ow_of_wro(self):
-        r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
-        for rij in r.json()["regelmix"]:
-            assert rij["bron_type"] in ("ow", "wro")
-
-    def test_inhoud_is_html_gestript(self):
-        r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
-        for rij in r.json()["regelmix"]:
-            assert "<" not in (rij["inhoud"] or ""), \
-                f"HTML niet gestript in {rij['bron_id']}: {rij['inhoud'][:80]}"
-
-    def test_ow_rijen_zijn_koppen_met_wid_zonder_inhoud(self):
-        """OW-rijen worden lui geladen: ze dragen een wid maar geen inhoud."""
-        r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}")
-        ow = [rij for rij in r.json()["regelmix"] if rij["bron_type"] == "ow"]
-        assert ow, "verwacht OW-rijen op deze locatie"
-        for rij in ow:
-            assert rij["wid"], "OW-rij moet een wid hebben voor lazy tekst-load"
-            assert not rij["inhoud"], "OW-rij moet geen inline inhoud hebben"
-
-    def test_wro_rijen_op_locatie_met_wro_plan(self):
-        """Op een locatie met een actief Wro-plan moet bron_type 'wro' voorkomen,
-        met lege activiteit-velden."""
-        # Vind een locatie met een Wro-plan via het regelingen-endpoint.
-        coords = [(AMS_X, AMS_Y), (UTR_X, UTR_Y)]
-        wro_coord = None
-        for cx, cy in coords:
-            rr = client.get(f"/v1/viewer/regelingen?x={cx}&y={cy}")
-            if rr.json()["wro_plannen"]:
-                wro_coord = (cx, cy)
-                break
-        if not wro_coord:
-            pytest.skip("Geen Wro-plan op de testcoördinaten")
-
-        r = client.get(f"/v1/viewer/regelmix?x={wro_coord[0]}&y={wro_coord[1]}")
-        wro_rijen = [rij for rij in r.json()["regelmix"] if rij["bron_type"] == "wro"]
-        # Een Wro-plan zonder tekst-objecten levert geen rijen; dan is er niets
-        # te asserten over de vorm. Maar als er rijen zijn, moeten ze kloppen.
-        for rij in wro_rijen:
-            assert rij["activiteit_naam"] is None
-            assert rij["activiteit_id"] is None
-            assert rij["bron_id"]
-
-    def test_limit_wordt_gerespecteerd(self):
-        r = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}&limit=5")
+    # ── Detail per document ──
+    def test_detail_ow_zijn_koppen_met_wid_zonder_inhoud(self):
+        ov = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}").json()
+        ow_doc = next(d for d in ov["documenten"] if d["bron_type"] == "ow")
+        r = client.get(
+            f"/v1/viewer/regelmix/document?x={AMS_X}&y={AMS_Y}"
+            f"&bron={ow_doc['bron_id']}&bron_type=ow"
+        )
         assert r.status_code == 200
-        ow_rijen = [rij for rij in r.json()["regelmix"] if rij["bron_type"] == "ow"]
-        assert len(ow_rijen) <= 5
+        rijen = r.json()["regelmix"]
+        assert rijen, "verwacht regel-koppen voor dit OW-document"
+        for rij in rijen:
+            for veld in self.REGEL_VELDEN:
+                assert veld in rij, f"Veld {veld} ontbreekt"
+            assert rij["wid"], "OW-kop moet een wid hebben voor lazy tekst-load"
+            assert not rij["inhoud"], "OW-kop heeft geen inline inhoud"
+            assert rij["artikel_nummer"], "artikel_nummer uit wid verwacht"
 
-    def test_zee_locatie_geen_gemeentelijke_rijen(self):
+    def test_detail_aantal_matcht_overzicht(self):
+        ov = client.get(f"/v1/viewer/regelmix?x={AMS_X}&y={AMS_Y}").json()
+        ow_doc = next(d for d in ov["documenten"] if d["bron_type"] == "ow")
+        r = client.get(
+            f"/v1/viewer/regelmix/document?x={AMS_X}&y={AMS_Y}"
+            f"&bron={ow_doc['bron_id']}&bron_type=ow"
+        )
+        assert len(r.json()["regelmix"]) == ow_doc["aantal"]
+
+    def test_detail_wro_inhoud_inline_en_html_gestript(self):
+        coords = [(AMS_X, AMS_Y), (UTR_X, UTR_Y)]
+        wro_doc = None
+        for cx, cy in coords:
+            ov = client.get(f"/v1/viewer/regelmix?x={cx}&y={cy}").json()
+            wro_doc = next((d for d in ov["documenten"] if d["bron_type"] == "wro"), None)
+            if wro_doc:
+                xy = (cx, cy)
+                break
+        if not wro_doc:
+            pytest.skip("Geen Wro-document op de testcoördinaten")
+        r = client.get(
+            f"/v1/viewer/regelmix/document?x={xy[0]}&y={xy[1]}"
+            f"&bron={wro_doc['bron_id']}&bron_type=wro"
+        )
+        for rij in r.json()["regelmix"]:
+            assert rij["activiteit_naam"] is None
+            assert "<" not in (rij["inhoud"] or "")
+
+    def test_detail_onbekend_bron_type_geeft_422(self):
+        r = client.get(
+            f"/v1/viewer/regelmix/document?x={AMS_X}&y={AMS_Y}&bron=x&bron_type=xxx"
+        )
+        assert r.status_code == 422
+
+    def test_zee_locatie_geen_gemeentelijke_documenten(self):
         r = client.get(f"/v1/viewer/regelmix?x={ZEE_X}&y={ZEE_Y}")
         assert r.status_code == 200
-        for rij in r.json()["regelmix"]:
-            assert rij["bestuurslaag"] in (None, "rijk"), \
-                f"Onverwachte bestuurslaag op zee: {rij['bestuurslaag']}"
+        for doc in r.json()["documenten"]:
+            assert doc["bestuurslaag"] in (None, "rijk"), \
+                f"Onverwachte bestuurslaag op zee: {doc['bestuurslaag']}"
 
 
 class TestWijzigingen:

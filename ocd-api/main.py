@@ -2854,141 +2854,176 @@ def viewer_filter_options():
     }
 
 
+_LAAG_ORDER = {'gemeente': 0, 'provincie': 1, 'waterschap': 2, 'rijk': 3}
+
+
 @app.get("/v1/viewer/regelmix", dependencies=[Depends(verify_key)])
-def viewer_regelmix(
-    x: float = Query(...),
-    y: float = Query(...),
-    limit: int = Query(2000, le=5000),
-):
-    """Élke regel (artikel/tekst) die geldt op een RD-coördinaat, over alle
-    documenten heen — OW-regelingen én Wro-bestemmingsplannen — platgeslagen
-    tot één lijst.
+def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
+    """Regelmix-overzicht: welke documenten gelden op een RD-punt, met per
+    document het aantal regels — OW-regelingen én Wro-bestemmingsplannen.
 
-    Dit is de ongefilterde tegenhanger van POST /v1/regelteksten-bij-vraag:
-    zelfde rij-vorm, maar zónder SKOS/vraag-filtering. De frontend past chat-,
-    object- en bestuurslaag-filters client-side toe.
-
-    OW-rijen zijn *koppen* (artikel-nummer/opschrift, hoofdstuk, activiteit) met
-    een `wid` maar zónder `inhoud` — die laadt de frontend lui per uitgeklapte
-    regel via POST /v1/viewer/teksten. Zo blijft de payload licht en hoeft er
-    niet afgekapt te worden (limit is alleen een ruime veiligheidsbovengrens).
-    Wro-rijen houden hun `inhoud` inline (klein, en geen p2p-`wid`).
+    Dit is bewust lichtgewicht (een handvol documenten + tellingen), zodat er
+    niets afgekapt hoeft te worden, ook op locaties met duizenden regels. De
+    artikel-koppen per document laadt de frontend lui via
+    GET /v1/viewer/regelmix/document, en de tekst via POST /v1/viewer/teksten.
     """
     with get_conn() as conn, conn.cursor() as cur:
-        # OW-deel: alle artikelen op het punt, met hun activiteit. Géén
-        # SKOS-filter. DISTINCT ON (regeling, wid) dedupliceert artikelen die
-        # via meerdere ALA-rijen (activiteiten) matchen; de DISTINCT ON-kolommen
-        # moeten daarom vooraan in de ORDER BY staan.
+        # OW: aantal distinct regels per regeling, dan dedupliceren op opschrift
+        # (nieuwste expression) — net als viewer_regelingen, zodat de Documenten-
+        # en Regelmix-tab hetzelfde documentenoverzicht tonen.
         cur.execute(
             """
-            WITH RECURSIVE base AS (
-                SELECT DISTINCT ON (r.frbr_expression, te.wid)
-                    te.id             AS te_id,
-                    te.wid            AS wid,
-                    r.frbr_expression AS bron_id,
-                    a.naam            AS activiteit_naam,
-                    a.identificatie   AS activiteit_id,
-                    te.opschrift      AS artikel,
-                    r.opschrift       AS regeling,
-                    r.documenttype    AS documenttype,
-                    b.bestuurslaag    AS bestuurslaag
+            WITH per_expr AS (
+                SELECT r.frbr_expression, r.opschrift, r.documenttype, b.bestuurslaag,
+                       count(DISTINCT te.wid) AS aantal
                 FROM p2p.activiteit_locatieaanduiding ala
-                JOIN p2p.activiteit a        ON a.identificatie = ala.activiteit_id
                 JOIN p2p.locatie_subdiv ls   ON ls.identificatie = ala.locatie_id
                 JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
                 JOIN p2p.tekst_element te     ON te.wid = jr.regeltekst_wid
                 JOIN p2p.regeling r          ON r.frbr_expression = te.regeling_expression
                 JOIN core.bronhouder b       ON b.overheidscode = r.bronhouder
                 WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
-                  AND te.inhoud IS NOT NULL
-                  AND length(te.inhoud) > 20
-                ORDER BY r.frbr_expression, te.wid, a.naam
-                LIMIT %(limit)s
-            ),
-            -- Loop omhoog door de tekst_element-boom vanaf elke regel (origin
-            -- meegedragen) om de Artikel- en Hoofdstuk-voorouder te vinden.
-            -- De regeltekst zelf is meestal een Lid zonder opschrift; nummer +
-            -- opschrift zitten op de Artikel-ouder, het hoofdstuknummer hoger op.
-            anc AS (
-                SELECT b.te_id AS origin, t.id, t.parent_id, t.element_type,
-                       t.nummer, t.opschrift, 0 AS depth
-                FROM base b
-                JOIN p2p.tekst_element t ON t.id = b.te_id
-                UNION ALL
-                SELECT a.origin, p.id, p.parent_id, p.element_type,
-                       p.nummer, p.opschrift, a.depth + 1
-                FROM anc a
-                JOIN p2p.tekst_element p ON p.id = a.parent_id
+                  AND te.inhoud IS NOT NULL AND length(te.inhoud) > 20
+                GROUP BY r.frbr_expression, r.opschrift, r.documenttype, b.bestuurslaag
             )
-            SELECT
-                'ow'          AS bron_type,
-                b.bron_id, b.activiteit_naam, b.activiteit_id, b.artikel,
-                b.regeling, b.documenttype, b.bestuurslaag,
-                b.wid         AS wid,
-                NULL          AS inhoud,   -- lui geladen via /v1/viewer/teksten
-                art.nummer    AS artikel_nummer,
-                art.opschrift AS artikel_opschrift,
-                hfd.nummer    AS hoofdstuk_nummer
-            FROM base b
-            LEFT JOIN LATERAL (
-                SELECT nummer, opschrift FROM anc
-                WHERE origin = b.te_id AND element_type = 'Artikel'
-                ORDER BY depth LIMIT 1
-            ) art ON true
-            LEFT JOIN LATERAL (
-                SELECT nummer FROM anc
-                WHERE origin = b.te_id AND element_type = 'Hoofdstuk'
-                ORDER BY depth LIMIT 1
-            ) hfd ON true
-            """,
-            {"x": x, "y": y, "limit": limit},
-        )
-        ow_rows = cur.fetchall()
-
-        # Wro-deel: teksten van de actieve plannen op het punt. Per plan beperkt,
-        # dus geen LIMIT nodig.
-        cur.execute(
-            """
-            SELECT
-                'wro'             AS bron_type,
-                ri.idn            AS bron_id,
-                NULL              AS activiteit_naam,
-                NULL              AS activiteit_id,
-                COALESCE(wt.label, wt.naam, 'Artikel ' || wt.nummer) AS artikel,
-                ri.naam           AS regeling,
-                ri.type_plan      AS documenttype,
-                b.bestuurslaag    AS bestuurslaag,
-                NULL              AS wid,   -- Wro heeft geen p2p-wid; inhoud blijft inline
-                REGEXP_REPLACE(COALESCE(wt.inhoud, ''), '<[^>]+>', '', 'g') AS inhoud,
-                wt.nummer         AS artikel_nummer,
-                COALESCE(wt.label, wt.naam) AS artikel_opschrift,
-                NULL              AS hoofdstuk_nummer
-            FROM wro.ruimtelijk_instrument ri
-            JOIN core.bronhouder b        ON b.overheidscode = ri.bronhouder
-            JOIN wro.wro_tekst_object wt  ON wt.instrument_idn = ri.idn
-            WHERE ST_Intersects(ri.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
-              AND ri.pons_status = 'actief'
-              AND wt.inhoud IS NOT NULL
-              AND length(wt.inhoud) > 20
-            ORDER BY ri.naam, wt.volgnummer
+            SELECT DISTINCT ON (opschrift)
+                frbr_expression AS bron_id, opschrift AS regeling,
+                documenttype, bestuurslaag, aantal
+            FROM per_expr
+            ORDER BY opschrift, frbr_expression DESC
             """,
             {"x": x, "y": y},
         )
-        wro_rows = cur.fetchall()
+        ow_docs = [dict(d, bron_type='ow') for d in cur.fetchall()]
 
-    # Combineren + sorteren op bestuurslaag-volgorde, dan documenttitel.
-    rows = ow_rows + wro_rows
-    laag_order = {'gemeente': 0, 'provincie': 1, 'waterschap': 2, 'rijk': 3}
-    rows.sort(key=lambda r: (laag_order.get(r['bestuurslaag'] or '', 4), r['regeling'] or ''))
+        # Wro: aantal tekst-objecten per actief plan, dedupliceren op naam
+        # (nieuwste datum) — net als viewer_regelingen.
+        cur.execute(
+            """
+            WITH per_plan AS (
+                SELECT ri.idn, ri.naam, ri.type_plan, ri.datum, b.bestuurslaag,
+                       count(*) AS aantal
+                FROM wro.ruimtelijk_instrument ri
+                JOIN core.bronhouder b       ON b.overheidscode = ri.bronhouder
+                JOIN wro.wro_tekst_object wt ON wt.instrument_idn = ri.idn
+                WHERE ST_Intersects(ri.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+                  AND ri.pons_status = 'actief'
+                  AND wt.inhoud IS NOT NULL AND length(wt.inhoud) > 20
+                GROUP BY ri.idn, ri.naam, ri.type_plan, ri.datum, b.bestuurslaag
+            )
+            SELECT DISTINCT ON (naam)
+                idn AS bron_id, naam AS regeling, type_plan AS documenttype,
+                bestuurslaag, aantal
+            FROM per_plan
+            ORDER BY naam, datum DESC NULLS LAST
+            """,
+            {"x": x, "y": y},
+        )
+        wro_docs = [dict(d, bron_type='wro') for d in cur.fetchall()]
 
-    # Transparant signaal i.p.v. stil afkappen: als het OW-deel exact de limit
-    # raakt, zijn er waarschijnlijk meer regels dan getoond. De frontend toont
-    # dan een hint om te filteren (chat/object) i.p.v. de hele stapel te tonen.
-    return {
-        "locatie": {"x": x, "y": y},
-        "regelmix": rows,
-        "afgekapt": len(ow_rows) >= limit,
-    }
+    documenten = ow_docs + wro_docs
+    documenten.sort(key=lambda d: (_LAAG_ORDER.get(d['bestuurslaag'] or '', 4), d['regeling'] or ''))
+    return {"locatie": {"x": x, "y": y}, "documenten": documenten}
+
+
+@app.get("/v1/viewer/regelmix/document", dependencies=[Depends(verify_key)])
+def viewer_regelmix_document(
+    x: float = Query(...),
+    y: float = Query(...),
+    bron: str = Query(..., description="bron_id: frbr_expression (OW) of plan-idn (Wro)"),
+    bron_type: str = Query(..., pattern="^(ow|wro)$"),
+):
+    """Artikel-koppen van één regelmix-document. OW: koppen (wid, artikel-
+    nummer/opschrift, hoofdstuk, activiteit) zónder inhoud — nummer en hoofdstuk
+    worden uit de `wid` geparst (`__chp_<n>__art_<x.y>__`), het opschrift via de
+    Artikel-node (één indexed self-join, geen recursieve walk → snel, ongecapt).
+    De inhoud laadt de frontend daarna lui via POST /v1/viewer/teksten.
+    Wro: teksten inline (klein, geen p2p-`wid`).
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        if bron_type == 'wro':
+            cur.execute(
+                """
+                SELECT
+                    'wro'             AS bron_type,
+                    ri.idn            AS bron_id,
+                    NULL              AS activiteit_naam,
+                    NULL              AS activiteit_id,
+                    COALESCE(wt.label, wt.naam, 'Artikel ' || wt.nummer) AS artikel,
+                    NULL              AS wid,
+                    REGEXP_REPLACE(COALESCE(wt.inhoud, ''), '<[^>]+>', '', 'g') AS inhoud,
+                    wt.nummer         AS artikel_nummer,
+                    COALESCE(wt.label, wt.naam) AS artikel_opschrift,
+                    NULL              AS hoofdstuk_nummer
+                FROM wro.ruimtelijk_instrument ri
+                JOIN wro.wro_tekst_object wt ON wt.instrument_idn = ri.idn
+                WHERE ri.idn = %(bron)s
+                  AND wt.inhoud IS NOT NULL AND length(wt.inhoud) > 20
+                ORDER BY wt.volgnummer
+                """,
+                {"bron": bron},
+            )
+        else:
+            # OW: één document, dus de boom-walk is goedkoop. Single-pass: daal af
+            # vanaf elke regel en draag artikel-/hoofdstuk-info mee (COALESCE houdt
+            # de dichtstbijzijnde), stop een tak zodra beide gevonden zijn. Werkt
+            # universeel (ongeacht wid-encoding) — sneller en completer dan wid-parse.
+            cur.execute(
+                """
+                WITH RECURSIVE base AS (
+                    SELECT DISTINCT ON (te.wid)
+                        te.id AS te_id, te.wid AS wid, te.opschrift AS artikel,
+                        a.naam AS activiteit_naam, a.identificatie AS activiteit_id
+                    FROM p2p.activiteit_locatieaanduiding ala
+                    JOIN p2p.activiteit a        ON a.identificatie = ala.activiteit_id
+                    JOIN p2p.locatie_subdiv ls   ON ls.identificatie = ala.locatie_id
+                    JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+                    JOIN p2p.tekst_element te     ON te.wid = jr.regeltekst_wid
+                    WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+                      AND te.regeling_expression = %(bron)s
+                      AND te.inhoud IS NOT NULL AND length(te.inhoud) > 20
+                    ORDER BY te.wid, a.naam
+                ),
+                walk AS (
+                    SELECT b.te_id AS origin, t.id, t.parent_id,
+                        CASE WHEN t.element_type = 'Artikel'   THEN t.nummer   END AS art_nr,
+                        CASE WHEN t.element_type = 'Artikel'   THEN t.opschrift END AS art_op,
+                        CASE WHEN t.element_type = 'Hoofdstuk' THEN t.nummer   END AS hfd_nr
+                    FROM base b
+                    JOIN p2p.tekst_element t ON t.id = b.te_id
+                    UNION ALL
+                    SELECT w.origin, p.id, p.parent_id,
+                        COALESCE(w.art_nr, CASE WHEN p.element_type = 'Artikel'   THEN p.nummer   END),
+                        COALESCE(w.art_op, CASE WHEN p.element_type = 'Artikel'   THEN p.opschrift END),
+                        COALESCE(w.hfd_nr, CASE WHEN p.element_type = 'Hoofdstuk' THEN p.nummer   END)
+                    FROM walk w
+                    JOIN p2p.tekst_element p ON p.id = w.parent_id
+                    WHERE w.art_nr IS NULL OR w.hfd_nr IS NULL
+                ),
+                resolved AS (
+                    SELECT origin,
+                           max(art_nr) AS artikel_nummer,
+                           max(art_op) AS artikel_opschrift,
+                           max(hfd_nr) AS hoofdstuk_nummer
+                    FROM walk GROUP BY origin
+                )
+                SELECT
+                    'ow'              AS bron_type,
+                    %(bron)s          AS bron_id,
+                    b.activiteit_naam, b.activiteit_id,
+                    b.artikel,
+                    b.wid             AS wid,
+                    NULL              AS inhoud,
+                    rs.artikel_nummer, rs.artikel_opschrift, rs.hoofdstuk_nummer
+                FROM base b
+                JOIN resolved rs ON rs.origin = b.te_id
+                ORDER BY b.wid
+                """,
+                {"x": x, "y": y, "bron": bron},
+            )
+        rows = cur.fetchall()
+
+    return {"regelmix": rows}
 
 
 @app.get("/v1/viewer/objecten", dependencies=[Depends(verify_key)])
