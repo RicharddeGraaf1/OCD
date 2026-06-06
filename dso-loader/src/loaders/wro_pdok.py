@@ -7,6 +7,8 @@ and insert into PostGIS.
 
 import gzip
 import io
+import json
+import re
 from pathlib import Path
 
 import httpx
@@ -89,6 +91,45 @@ def _extract_text(elem, xpath: str) -> str | None:
     return None
 
 
+_UNIT_SUFFIX = {
+    "m": "_m", "m²": "_m2", "m2": "_m2", "%": "_pct",
+    "m³": "_m3", "m3": "_m3", "ha": "_ha",
+}
+_MV_PAIR_RE = re.compile(r'"([^"]+)"\s*=\s*"([^"]+)"')
+
+
+def _slug(s: str) -> str:
+    return re.sub(r"_+", "_", re.sub(r"\W+", "_", s.strip().lower())).strip("_")
+
+
+def _parse_maatvoering_kv(text: str | None) -> dict | None:
+    """Parse PDOK app:maatvoering platte k/v-string naar dict.
+
+    Voorbeeld: '"maximum bouwhoogte (m)"="9", "maximum bebouwingspercentage (%)"="60"'
+    → {"maximum_bouwhoogte_m": 9.0, "maximum_bebouwingspercentage_pct": 60.0}
+
+    Decimal-comma's worden naar punt geconverteerd. Niet-numerieke waarden
+    blijven string. Lege/NULL input → None (kolom blijft NULL).
+    """
+    if not text:
+        return None
+    out: dict[str, float | str] = {}
+    for raw_key, raw_val in _MV_PAIR_RE.findall(text):
+        m = re.match(r"(.*?)\s*\(([^)]+)\)\s*$", raw_key)
+        if m:
+            base, unit = m.group(1), m.group(2)
+            suffix = _UNIT_SUFFIX.get(unit.strip(), "_" + _slug(unit))
+            key = _slug(base) + suffix
+        else:
+            key = _slug(raw_key)
+        v = raw_val.strip().replace(",", ".")
+        try:
+            out[key] = float(v)
+        except ValueError:
+            out[key] = raw_val.strip()
+    return out or None
+
+
 def _extract_gml_geometry(elem) -> str | None:
     """Extract the GML geometry from the app:geometrie wrapper."""
     ns = IMRO_NS['gml']
@@ -152,6 +193,9 @@ def _load_bestemmingsplangebied(conn, cbs_codes: dict[str, str] | None = None):
             planstatus_raw = _extract_text(elem, "app:planstatus") or "onbekend"
             planstatus_val = planstatus_raw.split(";")[0].strip()
             datum = _extract_text(elem, "app:datum")
+            # PDOK levert dossierStatus zoals "geheel onherroepelijk in werking";
+            # voor wro.wro_dossier.status zetten we deze door.
+            dossier_status = _extract_text(elem, "app:dossierStatus")
 
             gml_str = _extract_gml_geometry(elem)
             if not gml_str or not idn:
@@ -159,10 +203,18 @@ def _load_bestemmingsplangebied(conn, cbs_codes: dict[str, str] | None = None):
 
             gm_overheid = normalize_bronhouder_code(overheids_code)
             dossier = idn.rsplit("-", 1)[0] if "-" in idn else idn
+            # Self-populate core.dossierstatus voor nieuwe code-waarden (FK).
+            if dossier_status:
+                cur.execute(
+                    "INSERT INTO core.dossierstatus (code) VALUES (%s) ON CONFLICT DO NOTHING",
+                    (dossier_status,),
+                )
             cur.execute(
                 """INSERT INTO wro.wro_dossier (dossiernummer, manifest_code, status)
-                   VALUES (%s, %s, NULL) ON CONFLICT DO NOTHING""",
-                (dossier, gm_overheid),
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (dossiernummer) DO UPDATE SET
+                       status = COALESCE(EXCLUDED.status, wro.wro_dossier.status)""",
+                (dossier, gm_overheid, dossier_status),
             )
 
             cur.execute(
@@ -223,28 +275,86 @@ def _load_planobjecten(conn, feature_type: str, object_type: str, cbs_codes: set
 
             naam = _extract_text(elem, "app:naam")
             bestemmingshoofdgroep = _extract_text(elem, "app:bestemmingshoofdgroep")
+            # PDOK levert artikelnummer voor Gebiedsaanduiding (100% in sample).
+            # Voor andere object_types ontbreekt het meestal — _extract_text
+            # geeft dan NULL, dus geen extra check nodig.
+            artikelnummer = _extract_text(elem, "app:artikelnummer")
+
+            # Object-specific structured info
+            maatvoering_info = None
+            bouwaanduidingtype = None
+            figuurtype = None
+            gebiedsaanduidinghoofdgroep = None
+            if object_type == "Maatvoering":
+                maatvoering_info = _parse_maatvoering_kv(
+                    _extract_text(elem, "app:maatvoering")
+                )
+            elif object_type == "Bouwaanduiding":
+                # PDOK heeft geen apart type-veld; naam draagt het type
+                # (bv. "aaneengebouwd", "vrijstaand"). Lokale variaties
+                # belanden elk in core.bouwaanduidingtype.
+                bouwaanduidingtype = naam
+            elif object_type == "Figuur":
+                # Idem: naam draagt het figuurtype (bv. "hartlijn leiding - water").
+                # symboolcode is in praktijk vaak leeg.
+                figuurtype = naam or _extract_text(elem, "app:symboolcode")
+            elif object_type == "Gebiedsaanduiding":
+                # gebiedsaanduidinggroep (zonder 's') is het PDOK-veld; bv.
+                # "geluidzone", "veiligheidszone". Gestandaardiseerd.
+                gebiedsaanduidinghoofdgroep = _extract_text(
+                    elem, "app:gebiedsaanduidinggroep"
+                )
 
             gml_str = _extract_gml_geometry(elem)
             if not gml_str or not identificatie:
                 continue
 
-            # Ensure hoofdgroep exists in lookup (covers dubbelbestemming + unknown values)
+            # Ensure lookup-codes bestaan (self-populate; PDOK kan lokale
+            # codes bevatten die niet in de officiële IMRO-set zitten).
             if bestemmingshoofdgroep:
                 cur.execute(
                     "INSERT INTO core.bestemmingshoofdgroep (code) VALUES (%s) ON CONFLICT DO NOTHING",
                     (bestemmingshoofdgroep,),
+                )
+            if bouwaanduidingtype:
+                cur.execute(
+                    "INSERT INTO core.bouwaanduidingtype (code) VALUES (%s) ON CONFLICT DO NOTHING",
+                    (bouwaanduidingtype,),
+                )
+            if figuurtype:
+                cur.execute(
+                    "INSERT INTO core.figuurtype (code) VALUES (%s) ON CONFLICT DO NOTHING",
+                    (figuurtype,),
+                )
+            if gebiedsaanduidinghoofdgroep:
+                cur.execute(
+                    "INSERT INTO core.gebiedsaanduidinghoofdgroep (code) VALUES (%s) ON CONFLICT DO NOTHING",
+                    (gebiedsaanduidinghoofdgroep,),
                 )
 
             try:
                 cur.execute(
                     """INSERT INTO wro.planobject
                        (identificatie, instrument_idn, object_type, naam,
-                        bestemmingshoofdgroep, geometrie, gml_source)
-                       VALUES (%s, %s, %s, %s, %s,
+                        bestemmingshoofdgroep, artikelnummer,
+                        bouwaanduidingtype, figuurtype,
+                        gebiedsaanduidinghoofdgroep, maatvoering_info,
+                        geometrie, gml_source)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
                                ST_GeomFromGML(%s, 28992), %s)
-                       ON CONFLICT (identificatie) DO NOTHING""",
+                       ON CONFLICT (identificatie) DO UPDATE SET
+                           maatvoering_info = COALESCE(EXCLUDED.maatvoering_info, wro.planobject.maatvoering_info),
+                           artikelnummer = COALESCE(EXCLUDED.artikelnummer, wro.planobject.artikelnummer),
+                           bouwaanduidingtype = COALESCE(EXCLUDED.bouwaanduidingtype, wro.planobject.bouwaanduidingtype),
+                           figuurtype = COALESCE(EXCLUDED.figuurtype, wro.planobject.figuurtype),
+                           gebiedsaanduidinghoofdgroep = COALESCE(EXCLUDED.gebiedsaanduidinghoofdgroep, wro.planobject.gebiedsaanduidinghoofdgroep)
+                       """,
                     (identificatie, plan_idn, object_type, naam,
-                     bestemmingshoofdgroep, gml_str, gml_str),
+                     bestemmingshoofdgroep, artikelnummer,
+                     bouwaanduidingtype, figuurtype,
+                     gebiedsaanduidinghoofdgroep,
+                     json.dumps(maatvoering_info) if maatvoering_info else None,
+                     gml_str, gml_str),
                 )
             except Exception:
                 conn.rollback()  # Skip bad geometries

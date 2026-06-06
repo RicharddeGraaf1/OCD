@@ -35,8 +35,13 @@ CREATE TABLE IF NOT EXISTS p2p.locatie_basisgeo (
 CREATE INDEX IF NOT EXISTS idx_locatie_basisgeo_id
     ON p2p.locatie_basisgeo (basisgeo_id);
 
+-- Geen FK op gio_frbr: ZIP-GMLs bevatten GIO-FRBRs die niet altijd via
+-- ExtIoRef.target_ref in p2p.geo_informatieobject terechtkomen (oude
+-- vs nieuwe expressie). De junction-tabel moet dekkender zijn dan
+-- p2p.geo_informatieobject; bij JOIN-time vallen niet-bestaande GIOs
+-- automatisch weg.
 CREATE TABLE IF NOT EXISTS p2p.gio_basisgeo (
-    gio_frbr     TEXT NOT NULL REFERENCES p2p.geo_informatieobject(frbr_expression) ON DELETE CASCADE,
+    gio_frbr     TEXT NOT NULL,
     basisgeo_id  TEXT NOT NULL,
     PRIMARY KEY (gio_frbr, basisgeo_id)
 );

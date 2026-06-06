@@ -30,13 +30,241 @@ def setup():
     """Create the database schema and populate lookup tables."""
     console.print(f"[bold]Setting up database[/bold] at {cfg.DB_HOST}:{cfg.DB_PORT}/{cfg.DB_NAME}")
 
+    from src.ddl import KOOP_DDL
+
     conn = get_conn()
     try:
         console.print("  Creating schema + tables...")
         execute_sql_file(conn, DDL)
         console.print("  Populating lookup tables...")
         execute_sql_file(conn, LOOKUPS)
+        console.print("  Creating vth schema (KOOP_DDL)...")
+        execute_sql_file(conn, KOOP_DDL)
         console.print("[green]Setup complete![/green]")
+    finally:
+        conn.close()
+
+
+@cli.command("setup-koop")
+def setup_koop():
+    """Apply the vth schema only (incrementeel; voor PoC-DB's of nieuwe kolommen)."""
+    from src.ddl import KOOP_DDL
+    console.print("[bold]Applying vth schema[/bold]")
+    conn = get_conn()
+    try:
+        execute_sql_file(conn, KOOP_DDL)
+        console.print("[green]vth schema applied.[/green]")
+    finally:
+        conn.close()
+
+
+@cli.command("load-koop")
+@click.option("--from", "from_date", required=True, help="Startdatum YYYY-MM-DD (inclusief).")
+@click.option("--to", "to_date", required=True, help="Einddatum YYYY-MM-DD (inclusief).")
+@click.option("--force", is_flag=True,
+              help="Re-ingest dagen die al status='ok' hebben in vth.etl_run.")
+def load_koop_cmd(from_date, to_date, force):
+    """Laad KOOP omgevingsvergunning-kennisgevingen voor een datumbereik."""
+    from src.loaders.koop_vergunning import load_koop_range
+    console.print(f"[bold]Loading KOOP omgevingsvergunningen[/bold] {from_date} .. {to_date}")
+    if force:
+        console.print("  [yellow]--force: bestaande status='ok' dagen worden opnieuw verwerkt[/yellow]")
+    total = load_koop_range(from_date, to_date, force=force)
+    console.print(f"[green]Klaar: {total:,} upserts.[/green]")
+
+
+@cli.command("enrich-koop")
+@click.option("--limit", type=int, default=5000,
+              help="Max records per batch (default 5000).")
+@click.option("--loop", is_flag=True,
+              help="Blijf draaien tot er N empty cycles op rij zijn.")
+@click.option("--sleep", type=int, default=120,
+              help="Seconden slapen tussen empty cycles in --loop modus.")
+@click.option("--stop-after-empty", type=int, default=5,
+              help="Stop na N empty cycles in --loop modus.")
+@click.option("--type-besluit", default=None,
+              help="Filter op type_besluit (comma-separated, bv. "
+                   "'verleend,geweigerd,ontwerp,van_rechtswege'). Records "
+                   "buiten de filter blijven NULL en kunnen later met een "
+                   "run zonder filter worden opgepakt — true incremental.")
+def enrich_koop_cmd(limit, loop, sleep, stop_after_empty, type_besluit):
+    """Verrijk records met volledige publicatie-XML, zaaknummer, deeplinks."""
+    from src.loaders.koop_vergunning import enrich_records
+    type_filter: tuple[str, ...] | None = None
+    if type_besluit:
+        type_filter = tuple(t.strip() for t in type_besluit.split(",") if t.strip())
+        console.print(f"  Filtering op type_besluit IN {type_filter}")
+    console.print(f"[bold]Enriching KOOP records[/bold] (limit={limit}, loop={loop})")
+    total = enrich_records(
+        limit=limit, loop=loop, sleep=sleep,
+        stop_after_empty=stop_after_empty, type_filter=type_filter,
+    )
+    console.print(f"[green]Klaar: {total:,} records verrijkt.[/green]")
+
+
+@cli.command("status-koop")
+def status_koop_cmd():
+    """Toon KOOP-DB statistieken: totaal, datums, per blad/activiteit/type."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Totaal + datum-bereik
+            cur.execute("SELECT count(*) AS n FROM vth.vergunningkennisgeving")
+            n_total = cur.fetchone()["n"]
+        console.print(f"[bold]KOOP-DB[/bold] — totaal: [green]{n_total:,}[/green] records")
+        if n_total == 0:
+            return
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MIN(datum_publicatie) AS lo, MAX(datum_publicatie) AS hi "
+                "FROM vth.vergunningkennisgeving"
+            )
+            mm = cur.fetchone()
+        console.print(f"Datumbereik: {mm['lo']} .. {mm['hi']}")
+
+        # Per publicatieblad
+        tbl = Table(title="Per publicatieblad")
+        tbl.add_column("Blad")
+        tbl.add_column("Aantal", justify="right")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT publicatieblad, count(*) AS n "
+                "FROM vth.vergunningkennisgeving "
+                "GROUP BY publicatieblad ORDER BY n DESC"
+            )
+            for r in cur.fetchall():
+                tbl.add_row(r["publicatieblad"], f"{r['n']:,}")
+        console.print(tbl)
+
+        # Per activiteit (top 10)
+        tbl = Table(title="Per activiteit (top 10)")
+        tbl.add_column("Activiteit")
+        tbl.add_column("Aantal", justify="right")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(activiteit_code,'(none)') AS a, count(*) AS n "
+                "FROM vth.vergunningkennisgeving "
+                "GROUP BY 1 ORDER BY n DESC LIMIT 10"
+            )
+            for r in cur.fetchall():
+                tbl.add_row(r["a"], f"{r['n']:,}")
+        console.print(tbl)
+
+        # Per type_besluit
+        tbl = Table(title="Per type_besluit")
+        tbl.add_column("Type")
+        tbl.add_column("Aantal", justify="right")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(type_besluit,'(none)') AS t, count(*) AS n "
+                "FROM vth.vergunningkennisgeving "
+                "GROUP BY 1 ORDER BY n DESC"
+            )
+            for r in cur.fetchall():
+                tbl.add_row(r["t"], f"{r['n']:,}")
+        console.print(tbl)
+
+        # Per organisatietype
+        tbl = Table(title="Per organisatietype")
+        tbl.add_column("Type")
+        tbl.add_column("Aantal", justify="right")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(organisatietype,'(none)') AS t, count(*) AS n "
+                "FROM vth.vergunningkennisgeving "
+                "GROUP BY 1 ORDER BY n DESC"
+            )
+            for r in cur.fetchall():
+                tbl.add_row(r["t"], f"{r['n']:,}")
+        console.print(tbl)
+
+        # Per geometrie_type (met RD/WGS-vulling)
+        tbl = Table(title="Per geometrie_type (met coords?)")
+        tbl.add_column("Geometrie")
+        tbl.add_column("Totaal", justify="right")
+        tbl.add_column("RD", justify="right")
+        tbl.add_column("WGS", justify="right")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(geometrie_type,'(NULL)') AS gt, count(*) AS n, "
+                "  SUM(CASE WHEN geometrie_rd IS NOT NULL THEN 1 ELSE 0 END) AS rd, "
+                "  SUM(CASE WHEN geometrie_wgs_pt IS NOT NULL THEN 1 ELSE 0 END) AS wgs "
+                "FROM vth.vergunningkennisgeving "
+                "GROUP BY 1 ORDER BY n DESC"
+            )
+            for r in cur.fetchall():
+                tbl.add_row(r["gt"], f"{r['n']:,}", f"{r['rd']:,}", f"{r['wgs']:,}")
+        console.print(tbl)
+
+        # Adres-fields aanwezig
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT "
+                "  SUM(CASE WHEN postcode IS NOT NULL THEN 1 ELSE 0 END) AS pc, "
+                "  SUM(CASE WHEN straatnaam IS NOT NULL THEN 1 ELSE 0 END) AS st, "
+                "  SUM(CASE WHEN woonplaats IS NOT NULL THEN 1 ELSE 0 END) AS wp, "
+                "  count(*) AS tot "
+                "FROM vth.vergunningkennisgeving"
+            )
+            ar = cur.fetchone()
+        total_ar = ar["tot"] or 0
+        def _pct(x: int) -> str:
+            return f"{x:,} ({x/total_ar*100:.1f}%)" if total_ar else "0"
+        tbl = Table(title="Adres-fields aanwezig")
+        tbl.add_column("Veld")
+        tbl.add_column("Vulling", justify="right")
+        tbl.add_row("postcode", _pct(ar["pc"] or 0))
+        tbl.add_row("straatnaam", _pct(ar["st"] or 0))
+        tbl.add_row("woonplaats", _pct(ar["wp"] or 0))
+        tbl.add_row("[bold]totaal[/bold]", f"[bold]{total_ar:,}[/bold]")
+        console.print(tbl)
+
+        # Laatste 5 etl_run-entries
+        tbl = Table(title="Laatste 5 etl_run entries")
+        tbl.add_column("processed_date")
+        tbl.add_column("count", justify="right")
+        tbl.add_column("status")
+        tbl.add_column("error")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT processed_date, record_count, status, error "
+                "FROM vth.etl_run ORDER BY processed_date DESC LIMIT 5"
+            )
+            for r in cur.fetchall():
+                tbl.add_row(
+                    str(r["processed_date"]),
+                    str(r["record_count"] or 0),
+                    r["status"],
+                    (r["error"] or "")[:60],
+                )
+        console.print(tbl)
+
+        # Deeplinks: totaal/werkt/404/unvalidated per host
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('vth.vergunning_deeplink') AS t")
+            has_dl = cur.fetchone()["t"] is not None
+        if has_dl:
+            tbl = Table(title="Deeplinks per host")
+            tbl.add_column("Host")
+            tbl.add_column("Totaal", justify="right")
+            tbl.add_column("Werkt", justify="right")
+            tbl.add_column("404", justify="right")
+            tbl.add_column("Unvalidated", justify="right")
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT host, count(*) AS n, "
+                    "  SUM(CASE WHEN werkt THEN 1 ELSE 0 END) AS ok, "
+                    "  SUM(CASE WHEN http_status = 404 THEN 1 ELSE 0 END) AS nf, "
+                    "  SUM(CASE WHEN gevalideerd_at IS NULL THEN 1 ELSE 0 END) AS unv "
+                    "FROM vth.vergunning_deeplink "
+                    "GROUP BY host ORDER BY n DESC"
+                )
+                for r in cur.fetchall():
+                    tbl.add_row(
+                        r["host"], f"{r['n']:,}", f"{r['ok'] or 0:,}",
+                        f"{r['nf'] or 0:,}", f"{r['unv'] or 0:,}",
+                    )
+            console.print(tbl)
     finally:
         conn.close()
 
@@ -47,6 +275,106 @@ def load_wro():
     from src.loaders.wro_pdok import load_wro_plans
     console.print(f"[bold]Loading Wro plans[/bold] for {cfg.POC_GEMEENTE_NAAM} (CBS {cfg.POC_CBS_CODE})")
     load_wro_plans()
+
+
+@cli.command("load-gemeentegrenzen")
+def load_gemeentegrenzen_cmd():
+    """Laad gemeente- + provinciegrenzen uit PDOK Bestuurlijke Gebieden.
+
+    Vult core.gemeentegrens — voorwaarde voor v2a.ponsenkaart_gemeente_stats.
+    Eenmalig/jaarlijks draaien (gemeente-herindelingen).
+    """
+    from src.loaders.gemeentegrens_pdok import load_gemeentegrenzen
+    console.print("[bold]Loading Nederlandse gemeentegrenzen[/bold] (PDOK Bestuurlijke Gebieden)")
+    load_gemeentegrenzen()
+
+
+@cli.command("refresh-ponsenkaart-stats")
+def refresh_ponsenkaart_stats_cmd():
+    """Refresh v2a.ponsenkaart_gemeente_stats matview (nachtelijk of na OW-ingest)."""
+    from src.loaders.gemeentegrens_pdok import refresh_ponsenkaart_stats
+    console.print("[bold]Refreshing ponsenkaart-stats[/bold]")
+    refresh_ponsenkaart_stats()
+
+
+@cli.command("repair-pons-placeholders")
+def repair_pons_placeholders_cmd():
+    """Herstel pons-locaties die als POINT(0,0) zijn opgeslagen.
+
+    Roept load_regeling_expand opnieuw aan voor alle regelingen van
+    bronhouders met placeholder-ponsen. Met de fix uit 2026-05-21
+    (locatieSelectie=primair) krijgt de Gebiedengroep nu wel een
+    samengestelde geometrie. Refresht daarna de matview.
+    """
+    from src.db import get_conn
+    from src.loaders.api_loader import load_regeling_expand
+    from src.loaders.gemeentegrens_pdok import refresh_ponsenkaart_stats
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                WITH placeholder_bh AS (
+                  SELECT DISTINCT
+                         SUBSTRING(p.identificatie FROM 'nl.imow-(gm[0-9]+)') AS bh
+                    FROM p2p.pons p
+                    JOIN p2p.locatie l ON l.identificatie = p.locatie_id
+                   WHERE ST_X(ST_Centroid(l.geometrie)) = 0
+                     AND ST_Y(ST_Centroid(l.geometrie)) = 0
+                )
+                SELECT r.frbr_work, r.frbr_expression, r.bronhouder, r.opschrift
+                  FROM placeholder_bh pb
+                  JOIN p2p.regeling r ON r.bronhouder = pb.bh
+                 ORDER BY r.bronhouder, r.frbr_expression
+            """)
+            regelingen = cur.fetchall()
+
+        if not regelingen:
+            console.print("[yellow]Geen placeholder-ponsen — niets te repareren.[/yellow]")
+            return
+
+        console.print(f"[bold]Repair {len(regelingen)} regelingen[/bold]")
+
+        ok, failed = 0, 0
+        for r in regelingen:
+            vals = list(r.values()) if hasattr(r, "keys") else r
+            frbr_work, frbr_expression, bronhouder, opschrift = vals
+            short_titel = (opschrift or "")[:50]
+            try:
+                stats = load_regeling_expand(conn, frbr_work, frbr_expression)
+                marker = []
+                if stats["regelingsgebied"]:
+                    marker.append("rg")
+                if stats["pons"]:
+                    marker.append("pons")
+                tag = f"[green]({','.join(marker)})[/green]" if marker else "[dim](-)[/dim]"
+                console.print(f"  {bronhouder} {short_titel:50} {tag}")
+                ok += 1
+            except Exception as e:
+                console.print(f"  [red]{bronhouder} {short_titel}: {e}[/red]")
+                failed += 1
+
+        console.print(f"\n[bold]Klaar:[/bold] {ok} ok, {failed} failed")
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                  COUNT(*) FILTER (WHERE ST_X(ST_Centroid(l.geometrie)) = 0
+                                    AND ST_Y(ST_Centroid(l.geometrie)) = 0) AS placeholder,
+                  COUNT(*) FILTER (WHERE ST_GeometryType(l.geometrie) <> 'ST_Point'
+                                     OR ST_X(ST_Centroid(l.geometrie)) <> 0) AS echt,
+                  COUNT(*) AS totaal
+                  FROM p2p.pons p
+                  JOIN p2p.locatie l ON l.identificatie = p.locatie_id
+            """)
+            row = cur.fetchone()
+            v = list(row.values()) if hasattr(row, "keys") else row
+            console.print(f"\nPons-locaties na repair: {v[1]} echt, {v[0]} placeholder, {v[2]} totaal")
+    finally:
+        conn.close()
+
+    console.print()
+    refresh_ponsenkaart_stats()
 
 
 @cli.command("load-wro-structuurvisies")
@@ -135,7 +463,7 @@ def load_api(types, gemeente, overheid):
 
 @cli.command("refresh-subdiv")
 @click.option("--bronhouder", "-b", default=None,
-              help="Beperk tot Ã©Ã©n bronhouder-code (bv. gm0344). Default: alle polygon-locaties (volledige rebuild).")
+              help="Beperk tot één bronhouder-code (bv. gm0344). Default: alle polygon-locaties (volledige rebuild).")
 def refresh_subdiv_cmd(bronhouder):
     """(Her)bouw p2p.locatie_subdiv (afgeleide subdivided geometrie).
 

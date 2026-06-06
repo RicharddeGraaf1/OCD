@@ -158,6 +158,62 @@ DOCUMENTTYPE_TO_REGELINGMODEL = {
 }
 
 
+def _parse_regeling_metadata(z: zipfile.ZipFile) -> dict:
+    """Lees regeling-metadata uit ZIP.
+
+    Bronnen:
+    - `Regeling/Metadata.xml`: `<soortRegeling>` (URI; we slaan tail op zoals
+      'regelingtype_003').
+    - `Regeling/Tekst.xml`: `<Conditie>` (alleen bij RegelingTijdelijkdeel) —
+      bevat een <Artikel> met opschrift + paragraaf-tekst. We bewaren de
+      plain text geconcateneerd ("opschrift — paragraaf-tekst"), zodat bot
+      de tijdelijkdeel-conditie kan citeren.
+    """
+    out: dict[str, str | None] = {"soort_regeling": None, "conditie": None}
+    parser = etree.XMLParser(recover=True)
+
+    # Metadata.xml → soortRegeling
+    if "Regeling/Metadata.xml" in z.namelist():
+        try:
+            root = etree.fromstring(z.read("Regeling/Metadata.xml"), parser)
+            if root is not None:
+                for elem in root.iter():
+                    if not isinstance(elem.tag, str):
+                        continue
+                    if etree.QName(elem.tag).localname == "soortRegeling" and elem.text:
+                        val = elem.text.strip().rstrip("/").split("/")[-1]
+                        out["soort_regeling"] = val or None
+                        break
+        except Exception:
+            pass
+
+    # Tekst.xml → Conditie (RegelingTijdelijkdeel)
+    if "Regeling/Tekst.xml" in z.namelist():
+        try:
+            root = etree.fromstring(z.read("Regeling/Tekst.xml"), parser)
+            if root is not None:
+                for elem in root.iter():
+                    if not isinstance(elem.tag, str):
+                        continue
+                    if etree.QName(elem.tag).localname != "Conditie":
+                        continue
+                    # Pak Opschrift + alle Al-paragrafen tekst
+                    parts: list[str] = []
+                    for sub in elem.iter():
+                        if not isinstance(sub.tag, str):
+                            continue
+                        ln = etree.QName(sub.tag).localname
+                        if ln in ("Opschrift", "Al") and sub.text:
+                            parts.append(sub.text.strip())
+                    if parts:
+                        out["conditie"] = " — ".join(parts)
+                    break
+        except Exception:
+            pass
+
+    return out
+
+
 def _detect_regelingmodel(zip_path: Path, doc_type: str) -> str:
     """Detect regelingmodel from ZIP content or documenttype mapping."""
     z = zipfile.ZipFile(zip_path)
@@ -187,16 +243,22 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
 
     with conn.cursor() as cur:
         # --- Regeling metadata ---
+        meta_extra = _parse_regeling_metadata(z)
         cur.execute(
             """INSERT INTO p2p.regeling
-               (frbr_expression, frbr_work, regelingmodel, opschrift, citeertitel, bronhouder, documenttype)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (frbr_expression) DO NOTHING""",
+               (frbr_expression, frbr_work, regelingmodel, opschrift, citeertitel, bronhouder, documenttype,
+                soort_regeling, conditie)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (frbr_expression) DO UPDATE SET
+                   soort_regeling = COALESCE(EXCLUDED.soort_regeling, p2p.regeling.soort_regeling),
+                   conditie       = COALESCE(EXCLUDED.conditie,       p2p.regeling.conditie)""",
             (expression_id, regeling_id, regelingmodel,
              regeling_info.get("titel", ""),
              regeling_info.get("titel", ""),
              regeling_info.get("bronhouder", cfg.POC_CBS_CODE),
-             doc_type),
+             doc_type,
+             meta_extra.get("soort_regeling"),
+             meta_extra.get("conditie")),
         )
 
         # --- STOP tekst ---
@@ -308,17 +370,36 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                 )
             console.print(f"      [green]{len(gas)} gebiedsaanwijzingen geladen[/green]")
 
-        # --- OW Juridische regels ---
-        if "OW-bestanden/regelsvooriedereen.xml" in z.namelist():
-            regels = parse_juridische_regels(z.read("OW-bestanden/regelsvooriedereen.xml"))
+        # --- OW Juridische regels (3 bestanden: regelsvooriedereen,
+        # instructieregels, omgevingswaarderegels) ---
+        regels = []
+        for regel_file in (
+            "OW-bestanden/regelsvooriedereen.xml",
+            "OW-bestanden/instructieregels.xml",
+            "OW-bestanden/omgevingswaarderegels.xml",
+        ):
+            if regel_file in z.namelist():
+                regels.extend(parse_juridische_regels(z.read(regel_file)))
+        if regels:
             for regel in regels:
                 cur.execute(
                     """INSERT INTO p2p.juridische_regel
-                       (identificatie, regel_type, idealisatie, regeltekst_wid)
-                       VALUES (%s, %s, %s, %s)
-                       ON CONFLICT (identificatie) DO NOTHING""",
+                       (identificatie, regel_type, idealisatie, regeltekst_wid,
+                        thema, instructieregel_instrument, instructieregel_taakuitoefening,
+                        regeling_expression)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (identificatie) DO UPDATE SET
+                           thema = COALESCE(EXCLUDED.thema, p2p.juridische_regel.thema),
+                           instructieregel_instrument = COALESCE(EXCLUDED.instructieregel_instrument, p2p.juridische_regel.instructieregel_instrument),
+                           instructieregel_taakuitoefening = COALESCE(EXCLUDED.instructieregel_taakuitoefening, p2p.juridische_regel.instructieregel_taakuitoefening),
+                           regeling_expression = COALESCE(EXCLUDED.regeling_expression, p2p.juridische_regel.regeling_expression)
+                       """,
                     (regel["identificatie"], regel["regel_type"],
-                     regel["idealisatie"], regel["regeltekst_wid"]),
+                     regel["idealisatie"], regel["regeltekst_wid"],
+                     regel.get("thema"),
+                     regel.get("instructieregel_instrument"),
+                     regel.get("instructieregel_taakuitoefening"),
+                     expression_id),
                 )
                 # Insert ActiviteitLocatieaanduidingen
                 for ala in regel.get("activiteit_locatie_aanduidingen", []):

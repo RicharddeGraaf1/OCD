@@ -60,15 +60,30 @@ def parse_activiteiten(xml_bytes: bytes) -> list[dict]:
     return results
 
 
+def _uri_tail(uri: str | None) -> str | None:
+    """Pak laatste segment van een concept-URI ('.../concept/Wildbeheereenheid'
+    → 'Wildbeheereenheid'). None bij None of leeg."""
+    if not uri:
+        return None
+    return uri.rstrip("/").split("/")[-1] or None
+
+
 def parse_juridische_regels(xml_bytes: bytes) -> list[dict]:
-    """Parse regelsvooriedereen.xml → list of juridische_regel dicts."""
+    """Parse regelsvooriedereen.xml / instructieregels.xml / omgevingswaarderegels.xml
+    → list of juridische_regel dicts. Werkt op alle 3 bestanden; elk bevat
+    1 of meerdere regel-types.
+
+    Type-string consistentie: 'Omgevingswaardegel' (zonder 'r') ipv de XML-tag
+    'Omgevingswaarderegel' — sluit aan op api_loader.py mapping zodat beide
+    ingest-paden dezelfde DB-waarde produceren.
+    """
     root = _parse_ow_xml(xml_bytes)
     results = []
 
     for tag_name, regel_type in [
         ("regels:RegelVoorIedereen", "RegelVoorIedereen"),
         ("regels:Instructieregel", "Instructieregel"),
-        ("regels:Omgevingswaarderegel", "Omgevingswaarderegel"),
+        ("regels:Omgevingswaarderegel", "Omgevingswaardegel"),
     ]:
         for regel in root.findall(f".//{tag_name}", NS):
             identificatie = _text(regel, "regels:identificatie")
@@ -81,6 +96,26 @@ def parse_juridische_regels(xml_bytes: bytes) -> list[dict]:
 
             # Get regeltekst reference
             regeltekst_wid = _href(regel, "regels:artikelOfLid/regels:RegeltekstRef")
+
+            # Themas (multivalued, alle regel-types). Bron is concept-URI;
+            # opgeslagen als tail (bv. 'geluid', 'natuur', 'cultureel erfgoed').
+            themas: list[str] = []
+            for thema_el in regel.findall("regels:thema", NS):
+                if thema_el.text:
+                    tail = _uri_tail(thema_el.text.strip())
+                    if tail:
+                        themas.append(tail)
+
+            # Instructieregel-specifiek: instrument + taakuitoefening concept-URIs.
+            instructieregel_instrument = None
+            instructieregel_taakuitoefening = None
+            if regel_type == "Instructieregel":
+                instructieregel_instrument = _uri_tail(
+                    _text(regel, "regels:instructieregelInstrument")
+                )
+                instructieregel_taakuitoefening = _uri_tail(
+                    _text(regel, "regels:instructieregelTaakuitoefening")
+                )
 
             # Get activiteit locatie aanduidingen
             # Structure: regels:activiteitaanduiding > rol:ActiviteitRef + regels:ActiviteitLocatieaanduiding
@@ -119,6 +154,9 @@ def parse_juridische_regels(xml_bytes: bytes) -> list[dict]:
                     "regel_type": regel_type,
                     "idealisatie": idealisatie,
                     "regeltekst_wid": regeltekst_wid,
+                    "thema": themas or None,
+                    "instructieregel_instrument": instructieregel_instrument,
+                    "instructieregel_taakuitoefening": instructieregel_taakuitoefening,
                     "activiteit_locatie_aanduidingen": alas,
                     "gebiedsaanwijzing_refs": ga_refs,
                     "norm_refs": norm_refs,

@@ -63,10 +63,12 @@ def extract_inline_referenties(inhoud: str | None) -> list[dict]:
         if not ref:
             continue
         soort = m.group("soort")
-        # ExtIoRef: vang ook @wId apart op zodat IntIoRef'en hier later naartoe
-        # kunnen lookuppen via de twee-traps keten.
+        # Vang @wId voor ExtIoRef (nodig voor de twee-traps keten target_ref→wId)
+        # én voor IntIoRef (heeft per STOP-XSD óók een wId-attribuut; gebruikt
+        # als anker waar bv. een IntRef naartoe kan wijzen).
+        # IntRef/ExtRef hebben volgens STOP geen wId-attribuut.
         eigen_wid: str | None = None
-        if soort.lower() == "extioref":
+        if soort.lower() in ("extioref", "intioref"):
             wid_m = _WID_ATTR_RE.search(attrs)
             if wid_m:
                 eigen_wid = wid_m.group("d") if wid_m.group("d") is not None else wid_m.group("s")

@@ -149,6 +149,21 @@ CREATE TABLE IF NOT EXISTS core.bronhouder (
     geldig_tot      DATE NULL
 );
 
+-- Gemeentegrenzen uit PDOK Bestuurlijke Gebieden. Levert de noemer
+-- voor "% geponst" en de provincie-toewijzing per gemeente. Geladen
+-- via src/loaders/gemeentegrens_pdok.py; eenmalig per jaar refreshen
+-- i.v.m. gemeente-herindelingen.
+CREATE TABLE IF NOT EXISTS core.gemeentegrens (
+    overheidscode   TEXT PRIMARY KEY REFERENCES core.bronhouder(overheidscode),
+    naam            TEXT NOT NULL,
+    provincie       TEXT NULL,
+    geometrie       GEOMETRY(MultiPolygon, 28992) NOT NULL,
+    oppervlak_m2    DOUBLE PRECISION NOT NULL,
+    peildatum       DATE NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gemeentegrens_geom ON core.gemeentegrens USING GIST(geometrie);
+CREATE INDEX IF NOT EXISTS idx_gemeentegrens_provincie ON core.gemeentegrens(provincie);
+
 -- =============================================================
 -- p2p.* — STOP: Regelingen en Besluiten
 -- =============================================================
@@ -245,7 +260,7 @@ CREATE TABLE IF NOT EXISTS p2p.locatie (
 CREATE INDEX IF NOT EXISTS idx_locatie_geom ON p2p.locatie USING GIST(geometrie);
 
 -- Afgeleide ("gematerialiseerde") tabel: p2p.locatie.geometrie opgedeeld via
--- ST_Subdivide(geometrie, 256), Ã©Ã©n rij per stukje (identificatie NIET uniek).
+-- ST_Subdivide(geometrie, 256), één rij per stukje (identificatie NIET uniek).
 -- Regelingsgebieden zijn grote multipolygons; st_intersects op de volledige
 -- geometrie kost seconden en duwt /v1/adres over de statement_timeout. Op de
 -- opgedeelde stukjes pre-filtert de GiST-index veel preciezer (~5-90x sneller,
@@ -253,7 +268,7 @@ CREATE INDEX IF NOT EXISTS idx_locatie_geom ON p2p.locatie USING GIST(geometrie)
 -- en de meeste geo-endpoints in ocd-api.
 --
 -- LET OP: deze tabel wordt NIET door de normale loader-INSERT gevuld. Na elke
--- (her)load van p2p.locatie moet hij herbouwd worden via ST_Subdivide â€” zie
+-- (her)load van p2p.locatie moet hij herbouwd worden via ST_Subdivide — zie
 -- dso-loader/scripts/herstel_*.py (refresh_subdiv*). Een verse DB krijgt hier
 -- de lege tabel + indexen; de geo-queries geven dan lege resultaten tot een
 -- subdiv-refresh is gedraaid.
@@ -278,9 +293,23 @@ CREATE TABLE IF NOT EXISTS p2p.juridische_regel (
     omschrijving        TEXT NULL,
     instructieregel_instrument      TEXT NULL,
     instructieregel_taakuitoefening TEXT NULL,
-    regeltekst_wid      TEXT NOT NULL
+    regeltekst_wid      TEXT NOT NULL,
+    -- Tot welke regeling hoort deze regel. Nodig om jr->tekst_element
+    -- eenduidig te koppelen: regeltekst_wid (STOP wId) is NIET globaal uniek
+    -- en wordt over regelingen hergebruikt (bv. template-voorbereidingsbesluiten
+    -- pv27_1__chp_..., generieke Rijk-wIds body/recital). Zonder dit veld
+    -- fan-out de join te.wid = jr.regeltekst_wid naar vreemde regelingen.
+    regeling_expression TEXT NULL REFERENCES p2p.regeling(frbr_expression) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_jr_regeltekst ON p2p.juridische_regel(regeltekst_wid);
+-- Migratie voor bestaande databases (CREATE TABLE IF NOT EXISTS voegt geen kolom toe):
+ALTER TABLE p2p.juridische_regel ADD COLUMN IF NOT EXISTS regeling_expression TEXT;
+-- Composiet-index voor de gescopete join jr.regeltekst_wid + jr.regeling_expression:
+CREATE INDEX IF NOT EXISTS idx_jr_regeltekst_expr
+    ON p2p.juridische_regel(regeltekst_wid, regeling_expression);
+-- Spiegelt p2p.tekst_element: index op (regeling_expression, wid) voor de join-kant:
+CREATE INDEX IF NOT EXISTS idx_tekst_element_expr_wid
+    ON p2p.tekst_element(regeling_expression, wid);
 
 CREATE TABLE IF NOT EXISTS p2p.activiteit (
     identificatie       TEXT PRIMARY KEY,
@@ -649,9 +678,54 @@ CREATE OR REPLACE VIEW p2pwijziging.besluitversie AS
   SELECT * FROM p2pwijziging.besluit WHERE soort = 'besluitversie';
 
 -- =============================================================
--- v2a.* — Vraag-tot-antwoord: gereserveerd, nu leeg
+-- v2a.* — Vraag-tot-antwoord: viewer-aggregaties
 -- =============================================================
--- Later: vergunning, vergunning_locatie, zoekindex-caches
+-- Later uitbreidbaar met: vergunning, vergunning_locatie,
+-- zoekindex-caches. Nu: aggregaties voor publieke trackers.
+
+-- Ponsenkaart-aggregatie per gemeente. Eén rij per gemeente met
+-- huidige stand: cumulatief geponst oppervlak (ST_Union zodat
+-- overlappende ponsen niet dubbel tellen), aantal ponsen, en
+-- afgeleid percentage.
+--
+-- Koppeling pons → gemeente: RUIMTELIJK via ST_Within(centroid, gemeente).
+-- We gebruiken niet p2p.pons.was_bestemmingsplan omdat de huidige
+-- OW-loader die kolom niet vult (parse_ponsen leest enkel id+locatie_ref
+-- uit ponsen.xml). Spatial join is bovendien onafhankelijk van of de
+-- gemeente Wro-data heeft.
+--
+-- Refresh nachtelijk of na OW-ingest met REFRESH MATERIALIZED VIEW
+-- CONCURRENTLY.
+CREATE MATERIALIZED VIEW IF NOT EXISTS v2a.ponsenkaart_gemeente_stats AS
+WITH pons_geom AS (
+    SELECT p.identificatie AS pons_id,
+           l.geometrie     AS geometrie,
+           ST_Centroid(l.geometrie) AS centroid
+      FROM p2p.pons p
+      JOIN p2p.locatie l ON l.identificatie = p.locatie_id
+)
+SELECT
+    g.overheidscode,
+    g.naam,
+    g.provincie,
+    g.oppervlak_m2                                       AS gemeente_opp_m2,
+    COALESCE(ST_Area(ST_Union(pg.geometrie)), 0)         AS geponst_opp_m2,
+    COUNT(pg.pons_id)                                    AS pons_count,
+    CASE WHEN g.oppervlak_m2 > 0
+         THEN ROUND((COALESCE(ST_Area(ST_Union(pg.geometrie)), 0)
+                     / g.oppervlak_m2 * 100)::numeric, 2)
+         ELSE 0
+    END                                                  AS pct
+FROM core.gemeentegrens g
+LEFT JOIN pons_geom pg
+       ON ST_Within(pg.centroid, g.geometrie)
+GROUP BY g.overheidscode, g.naam, g.provincie, g.oppervlak_m2;
+
+-- Concurrent-refresh vereist een unique index
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ponsenkaart_stats_pk
+    ON v2a.ponsenkaart_gemeente_stats(overheidscode);
+CREATE INDEX IF NOT EXISTS idx_ponsenkaart_stats_provincie
+    ON v2a.ponsenkaart_gemeente_stats(provincie);
 
 -- =============================================================
 -- conv.* — Conversie-output: bestemmingsplan → omgevingsplan
@@ -854,4 +928,192 @@ INSERT INTO core.documenttype (code) VALUES
 ('Voorbeschermingsregels Omgevingsplan'),
 ('Voorbeschermingsregels Omgevingsverordening')
 ON CONFLICT DO NOTHING;
+"""
+
+
+# =============================================================================
+# KOOP-DDL — losstaand schema voor omgevingsvergunning-kennisgevingen
+# =============================================================================
+#
+# Bewust geen FK's naar dso.bevoegd_gezag of andere tabellen. De loader haalt
+# records uit KOOP SRU en persisteert ze hier zonder verdere koppeling.
+# Activiteit (KOOP-waardelijst) en bg_naam (vrije vorm) blijven tekstwaarden;
+# eventuele mapping naar IMOW-Activiteit en bestaande BevoegdGezag-tabel is
+# een latere keuze.
+#
+# Achtergrond: zie vault_v1/analysis/Ingest omgevingsvergunningen uit
+# officielebekendmakingen.md en vault_v1/model.md §14.
+#
+# De PoC-versie van deze DDL in scripts/koop-poc/schema.sql is een
+# wrapper-kopie voor `python ingest.py setup`-compatibiliteit; deze KOOP_DDL
+# is de canonical bron.
+
+KOOP_DDL = """
+CREATE SCHEMA IF NOT EXISTS vth;
+
+CREATE TABLE IF NOT EXISTS vth.vergunningkennisgeving (
+    koop_id              TEXT PRIMARY KEY,
+    -- Publicatieblad-prefix uit KOOP (gmb, prb, wsb, stcrt, stb, trb, bgr, …).
+    -- Bewust geen CHECK-constraint: KOOP voegt regelmatig nieuwe bladen toe
+    -- (bv. bgr = Blad gemeenschappelijke regeling) en we willen dat niet
+    -- elke keer eerst in de allow-list moeten zetten.
+    publicatieblad       TEXT NOT NULL,
+
+    -- Bevoegd gezag — vrije vorm zoals KOOP geeft (geen FK)
+    bg_naam              TEXT NOT NULL,
+    bg_scheme            TEXT,
+    organisatietype      TEXT,
+
+    -- Identificatie
+    titel                TEXT NOT NULL,
+    datum_publicatie     DATE NOT NULL,
+    jaargang             INTEGER,
+    publicatienummer     TEXT,
+    rubriek              TEXT,
+
+    -- Classificaties
+    activiteit_code      TEXT,  -- OVERHEIDop.ActiviteitOmgevingsvergunning
+    type_besluit         TEXT
+        CHECK (type_besluit IS NULL OR type_besluit IN (
+            'aanvraag', 'verleend', 'geweigerd', 'ontwerp',
+            'van_rechtswege', 'ingetrokken', 'verlenging_beslistermijn',
+            'melding', 'melding_geaccepteerd', 'kennisgeving',
+            'rectificatie', 'overig'
+        )),
+
+    -- Geometrie (PostGIS; 95% gevuld in PoC)
+    geometrie_type       TEXT
+        CHECK (geometrie_type IS NULL OR geometrie_type IN (
+            'Adres', 'Punt', 'Vlak', 'Postcodegebied'
+        )),
+    geometrie_rd         GEOMETRY(GEOMETRY, 28992),  -- echte geometrie
+    geometrie_rd_pt      GEOMETRY(POINT, 28992),     -- centroid / punt
+    geometrie_wgs_pt     GEOMETRY(POINT, 4326),
+    geometrielabel       TEXT,                       -- adresstring uit KOOP (vooral bij Vlak)
+
+    -- Adresvelden
+    postcode             TEXT,
+    huisnummer           TEXT,
+    huisletter           TEXT,
+    huisnummertoevoeging TEXT,
+    straatnaam           TEXT,
+    woonplaats           TEXT,
+    ligt_in_gemeente     TEXT,
+
+    -- Volledige inhoud
+    beschrijving         TEXT,
+    preferred_url        TEXT,
+    xml_url              TEXT,
+    pdf_url              TEXT,                           -- gzd:itemUrl manifestation="pdf"
+    raw_xml              TEXT NOT NULL,                  -- SRU-record (metadata)
+    inhoud_xml           TEXT,                           -- volledige publicatie-XML
+    inhoud_tekst         TEXT,                           -- platte tekst (alle <al>/<li>)
+    inhoud_geladen_at    TIMESTAMPTZ,                    -- NULL = enrichment nog niet gedaan
+    zaaknummer_bg        TEXT,                           -- geparst uit inhoud_tekst
+    datum_ontvangst      DATE,                           -- aanvraagdatum, geparst uit inhoud_tekst
+
+    -- Extra SRU-metadata (sinds 2026-05-20 — zie gaps#G-70 update 2026-05-20)
+    datum_publicatie_ts  TIMESTAMPTZ,                    -- cup:datumTijdstipWijzigingWork (fijnere tijd dan datum_publicatie)
+    subject_taxonomie    TEXT,                           -- dcterms:subject OVERHEID.TaxonomieBeleidsagendaDecentraal
+
+    -- Pipeline-metadata
+    ingest_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ingest_run_id        TEXT
+);
+
+-- Idempotente kolom-toevoegingen voor bestaande DB's (Postgres 9.6+).
+-- Houdt setup-koop veilig om herhaaldelijk te draaien.
+ALTER TABLE vth.vergunningkennisgeving
+    ADD COLUMN IF NOT EXISTS pdf_url             TEXT,
+    ADD COLUMN IF NOT EXISTS datum_ontvangst     DATE,
+    ADD COLUMN IF NOT EXISTS datum_publicatie_ts TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS subject_taxonomie   TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_vk_bg_datum
+    ON vth.vergunningkennisgeving (bg_naam, datum_publicatie DESC);
+CREATE INDEX IF NOT EXISTS idx_vk_datum
+    ON vth.vergunningkennisgeving (datum_publicatie DESC);
+CREATE INDEX IF NOT EXISTS idx_vk_activiteit
+    ON vth.vergunningkennisgeving (activiteit_code);
+CREATE INDEX IF NOT EXISTS idx_vk_type_besluit
+    ON vth.vergunningkennisgeving (type_besluit);
+CREATE INDEX IF NOT EXISTS idx_vk_publicatieblad
+    ON vth.vergunningkennisgeving (publicatieblad);
+CREATE INDEX IF NOT EXISTS idx_vk_geom_rd_pt
+    ON vth.vergunningkennisgeving USING gist (geometrie_rd_pt);
+CREATE INDEX IF NOT EXISTS idx_vk_geom_wgs_pt
+    ON vth.vergunningkennisgeving USING gist (geometrie_wgs_pt);
+CREATE INDEX IF NOT EXISTS idx_vk_tsv
+    ON vth.vergunningkennisgeving USING gin (
+        to_tsvector('dutch',
+            coalesce(titel, '') || ' ' ||
+            coalesce(beschrijving, '') || ' ' ||
+            coalesce(inhoud_tekst, '') || ' ' ||
+            coalesce(straatnaam, '') || ' ' ||
+            coalesce(woonplaats, '')
+        )
+    );
+CREATE INDEX IF NOT EXISTS idx_vk_zaaknummer
+    ON vth.vergunningkennisgeving (zaaknummer_bg);
+CREATE INDEX IF NOT EXISTS idx_vk_inhoud_geladen
+    ON vth.vergunningkennisgeving (inhoud_geladen_at)
+    WHERE inhoud_geladen_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_vk_subject_taxonomie
+    ON vth.vergunningkennisgeving (subject_taxonomie);
+CREATE INDEX IF NOT EXISTS idx_vk_datum_ontvangst
+    ON vth.vergunningkennisgeving (datum_ontvangst)
+    WHERE datum_ontvangst IS NOT NULL;
+
+-- Run-tracking (analoog aan etl_run in SQLite-PoC)
+CREATE TABLE IF NOT EXISTS vth.etl_run (
+    run_id            TEXT PRIMARY KEY,
+    source            TEXT NOT NULL,
+    processed_date    DATE NOT NULL,
+    record_count      INTEGER,
+    started_at        TIMESTAMPTZ NOT NULL,
+    finished_at       TIMESTAMPTZ,
+    status            TEXT NOT NULL,
+    error             TEXT,
+    UNIQUE (source, processed_date)
+);
+
+-- Directe-deeplinks naar het inhoudelijke besluit-dossier.
+--
+-- Een 'deeplink' is een URL in <extref>/<intref>/<a> binnen de publicatie-XML
+-- die naar een uniek dossier wijst (geen algemene landingspagina). De whitelist
+-- van hosts staat in src.loaders.koop_deeplinks en wordt periodiek uitgebreid
+-- op basis van nieuwe deeplink-host-analyse.
+--
+-- Validatie (http_status/gevalideerd_at) is OPTIONEEL: bij backfill voeren we
+-- meteen een HTTP-check uit; bij de doorlopende enrich-pass blijven de velden
+-- NULL tot een aparte validate-pass loopt.
+CREATE TABLE IF NOT EXISTS vth.vergunning_deeplink (
+    id              BIGSERIAL PRIMARY KEY,
+    koop_id         TEXT NOT NULL
+                       REFERENCES vth.vergunningkennisgeving(koop_id)
+                       ON DELETE CASCADE,
+    inzage_url      TEXT NOT NULL,
+    host            TEXT NOT NULL,
+    bron_element    TEXT NOT NULL,           -- 'extref@doc' | 'extref text' | 'intref@ref' | 'a@href'
+    gevonden_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    -- Validatie (NULL = nog niet gecheckt)
+    http_status     INTEGER,
+    final_url       TEXT,
+    content_length  INTEGER,
+    gevalideerd_at  TIMESTAMPTZ,
+    werkt           BOOLEAN GENERATED ALWAYS AS
+                       (http_status BETWEEN 200 AND 299) STORED,
+
+    UNIQUE (koop_id, inzage_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_deeplink_koop
+    ON vth.vergunning_deeplink (koop_id);
+CREATE INDEX IF NOT EXISTS idx_deeplink_host
+    ON vth.vergunning_deeplink (host);
+CREATE INDEX IF NOT EXISTS idx_deeplink_werkt
+    ON vth.vergunning_deeplink (koop_id) WHERE werkt;
+CREATE INDEX IF NOT EXISTS idx_deeplink_unvalidated
+    ON vth.vergunning_deeplink (gevonden_at) WHERE gevalideerd_at IS NULL;
 """

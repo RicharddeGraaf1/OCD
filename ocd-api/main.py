@@ -257,6 +257,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
             JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
             JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
             JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
             WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
@@ -277,6 +278,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                 JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
                 JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
                 JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                    AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
                 JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
                 WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
                   AND r.documenttype IN ('Omgevingsplan', 'Waterschapsverordening', 'Omgevingsverordening')
@@ -384,6 +386,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                     JOIN p2p.locatie_subdiv ls2 ON ls2.identificatie = ala2.locatie_id
                     JOIN p2p.juridische_regel jr2 ON jr2.identificatie = ala2.juridische_regel_id
                     JOIN p2p.tekst_element te2 ON te2.wid = jr2.regeltekst_wid
+                        AND (te2.regeling_expression = jr2.regeling_expression OR jr2.regeling_expression IS NULL)
                     JOIN p2p.regeling r2 ON r2.frbr_expression = te2.regeling_expression
                     WHERE ST_Intersects(ls2.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
                       AND r2.documenttype = 'Omgevingsplan'
@@ -1168,6 +1171,7 @@ def regeltekst(
                         )                                   AS match_score
                 FROM    p2p.juridische_regel               jr
                 JOIN    p2p.tekst_element                  te  ON te.wid = jr.regeltekst_wid
+                        AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
                 LEFT JOIN p2p.activiteit_locatieaanduiding ala ON ala.juridische_regel_id = jr.identificatie
                 LEFT JOIN p2p.juridische_regel_norm        jrn ON jrn.juridische_regel_id = jr.identificatie
                 LEFT JOIN p2p.norm                         n   ON n.identificatie = jrn.norm_id
@@ -1388,6 +1392,7 @@ def _fetch_objecten_normwaarde(cur, x: float, y: float) -> list[dict]:
         LEFT JOIN p2p.juridische_regel_norm jrn ON jrn.norm_id = n.identificatie
         LEFT JOIN p2p.juridische_regel jr ON jr.identificatie = jrn.juridische_regel_id
         LEFT JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+            AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
         LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
         WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
         LIMIT %s
@@ -1421,6 +1426,7 @@ def _fetch_objecten_activiteit(cur, x: float, y: float) -> list[dict]:
         JOIN    p2p.locatie l ON l.identificatie = ala.locatie_id
         JOIN    p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
         LEFT JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+            AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
         LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
         WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
         LIMIT %s
@@ -1485,6 +1491,7 @@ def _fetch_objecten_gebiedsaanwijzing(cur, x: float, y: float) -> list[dict]:
         LEFT JOIN p2p.juridische_regel_gebiedsaanwijzing jrg ON jrg.gebiedsaanwijzing_id = ga.identificatie
         LEFT JOIN p2p.juridische_regel jr ON jr.identificatie = jrg.juridische_regel_id
         LEFT JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+            AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
         LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
         WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
         LIMIT %s
@@ -1666,6 +1673,7 @@ def regels(
                         )                                   AS ts_rank_score
                 FROM    p2p.juridische_regel               jr
                 JOIN    p2p.tekst_element                  te  ON te.wid = jr.regeltekst_wid
+                        AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
                 LEFT JOIN p2p.activiteit_locatieaanduiding ala ON ala.juridische_regel_id = jr.identificatie
                 LEFT JOIN p2p.juridische_regel_norm        jrn ON jrn.juridische_regel_id = jr.identificatie
                 LEFT JOIN p2p.norm                         n   ON n.identificatie = jrn.norm_id
@@ -1817,6 +1825,7 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
             JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
             JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
             JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r       ON r.frbr_expression = te.regeling_expression
             JOIN core.bronhouder b    ON b.overheidscode = r.bronhouder
             WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
@@ -2880,6 +2889,7 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
                 JOIN p2p.locatie_subdiv ls   ON ls.identificatie = ala.locatie_id
                 JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
                 JOIN p2p.tekst_element te     ON te.wid = jr.regeltekst_wid
+                    AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
                 JOIN p2p.regeling r          ON r.frbr_expression = te.regeling_expression
                 JOIN core.bronhouder b       ON b.overheidscode = r.bronhouder
                 WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
@@ -3053,6 +3063,7 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
                    ON jrga.gebiedsaanwijzing_id = ga.identificatie
             JOIN p2p.juridische_regel jr ON jr.identificatie = jrga.juridische_regel_id
             JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE ST_Intersects(ls.geometrie, {point})
             GROUP BY ga.type, ga.naam, ga.groep, r.opschrift, r.documenttype
@@ -3076,6 +3087,7 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
             JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
             JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
             JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE ST_Intersects(ls.geometrie, {point})
               AND a.is_tophaak = FALSE
@@ -3102,6 +3114,7 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
             JOIN p2p.juridische_regel_norm jrn ON jrn.norm_id = n.identificatie
             JOIN p2p.juridische_regel jr ON jr.identificatie = jrn.juridische_regel_id
             JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE ST_Intersects(ls.geometrie, {point})
             GROUP BY n.identificatie, n.naam, n.type_norm, n.eenheid, n.groep
@@ -3124,6 +3137,7 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
             JOIN p2p.juridische_regel_norm jrn ON jrn.norm_id = n.identificatie
             JOIN p2p.juridische_regel jr ON jr.identificatie = jrn.juridische_regel_id
             JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE ST_Intersects(ls.geometrie, {point})
             GROUP BY n.naam, n.type_norm, n.eenheid,

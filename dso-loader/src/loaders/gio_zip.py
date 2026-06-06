@@ -188,8 +188,40 @@ def update_gio_basisgeo(conn, rows: list[tuple[str, str]]) -> int:
     return inserted
 
 
-def process_zip(zip_path: Path, conn=None) -> dict[str, int]:
-    """Convenience wrapper: extract + update voor zowel Locatie als GIO."""
+def insert_missing_gios(conn, gio_rows: list[tuple[str, str]],
+                         regeling_expression: str | None = None) -> int:
+    """Vul p2p.geo_informatieobject aan met GIO-FRBRs uit de ZIP die nog
+    niet bekend zijn uit ExtIoRef.target_ref (optie A).
+
+    Dat dekt het gat waar de ZIP nieuwere expressies bevat dan in de
+    tekst-content via ExtIoRef worden aangewezen. Voor de drieslag-keten
+    is dit nuttig — we kunnen nu ook IntIoRef matchen die toevallig naar
+    de huidige expressie verwijst.
+    """
+    if not gio_rows:
+        return 0
+    unique_frbrs = {frbr for frbr, _ in gio_rows}
+    inserted = 0
+    with conn.cursor() as cur:
+        for frbr in unique_frbrs:
+            cur.execute(
+                """INSERT INTO p2p.geo_informatieobject
+                     (frbr_expression, frbr_work, regeling_expression)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (frbr_expression) DO NOTHING""",
+                (frbr, frbr.split("@")[0], regeling_expression),
+            )
+            inserted += cur.rowcount
+    return inserted
+
+
+def process_zip(zip_path: Path, conn=None,
+                regeling_expression: str | None = None) -> dict[str, int]:
+    """Convenience wrapper: extract + update voor zowel Locatie als GIO.
+
+    Vult ook p2p.geo_informatieobject aan met FRBRs die de ZIP heeft maar
+    optie A nog niet via ExtIoRef heeft ontdekt.
+    """
     own_conn = False
     if conn is None:
         conn = get_conn()
@@ -197,6 +229,7 @@ def process_zip(zip_path: Path, conn=None) -> dict[str, int]:
     try:
         loc_rows = build_locatie_basisgeo_rows(zip_path)
         gio_rows = extract_gio_basisgeo(zip_path)
+        new_gios = insert_missing_gios(conn, gio_rows, regeling_expression)
         loc_inserted = update_locatie_basisgeo(conn, loc_rows)
         gio_inserted = update_gio_basisgeo(conn, gio_rows)
         conn.commit()
@@ -205,6 +238,7 @@ def process_zip(zip_path: Path, conn=None) -> dict[str, int]:
             "locatie_rows_inserted": loc_inserted,
             "gio_rows_geextraheerd": len(gio_rows),
             "gio_rows_inserted": gio_inserted,
+            "new_gios_inserted": new_gios,
         }
     finally:
         if own_conn:

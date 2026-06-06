@@ -262,6 +262,7 @@ def killer_query(cur, matched_concept_rows: list[dict],
         JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
         JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
         JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+            AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
         JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
         WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
           AND te.inhoud IS NOT NULL

@@ -61,6 +61,36 @@ pg_restore \
 - Na de restore kun je Public Networking weer uitzetten
 - PostGIS extensie is al geinstalleerd via het template
 
+## Stap 2b: Ponsenkaart-bootstrap (na restore)
+
+De `core.gemeentegrens`-tabel en de `v2a.ponsenkaart_gemeente_stats` matview
+zijn voorwaarden voor het [ponsenkaart.nl](https://ponsenkaart.nl) dashboard.
+`gemeentegrens` is referentiedata uit PDOK Bestuurlijke Gebieden (CC0) — geen
+DSO-bron, maar wel nodig als noemer voor "% geponst" en voor provincie-
+toewijzing per gemeente. De matview rust op `p2p.pons` + `p2p.locatie` (DSO)
+en `core.gemeentegrens` (PDOK).
+
+Als je gedumpt + gerestored hebt: deze data zit al in de dump. Als je
+vanaf nul opbouwt of de gemeentegrens-tabel een refresh nodig heeft
+(bijv. na een gemeente-herindeling), draai:
+
+```bash
+cd C:\GIT\OCD\dso-loader
+.venv\Scripts\activate
+
+# Tegen Railway database (DATABASE_URL in .env wijzen naar Railway)
+python -m src.cli load-gemeentegrenzen      # 342 NL-gemeenten + 12 provincies uit PDOK
+python -m src.cli repair-pons-placeholders  # ruimt POINT(0,0)-placeholders op (zie gaps G-73)
+python -m src.cli refresh-ponsenkaart-stats # vult v2a.ponsenkaart_gemeente_stats
+```
+
+**Verifieer**: `SELECT count(*), sum(pons_count) FROM v2a.ponsenkaart_gemeente_stats`
+moet 342 rijen + het verwachte aantal ponsen geven.
+
+**Refresh-cadans**: `gemeentegrens` 1×/jaar (gemeente-herindelingen),
+`ponsenkaart_gemeente_stats` matview wekelijks via GitHub Actions cron
+(zie [ponsenkaart.nl DEPLOY.md stap 6](../ponsenkaart.nl/DEPLOY.md)).
+
 ## Stap 3: FastAPI service opzetten
 
 ### Projectstructuur

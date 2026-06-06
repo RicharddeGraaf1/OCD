@@ -18,8 +18,6 @@ import re
 import httpx
 from rich.console import Console
 
-from utils import strip_xml
-
 from src.config import cfg
 from src.db import get_conn
 from src.rate_limiter import limiter
@@ -237,7 +235,8 @@ def load_documentstructuur(conn, regeling_uri: str, expression_id: str):
 
 # ── Annotaties (artikelstructuur) ────────────────────────────────────
 
-def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
+def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
+                              expression_id: str | None = None):
     """Load regeltekstannotaties (artikelstructuur) via Presenteren API."""
     encoded = _encode_regeling_uri(regeling_uri)
     data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen/{encoded}/regeltekstannotaties",
@@ -341,12 +340,45 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str):
                 regeltekst_ref = regel.get("regeltekstRef", "")
                 regeltekst_wid = rt_to_wid.get(regeltekst_ref, regeltekst_ref)
 
+                # Themas (array; in DSO API soms list[str] van URIs, soms list[dict{"waarde": str}])
+                themas_raw = regel.get("themas") or regel.get("thema") or []
+                themas: list[str] = []
+                for t in themas_raw:
+                    val = t.get("waarde") if isinstance(t, dict) else t
+                    if val:
+                        tail = val.rstrip("/").split("/")[-1]
+                        if tail:
+                            themas.append(tail)
+
+                # Instructieregel-specifiek
+                instr_instr = None
+                instr_taak = None
+                if regel_type == "Instructieregel":
+                    ii = regel.get("instructieregelInstrument")
+                    if ii:
+                        val = ii.get("waarde") if isinstance(ii, dict) else ii
+                        if val:
+                            instr_instr = val.rstrip("/").split("/")[-1] or None
+                    it = regel.get("instructieregelTaakuitoefening")
+                    if it:
+                        val = it.get("waarde") if isinstance(it, dict) else it
+                        if val:
+                            instr_taak = val.rstrip("/").split("/")[-1] or None
+
                 cur.execute(
                     """INSERT INTO p2p.juridische_regel
-                       (identificatie, regel_type, idealisatie, regeltekst_wid)
-                       VALUES (%s, %s, %s, %s)
-                       ON CONFLICT (identificatie) DO NOTHING""",
-                    (regel["identificatie"], regel_type, idealisatie, regeltekst_wid),
+                       (identificatie, regel_type, idealisatie, regeltekst_wid,
+                        thema, instructieregel_instrument, instructieregel_taakuitoefening,
+                        regeling_expression)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (identificatie) DO UPDATE SET
+                           thema = COALESCE(EXCLUDED.thema, p2p.juridische_regel.thema),
+                           instructieregel_instrument = COALESCE(EXCLUDED.instructieregel_instrument, p2p.juridische_regel.instructieregel_instrument),
+                           instructieregel_taakuitoefening = COALESCE(EXCLUDED.instructieregel_taakuitoefening, p2p.juridische_regel.instructieregel_taakuitoefening),
+                           regeling_expression = COALESCE(EXCLUDED.regeling_expression, p2p.juridische_regel.regeling_expression)
+                       """,
+                    (regel["identificatie"], regel_type, idealisatie, regeltekst_wid,
+                     themas or None, instr_instr, instr_taak, expression_id),
                 )
                 stats["regels"] += 1
 
@@ -648,10 +680,19 @@ def _upsert_locatie_met_kinderen(cur, loc: dict, default_type: str) -> None:
 
 
 def load_regeling_expand(conn, regeling_uri: str, expression_id: str):
-    """Load pons and regelingsgebied via GET /regelingen/{id}?_expand=true."""
+    """Load pons and regelingsgebied via GET /regelingen/{id}?_expand=true.
+
+    locatieSelectie=primair laat de API per Gebiedengroep (Pons,
+    Regelingsgebied bij N2000/PB) een samengestelde geometrieIdentificatie
+    terugleveren in plaats van enkel referenties naar secundaire leden.
+    Zonder deze parameter zou _upsert_locatie_met_kinderen terugvallen op
+    de POINT(0,0)-placeholder omdat noch `geometrieIdentificatie` noch
+    `_embedded.omvat[]` populated zijn. Zie analyse [[Ponsenkaart.nl
+    databehoefte uit OCD]] en gap G-73.
+    """
     encoded = _encode_regeling_uri(regeling_uri)
     data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen/{encoded}",
-                params={"_expand": "true"})
+                params={"_expand": "true", "locatieSelectie": "primair"})
 
     stats = {"regelingsgebied": False, "pons": False}
     embedded = data.get("_embedded", {})
@@ -794,7 +835,7 @@ def load_via_api(overheid_code: str, naam: str,
             # ── Annotaties ──
             try:
                 if doc_type in ARTIKELSTRUCTUUR_TYPES:
-                    stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code)
+                    stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code, expression_id)
                     console.print(
                         f"    Annotaties: {stats['regels']} regels, "
                         f"{stats['activiteiten']} activiteiten, {stats['ala']} ALA's, "
@@ -812,7 +853,7 @@ def load_via_api(overheid_code: str, naam: str,
                         f"({stats['geometrieen']} met geometrie)")
                 else:
                     console.print(f"    [yellow]Unknown type {doc_type}, trying artikelstructuur[/yellow]")
-                    stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code)
+                    stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code, expression_id)
             except Exception as e:
                 console.print(f"    [red]Annotaties failed: {e}[/red]")
 
