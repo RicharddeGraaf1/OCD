@@ -392,8 +392,9 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
                         (regel["identificatie"], ga_ref),
                     )
 
-                # ALA's
-                for ala in regel.get("activiteitLocatieaanduidingen", []):
+                # ALA's (activiteit-gebonden locatie-koppeling)
+                alas = regel.get("activiteitLocatieaanduidingen", [])
+                for ala in alas:
                     act_ref = ala.get("activiteitRef", "")
                     kwal = ala.get("activiteitregelkwalificatie", {})
                     kwal_val = kwal.get("waarde") if isinstance(kwal, dict) else kwal
@@ -409,6 +410,29 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
                                (juridische_regel_id, activiteit_id, locatie_id, kwalificatie)
                                VALUES (%s, %s, %s, %s)""",
                             (regel["identificatie"], act_ref, loc_ref, kwal_val),
+                        )
+                        stats["ala"] += 1
+
+                # Fallback: directe locatieRefs op regel-niveau (geen activiteit).
+                # Komt voor bij Instructieregel/Omgevingswaardegel en bij RvI's van
+                # rijksregelingen (Bal/Bkl/Bbl/Ob) waar de regel een ambtsgebied- of
+                # regelingsgebied-werking heeft zonder activiteit-koppeling. Zonder
+                # deze fallback zijn die regels onvindbaar via coord-queries.
+                # Alleen toepassen wanneer er geen activiteitLocatieaanduidingen zijn,
+                # om dubbele inserts voor activiteit-jr's te voorkomen.
+                if not alas:
+                    for loc_ref in regel.get("locatieRefs", []):
+                        cur.execute(
+                            """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
+                               VALUES (%s, 'Onbekend', ST_SetSRID(ST_MakePoint(0, 0), 28992))
+                               ON CONFLICT (identificatie) DO NOTHING""",
+                            (loc_ref,),
+                        )
+                        cur.execute(
+                            """INSERT INTO p2p.activiteit_locatieaanduiding
+                               (juridische_regel_id, activiteit_id, locatie_id, kwalificatie)
+                               VALUES (%s, NULL, %s, NULL)""",
+                            (regel["identificatie"], loc_ref),
                         )
                         stats["ala"] += 1
 
