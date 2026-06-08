@@ -20,6 +20,7 @@ from kennis import router as kennis_router
 from keywords import router as keywords_router
 from ponsenkaart import router as ponsenkaart_router
 from regelteksten_bij_vraag import router as regelteksten_router
+from semantisch import router as semantisch_router
 from vergunningen import router as vergunningen_router
 
 load_dotenv()
@@ -185,6 +186,7 @@ async def verify_key(
 
 app.include_router(keywords_router, dependencies=[Depends(verify_key)])
 app.include_router(regelteksten_router, dependencies=[Depends(verify_key)])
+app.include_router(semantisch_router, dependencies=[Depends(verify_key)])
 app.include_router(vergunningen_router, dependencies=[Depends(verify_key)])
 app.include_router(ponsenkaart_router, dependencies=[Depends(verify_key)])
 app.include_router(expand_router, dependencies=[Depends(verify_key)])
@@ -197,6 +199,48 @@ def health():
         cur.execute("SELECT 1 AS ok")
         cur.fetchone()
     return {"status": "ok"}
+
+
+@app.get("/v1/data-health", dependencies=[Depends(verify_key)])
+def data_health(
+    bronhouder: str = Query(None, description="Optioneel: 1 bronhouder-code (bv. pv25)"),
+    problemen: bool = Query(False, description="Alleen bronhouders met een integriteits-/load-flag"),
+):
+    """Datakwaliteit-rapportage uit core.mv_bronhouder_health + samenvattingen.
+
+    Doel: in één call zien of een lage meting door de DATA komt of door de
+    AANPAK. Zonder parameters → totaal-samenvatting (v_data_health) + geo-health.
+    Met `bronhouder` → die ene rij. Met `problemen=true` → alleen bronhouders
+    met code-only/duplicaat/pdok-mismatch-naam, regelingen zonder tekst, of
+    een DSO-coverage-gat. De matview is een snapshot; refresh met
+    `REFRESH MATERIALIZED VIEW core.mv_bronhouder_health`.
+    """
+    cols = ("overheidscode, naam, bestuurslaag, n_regelingen, n_regelingen_zonder_tekst, "
+            "dso_mist, dso_over, is_code_only, is_duplicate_naam, pdok_mismatch, "
+            "artikel_dekking_pct, pct_brede_scope, pct_anders_geduid")
+    with get_conn() as conn, conn.cursor() as cur:
+        if bronhouder:
+            cur.execute(f"SELECT {cols} FROM core.mv_bronhouder_health WHERE overheidscode = %s",
+                        (bronhouder,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"bronhouder {bronhouder} niet gevonden")
+            return {"bronhouder": row}
+
+        if problemen:
+            cur.execute(
+                f"""SELECT {cols} FROM core.mv_bronhouder_health
+                    WHERE is_code_only OR is_duplicate_naam OR pdok_mismatch
+                       OR n_regelingen_zonder_tekst > 0 OR COALESCE(dso_mist, 0) > 0
+                    ORDER BY COALESCE(dso_mist,0) DESC, n_regelingen_zonder_tekst DESC,
+                             overheidscode""")
+            return {"problemen": cur.fetchall()}
+
+        cur.execute("SELECT * FROM core.v_data_health")
+        samenvatting = cur.fetchone()
+        cur.execute("SELECT * FROM core.v_geo_health")
+        geo = cur.fetchone()
+    return {"samenvatting": samenvatting, "geo": geo}
 
 
 def _build_keyword_filter(keywords: list[str], text_col: str) -> tuple[str, list]:

@@ -35,6 +35,17 @@ from src.parsers.ow_xml import (
 
 console = Console()
 
+# Canonieke code→naam-borging leeft centraal in src/canonieke_bronhouders.py
+# (provincie + rijk + waterschap). Hier alleen re-export voor backward-compat:
+# bestaande imports `from src.loaders.ow_loader import canonieke_bronhouder_naam`
+# blijven werken. Zie die module + de bronhouder-audit van 2026-06-08.
+from src.canonieke_bronhouders import (  # noqa: F401
+    PROVINCIE_NAMEN,
+    canonieke_bronhouder_naam,
+    upsert_bronhouder,
+)
+
+
 PRESENTEREN_BASE = "https://service.omgevingswet.overheid.nl/publiek/omgevingsdocumenten/api/presenteren/v8"
 DOWNLOAD_BASE = cfg.DSO_DOWNLOAD_BASE
 
@@ -631,6 +642,29 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
         if gml_count:
             console.print(f"      [green]{gml_count} GIO-geometrieën geladen (via GeometrieRef)[/green]")
 
+    # --- Load-status registreren (Fix C: maakt stille load-fouten zichtbaar) ---
+    # status 'partieel' als de regeling 0 tekst_elementen kreeg (typische
+    # stille fout: metadata wel, inhoud niet). Zie scripts/2026-06-add-data-health.sql.
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO p2p.regeling_load
+                   (frbr_expression, status, n_tekst, n_locatie, n_annotatie, geladen_op)
+               SELECT %s,
+                      CASE WHEN t.n = 0 THEN 'partieel' ELSE 'ok' END,
+                      t.n, l.n, a.n, now()
+               FROM (SELECT count(*) n FROM p2p.tekst_element WHERE regeling_expression = %s) t,
+                    (SELECT count(DISTINCT td.locatie_id) n FROM p2p.tekstdeel td
+                       JOIN p2p.tekst_element te ON te.wid = td.divisie_wid
+                      WHERE te.regeling_expression = %s) l,
+                    (SELECT count(*) n FROM p2p.juridische_regel
+                      WHERE regeling_expression = %s) a
+               ON CONFLICT (frbr_expression) DO UPDATE
+                   SET status = EXCLUDED.status, n_tekst = EXCLUDED.n_tekst,
+                       n_locatie = EXCLUDED.n_locatie, n_annotatie = EXCLUDED.n_annotatie,
+                       geladen_op = EXCLUDED.geladen_op, laatste_fout = NULL""",
+            (expression_id, expression_id, expression_id, expression_id),
+        )
+
     conn.commit()
 
 
@@ -696,10 +730,9 @@ def load_ow_overheid(overheid_code: str, naam: str, bronhouder_code: str,
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO core.bronhouder (overheidscode, naam, bestuurslaag) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                (bronhouder_code, naam, 'gemeente' if bronhouder_code.startswith('gm') else 'provincie' if bronhouder_code.startswith('pv') else 'waterschap' if bronhouder_code.startswith('ws') else 'rijk'),
-            )
+            # Canonieke naamborging (provincie/rijk/waterschap) + zelf-helen van
+            # code-only gemeente-placeholders; zie src/canonieke_bronhouders.py.
+            upsert_bronhouder(cur, bronhouder_code, naam)
         conn.commit()
 
         old_code = cfg.POC_CBS_CODE
@@ -740,10 +773,9 @@ def load_ow_from_zip(zip_path: str, cbs_code: str, naam: str):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO core.bronhouder (overheidscode, naam, bestuurslaag) VALUES (%s, %s, 'gemeente') ON CONFLICT DO NOTHING",
-                (cbs_code, naam),
-            )
+            # Gemeente-naam komt uit PDOK-lookup (autoritatief); een echte naam
+            # blijft staan, een code-only placeholder mag zelf-helen.
+            upsert_bronhouder(cur, cbs_code, naam, bestuurslaag="gemeente")
         conn.commit()
 
         bare_code = cbs_code.removeprefix("gm")

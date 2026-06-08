@@ -25,6 +25,10 @@ def parse_tekst_xml(xml_bytes: bytes, regeling_expression: str) -> list[dict]:
     volgorde_counter = [0]
 
     def _walk(node, parent_eid: str | None):
+        # Sla XML-commentaar/processing-instructions over: hun .tag is geen string
+        # maar een lxml-cyfunction, wat etree.QName laat crashen.
+        if not isinstance(node.tag, str):
+            return
         tag = etree.QName(node.tag).localname if node.tag else ""
 
         if tag not in STRUCTURE_TYPES:

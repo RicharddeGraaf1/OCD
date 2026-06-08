@@ -16,6 +16,7 @@ from lxml import etree
 from rich.console import Console
 from rich.progress import track
 
+from src.canonieke_bronhouders import upsert_bronhouder
 from src.config import cfg
 from src.db import get_conn
 
@@ -167,10 +168,7 @@ def _load_bestemmingsplangebied(conn, cbs_codes: dict[str, str] | None = None):
     with conn.cursor() as cur:
         for code, naam in cbs_codes.items():
             gm_code = normalize_bronhouder_code(code)
-            cur.execute(
-                "INSERT INTO core.bronhouder (overheidscode, naam, bestuurslaag) VALUES (%s, %s, 'gemeente') ON CONFLICT DO NOTHING",
-                (gm_code, naam),
-            )
+            upsert_bronhouder(cur, gm_code, naam, bestuurslaag="gemeente")
             cur.execute(
                 "INSERT INTO wro.wro_manifest (overheidscode, naam_overheid) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (gm_code, naam),
@@ -434,11 +432,7 @@ def _load_structuurvisieplangebied(conn, niveau: str, code_filter: set[str] | No
                 continue
 
             bestuurslaag = {"P": "provincie", "G": "gemeente", "R": "rijk"}.get(niveau, "onbekend")
-            cur.execute(
-                "INSERT INTO core.bronhouder (overheidscode, naam, bestuurslaag) "
-                "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                (bron_code, bron_naam, bestuurslaag),
-            )
+            upsert_bronhouder(cur, bron_code, bron_naam, bestuurslaag=bestuurslaag)
             cur.execute(
                 "INSERT INTO wro.wro_manifest (overheidscode, naam_overheid) "
                 "VALUES (%s, %s) ON CONFLICT DO NOTHING",

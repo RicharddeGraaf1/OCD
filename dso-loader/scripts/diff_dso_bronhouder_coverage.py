@@ -105,6 +105,9 @@ def main():
     ap.add_argument("--min-gap", type=int, default=1,
                     help="alleen bronhouders met >= N afwijkingen tonen (default 1)")
     ap.add_argument("--limit", type=int, help="max aantal bronhouders (debug/sample)")
+    ap.add_argument("--persist", action="store_true",
+                    help="schrijf resultaten naar core.bronhouder_dso_diff "
+                         "(voeding voor core.mv_bronhouder_health / /v1/data-health)")
     args = ap.parse_args()
 
     conn = get_conn()
@@ -128,6 +131,7 @@ def main():
 
         rapport = []
         api_fails: list[str] = []
+        scanned: list[tuple[str, int, int]] = []   # (code, n_mist, n_over) voor --persist
         for i, code in enumerate(codes, 1):
             dso = dso_voor_bronhouder(code)
             lok = lokaal.get(code, [])
@@ -147,6 +151,7 @@ def main():
                 marker += f" [yellow]-{len(overb)} over[/yellow]"
             console.print(f"  [dim]({i}/{len(codes)})[/dim] {code}: "
                           f"lokaal {len(lok)} ↔ DSO {len(dso)}{marker}")
+            scanned.append((code, len(ontbr), len(overb)))
             if (len(ontbr) + len(overb)) >= args.min_gap:
                 rapport.append({
                     "code": code, "lokaal": len(lok), "dso": len(dso),
@@ -157,6 +162,23 @@ def main():
             console.print(f"\n[yellow]⚠ {len(api_fails)} bronhouder(s) konden niet "
                           f"gescand worden:[/yellow] {', '.join(api_fails)}")
             console.print(f"  [dim]Hervraag deze later met --codes {','.join(api_fails)}[/dim]")
+
+        if args.persist and scanned:
+            # Upsert ALLE gescande codes (ook 0-diff) zodat opgeloste gaten
+            # netjes naar 0 gaan i.p.v. stale te blijven. API-fails slaan we
+            # over (geen betrouwbare meting → bestaande waarde laten staan).
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """INSERT INTO core.bronhouder_dso_diff (overheidscode, n_mist, n_over, gemeten_op)
+                       VALUES (%s, %s, %s, now())
+                       ON CONFLICT (overheidscode) DO UPDATE
+                           SET n_mist = EXCLUDED.n_mist, n_over = EXCLUDED.n_over,
+                               gemeten_op = EXCLUDED.gemeten_op""",
+                    scanned)
+            conn.commit()
+            console.print(f"[green]✓ {len(scanned)} bronhouder(s) weggeschreven naar "
+                          f"core.bronhouder_dso_diff[/green]")
+            console.print("[dim]  Refresh daarna: REFRESH MATERIALIZED VIEW core.mv_bronhouder_health;[/dim]")
 
         if not rapport:
             console.print(f"\n[green]Geen verschillen >= {args.min_gap}[/green]")

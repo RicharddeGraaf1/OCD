@@ -18,6 +18,7 @@ import re
 import httpx
 from rich.console import Console
 
+from src.canonieke_bronhouders import upsert_bronhouder
 from src.config import cfg
 from src.db import get_conn
 from src.rate_limiter import limiter
@@ -785,10 +786,7 @@ def load_via_api(overheid_code: str, naam: str,
         regelingen = find_regelingen(overheid_code, naam, doc_types)
 
         with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO core.bronhouder (overheidscode, naam, bestuurslaag) VALUES (%s, %s, 'gemeente') ON CONFLICT DO NOTHING",
-                (bronhouder_code, naam),
-            )
+            upsert_bronhouder(cur, bronhouder_code, naam)
         conn.commit()
 
         for reg in regelingen:
