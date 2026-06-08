@@ -436,6 +436,25 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                         )
                     except Exception:
                         conn.rollback()
+                # Insert directe locatieaanduidingen (Instructieregel/Omgevingswaardegel).
+                # Deze regels hebben geen activiteit-koppeling, alleen een directe
+                # werkingsgebied-locatie. activiteit_id blijft NULL.
+                for loc_ref in regel.get("direct_locatie_refs", []):
+                    cur.execute(
+                        """INSERT INTO p2p.locatie (identificatie, locatie_type, geometrie)
+                           VALUES (%s, 'Gebied', ST_SetSRID(ST_MakePoint(0, 0), 28992))
+                           ON CONFLICT DO NOTHING""",
+                        (loc_ref,),
+                    )
+                    try:
+                        cur.execute(
+                            """INSERT INTO p2p.activiteit_locatieaanduiding
+                               (juridische_regel_id, activiteit_id, locatie_id, kwalificatie)
+                               VALUES (%s, NULL, %s, NULL)""",
+                            (regel["identificatie"], loc_ref),
+                        )
+                    except Exception:
+                        conn.rollback()
             # Insert gebiedsaanwijzing relations
             ga_rel_count = 0
             norm_rel_count = 0

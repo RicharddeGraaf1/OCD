@@ -303,7 +303,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
             JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
                 AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
-            JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
+            LEFT JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
             WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
             {combined_filter}
             GROUP BY r.opschrift, r.documenttype, te.opschrift, te.wid, te.inhoud

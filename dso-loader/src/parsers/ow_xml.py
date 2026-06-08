@@ -119,6 +119,7 @@ def parse_juridische_regels(xml_bytes: bytes) -> list[dict]:
 
             # Get activiteit locatie aanduidingen
             # Structure: regels:activiteitaanduiding > rol:ActiviteitRef + regels:ActiviteitLocatieaanduiding
+            # Komt vooral voor bij RegelVoorIedereen (activiteit-gericht).
             alas = []
             for aa in regel.findall("regels:activiteitaanduiding", NS):
                 act_ref = _href(aa, "rol:ActiviteitRef")
@@ -133,6 +134,19 @@ def parse_juridische_regels(xml_bytes: bytes) -> list[dict]:
                             "locatie_id": loc_ref,
                             "kwalificatie": kwalificatie,
                         })
+
+            # Directe <regels:locatieaanduiding> op regel-niveau (zonder activiteit).
+            # Komt voor bij Instructieregel en Omgevingswaardegel — zij hebben een
+            # directe werkingsgebied-locatie (vaak ambtsgebied of gebiedengroep) en
+            # geen activiteit-koppeling. Zonder deze parse-stap zou de werkingsgebied-
+            # koppeling voor deze types verloren gaan en zouden ze niet via coord-
+            # queries (/v1/adres, /v1/regels) gevonden worden.
+            direct_locs = []
+            for la in regel.findall("regels:locatieaanduiding", NS):
+                for loc_ref_el in la.findall("l:LocatieRef", NS):
+                    href = loc_ref_el.get(f"{{{NS['xlink']}}}href")
+                    if href:
+                        direct_locs.append(href)
 
             # Get gebiedsaanwijzing references
             ga_refs = []
@@ -158,6 +172,7 @@ def parse_juridische_regels(xml_bytes: bytes) -> list[dict]:
                     "instructieregel_instrument": instructieregel_instrument,
                     "instructieregel_taakuitoefening": instructieregel_taakuitoefening,
                     "activiteit_locatie_aanduidingen": alas,
+                    "direct_locatie_refs": direct_locs,
                     "gebiedsaanwijzing_refs": ga_refs,
                     "norm_refs": norm_refs,
                 })

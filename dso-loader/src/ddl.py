@@ -323,10 +323,14 @@ CREATE INDEX IF NOT EXISTS idx_activiteit_bovenliggende ON p2p.activiteit(bovenl
 CREATE TABLE IF NOT EXISTS p2p.activiteit_locatieaanduiding (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     juridische_regel_id TEXT NOT NULL REFERENCES p2p.juridische_regel(identificatie) ON DELETE CASCADE,
-    activiteit_id       TEXT NOT NULL REFERENCES p2p.activiteit(identificatie) ON DELETE CASCADE,
+    activiteit_id       TEXT NULL REFERENCES p2p.activiteit(identificatie) ON DELETE CASCADE,
     locatie_id          TEXT NOT NULL REFERENCES p2p.locatie(identificatie),
     kwalificatie        TEXT NULL
 );
+-- activiteit_id is NULL voor Instructieregel/Omgevingswaardegel — die hebben
+-- een directe <regels:locatieaanduiding> op regel-niveau (geen activiteit-koppeling).
+-- Zonder deze inserts zouden hun werkingsgebieden onvindbaar zijn via coord-queries.
+ALTER TABLE p2p.activiteit_locatieaanduiding ALTER COLUMN activiteit_id DROP NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_ala_regel ON p2p.activiteit_locatieaanduiding(juridische_regel_id);
 CREATE INDEX IF NOT EXISTS idx_ala_activiteit ON p2p.activiteit_locatieaanduiding(activiteit_id);
 
