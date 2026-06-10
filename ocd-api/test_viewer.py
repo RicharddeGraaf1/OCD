@@ -24,6 +24,9 @@ AMS_X, AMS_Y = 121687, 487316
 UTR_X, UTR_Y = 136411, 456458
 # Midden in de Noordzee (geen data)
 ZEE_X, ZEE_Y = 50000, 600000
+# Zaanstad — punt met een omgevingsplan vol gestapelde activiteiten; gebruikt
+# voor de 'meest-specifieke-wint'-filter (zie TestObjecten).
+ZAAN_X, ZAAN_Y = 112852, 498912
 
 
 # ══════════════════════════════════════════════════════════
@@ -312,16 +315,19 @@ class TestObjecten:
         assert "wro_bestemmingen" in data
 
     def test_geen_tophaak_alas(self):
-        """Tophaak-activiteiten moeten gefilterd zijn uit ALA's.
-        NB: sommige provinciale tophaken staan niet als is_tophaak in de data."""
+        """Tophaak/koepel-activiteiten zijn structureel weggefilterd (meest-
+        specifieke-wint via p2p.activiteit.bovenliggende): zodra een specifiekere
+        afstammeling op het punt geldt valt de koepel weg. De generieke tophaken
+        zijn altijd koepel zodra er überhaupt activiteiten gelden, dus die mogen
+        er nooit in zitten. (Vroeger een naam-ILIKE-heuristiek die juist concrete
+        bladeren wegfilterde; nu puur structureel.)"""
         r = client.get(f"/v1/viewer/objecten?x={AMS_X}&y={AMS_Y}")
-        tophaak_count = sum(
-            1 for ala in r.json()["activiteitlocatieaanduidingen"]
-            if "activiteit gereguleerd in" in ala["naam"].lower()
-        )
-        # Maximaal een paar mogen doorlekken (data-kwaliteit issue, niet API-bug)
-        assert tophaak_count <= 5, \
-            f"Te veel tophaak-activiteiten in resultaten: {tophaak_count}"
+        namen = {a["naam"] for a in r.json()["activiteitlocatieaanduidingen"]}
+        for tophaak in (
+            "Activiteit gereguleerd in het omgevingsplan",
+            "Activiteit gereguleerd in de omgevingsverordening",
+        ):
+            assert tophaak not in namen, f"Tophaak niet weggefilterd: {tophaak}"
 
     def test_gebiedsaanwijzing_velden(self):
         r = client.get(f"/v1/viewer/objecten?x={AMS_X}&y={AMS_Y}")
@@ -353,6 +359,47 @@ class TestObjecten:
         assert "identificatie" in loc
         assert "noemer" in loc
         assert "locatie_type" in loc
+
+    def test_meest_specifiek_filtert_koepels(self):
+        """Meest-specifieke-wint: koepel-activiteiten waarvan een specifiekere
+        afstammeling óók op het punt geldt, vallen weg — terwijl de concrete
+        activiteit zélf blijft. De oude is_tophaak/ILIKE-filter verborg juist
+        de concrete bladeren (bv. 'Polyesterhars verwerken gereguleerd in het
+        omgevingsplan') én miste koepels."""
+        r = client.get(f"/v1/viewer/objecten?x={ZAAN_X}&y={ZAAN_Y}")
+        assert r.status_code == 200
+        namen = {a["naam"] for a in r.json()["activiteitlocatieaanduidingen"]}
+        assert len(namen) > 0
+        # Generieke koepels (hebben specifieke afstammelingen op dit punt) → weg.
+        for koepel in (
+            "Activiteit gereguleerd in het omgevingsplan",
+            "Milieubelastende activiteit gereguleerd in het omgevingsplan",
+            "Activiteit gereguleerd in het omgevingsplan gemeente Zaanstad",
+        ):
+            assert koepel not in namen, f"Koepel niet weggefilterd: {koepel}"
+        # Concrete activiteit blijft — ook al draagt 'ie de 'gereguleerd in'-suffix.
+        assert any("polyester" in n.lower() for n in namen), \
+            "Concrete activiteit Polyesterhars ontbreekt — filter te grof"
+
+    def test_kaart_ala_consistent_met_panel(self):
+        """Regressie: de kaart-ALA-laag (viewer_ala) mag geen activiteiten tonen
+        die het objecten-panel (viewer_objecten) verbergt. Beide passen dezelfde
+        meest-specifieke-wint-filter toe, dus elke kaart-activiteit zit ook in de
+        panel-set."""
+        regs = client.get(f"/v1/viewer/regelingen?x={ZAAN_X}&y={ZAAN_Y}").json()["regelingen"]
+        op = next((r for r in regs if "omgevingsplan" in r["titel"].lower()), None)
+        if op is None:
+            pytest.skip("Geen omgevingsplan op dit punt")
+        panel = {a["naam"] for a in
+                 client.get(f"/v1/viewer/objecten?x={ZAAN_X}&y={ZAAN_Y}")
+                 .json()["activiteitlocatieaanduidingen"]}
+        ala = client.get(
+            f"/v1/viewer/regeling/{op['expression']}/ala?x={ZAAN_X}&y={ZAAN_Y}")
+        assert ala.status_code == 200
+        kaart_namen = {f["properties"]["naam"] for f in ala.json()["features"]}
+        assert len(kaart_namen) > 0
+        verschil = kaart_namen - panel
+        assert not verschil, f"Kaart toont activiteiten die het panel verbergt: {verschil}"
 
     def test_zee_locatie_alleen_rijksobjecten(self):
         """Noordzee: alleen Rijks-gebiedsaanwijzingen, geen gemeentelijke."""

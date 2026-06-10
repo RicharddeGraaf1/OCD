@@ -14,6 +14,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from starlette.responses import JSONResponse
 
+from antwoord_bij_vraag import router as antwoord_router
 from db import get_conn, pool
 from expand import router as expand_router
 from kennis import router as kennis_router
@@ -186,6 +187,7 @@ async def verify_key(
 
 app.include_router(keywords_router, dependencies=[Depends(verify_key)])
 app.include_router(regelteksten_router, dependencies=[Depends(verify_key)])
+app.include_router(antwoord_router, dependencies=[Depends(verify_key)])
 app.include_router(semantisch_router, dependencies=[Depends(verify_key)])
 app.include_router(vergunningen_router, dependencies=[Depends(verify_key)])
 app.include_router(ponsenkaart_router, dependencies=[Depends(verify_key)])
@@ -1545,6 +1547,45 @@ def _fetch_objecten_gebiedsaanwijzing(cur, x: float, y: float) -> list[dict]:
     return cur.fetchall()
 
 
+def _fetch_objecten_gio(cur, x: float, y: float) -> list[dict]:
+    """GIO's die het punt dekken, via de basisgeo-junctieketen.
+
+    Een GIO ís de FRBR (object_id = frbr_expression). `naam` is een leesbaar
+    label (~35% van de GIO's; groep-label of locatie-naam), anders NULL —
+    anonieme GIO's matchen dan geen trefwoorden en zakken vanzelf weg in de
+    scoring. Geen artikel/regeltekst: een GIO is geometrie, geen regel.
+    """
+    cur.execute(
+        """
+        SELECT  'gio'::text                                 AS type,
+                gio.frbr_expression                          AS object_id,
+                gio.naam                                     AS naam,
+                NULL::text                                   AS groep,
+                NULL::text                                   AS kwalificatie,
+                NULL::numeric                                AS kwantitatieve_waarde,
+                NULL::text                                   AS kwalitatieve_waarde,
+                NULL::text                                   AS eenheid,
+                l.identificatie                              AS locatie_id,
+                l.noemer                                     AS locatie_naam,
+                l.locatie_type,
+                r.opschrift                                  AS regeling,
+                gio.regeling_expression                      AS frbr_expression,
+                NULL::text                                   AS artikel,
+                NULL::text                                   AS artikel_wid,
+                NULL::text                                   AS regeltekst_excerpt,
+                gio.frbr_work                                AS frbr_work
+        FROM    p2p.locatie l
+        JOIN    p2p.gio_locatie gl ON gl.locatie_id = l.identificatie
+        JOIN    p2p.geo_informatieobject gio ON gio.frbr_expression = gl.gio_frbr
+        LEFT JOIN p2p.regeling r ON r.frbr_expression = gio.regeling_expression
+        WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+        LIMIT %s
+        """,
+        (x, y, _OBJ_FETCH_LIMIT_PER_TYPE),
+    )
+    return cur.fetchall()
+
+
 @app.get("/v1/objecten", dependencies=[Depends(verify_key)])
 def objecten(
     x: float = Query(..., description="RD x-coordinaat (EPSG:28992)"),
@@ -1557,7 +1598,9 @@ def objecten(
     limit: int = Query(20, le=100),
     include_types: str = Query(
         "normwaarde,activiteit,bestemming,gebiedsaanwijzing",
-        description="Komma-gescheiden lijst objecttypes (default: alle vier)",
+        description="Komma-gescheiden lijst objecttypes (default: alle vier). "
+        "Optioneel: 'gio' (GeoInformatieObjecten via basisgeo-keten) — niet in "
+        "de default zodat de bot-retrieval-baseline stabiel blijft.",
     ),
 ):
     """V7: verenigd objecten-endpoint. Vervangt /v1/normwaarde + /v1/activiteit +
@@ -1587,6 +1630,8 @@ def objecten(
             rows.extend(_fetch_objecten_bestemming(cur, x, y))
         if "gebiedsaanwijzing" in types_set:
             rows.extend(_fetch_objecten_gebiedsaanwijzing(cur, x, y))
+        if "gio" in types_set:
+            rows.extend(_fetch_objecten_gio(cur, x, y))
 
     # Dedupe op (type, object_id, locatie_id, artikel_wid) — JOIN's kunnen
     # dezelfde object/regel-combinatie meerdere keren teruggeven door multiple
@@ -1635,6 +1680,9 @@ def objecten(
             obj_payload["hoofdgroep"] = r.get("groep")
         elif r["type"] == "gebiedsaanwijzing":
             obj_payload["onderwerp_groep"] = r.get("groep")
+        elif r["type"] == "gio":
+            obj_payload["frbr_work"] = r.get("frbr_work")
+            obj_payload["label"] = r.get("naam") or _gio_work_label(r.get("frbr_work"))
 
         scored.append({
             "type": r["type"],
@@ -3080,6 +3128,65 @@ def viewer_regelmix_document(
     return {"regelmix": rows}
 
 
+def _meest_specifiek_cte(op_punt_sql: str) -> str:
+    """Bouwt de WITH RECURSIVE-CTE's voor de 'meest-specifieke-wint'-regel.
+
+    Activiteiten zitten in een functionele structuur (`p2p.activiteit.bovenliggende`,
+    self-FK). Een koepel-activiteit ('Activiteit gereguleerd in het omgevingsplan',
+    'Bouwactiviteit (omgevingsplan)', …) bestaat alleen om specifiekere activiteiten
+    te groeperen en heeft zelf geen toegevoegde waarde zodra zo'n specifieke
+    afstammeling óók op het punt geldt. Deze CTE's bepalen die overbodige koepels
+    puur structureel — zonder naam-heuristiek (vroeger `is_tophaak`/ILIKE
+    '%gereguleerd in%', wat zowel concrete bladeren wegfilterde als koepels miste).
+
+    `op_punt_sql` moet één kolom `id` (activiteit-identificatie) leveren: de
+    activiteiten die op het punt/in de scope gelden. De CTE 'scaffolding' bevat de
+    deelverzameling daarvan die voorouder is van een andere op-punt activiteit —
+    die filtert de caller weg met `NOT IN (SELECT id FROM scaffolding)`.
+
+    Gebruik als: `f"WITH RECURSIVE {_meest_specifiek_cte(op_punt_sql)} SELECT …"`.
+    De hoofd-query moet dezelfde parameters opnieuw binden (de CTE en de
+    hoofd-query herhalen het locatie-/expressie-filter).
+    """
+    return f"""
+    op_punt AS (
+        {op_punt_sql}
+    ),
+    ancestors AS (
+        -- voorouder-keten van elke op-punt activiteit (start bij directe bovenliggende)
+        SELECT op.id AS leaf, a.bovenliggende AS anc, 1 AS d
+        FROM op_punt op
+        JOIN p2p.activiteit a ON a.identificatie = op.id
+        WHERE a.bovenliggende IS NOT NULL
+        UNION ALL
+        SELECT anc.leaf, p.bovenliggende, anc.d + 1
+        FROM ancestors anc
+        JOIN p2p.activiteit p ON p.identificatie = anc.anc
+        WHERE p.bovenliggende IS NOT NULL AND anc.d < 25
+    ),
+    scaffolding AS (
+        -- op-punt activiteiten die voorouder zijn van een andere op-punt activiteit
+        SELECT DISTINCT anc AS id FROM ancestors
+        WHERE anc IN (SELECT id FROM op_punt)
+    )
+    """
+
+
+def _gio_work_label(frbr_work: str | None) -> str:
+    """Leesbaar label uit een GIO-FRBR-work voor GIO's zonder naam.
+
+    `frbr_work` heeft door de loader een trailing taal-segment ('/nld'), bv.
+    '/join/id/regdata/gm0014/2024/locatiegroep_<hash>/nld'. We strippen dat en
+    nemen het laatste betekenisdragende segment ('locatiegroep_<hash>'). Beter
+    dan een rauwe FRBR-URI, en het blijft de FRBR-identiteit die de gebruiker
+    als 'de GIO' beschouwt.
+    """
+    if not frbr_work:
+        return "(naamloos GIO)"
+    segs = [s for s in frbr_work.rstrip("/").split("/") if s and s != "nld"]
+    return segs[-1] if segs else frbr_work
+
+
 @app.get("/v1/viewer/objecten", dependencies=[Depends(verify_key)])
 def viewer_objecten(x: float = Query(...), y: float = Query(...)):
     """Alle OW-objecten op een RD-coördinaat, over alle regelingen heen.
@@ -3119,8 +3226,20 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
 
         # Activiteitlocatieaanduidingen — dedup op (naam, kwalificatie, groep)
         # met alle regelingen + locatie_ids voor hover-highlight op de kaart.
+        # 'meest-specifieke-wint': koepel-activiteiten waarvan een specifiekere
+        # afstammeling óók op dit punt geldt vallen weg (zie _meest_specifiek_cte).
+        op_punt_sql = f"""
+            SELECT DISTINCT ala.activiteit_id AS id
+            FROM p2p.activiteit_locatieaanduiding ala
+            JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
+            JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
+            WHERE ST_Intersects(ls.geometrie, {point})
+        """
         cur.execute(
             f"""
+            WITH RECURSIVE {_meest_specifiek_cte(op_punt_sql)}
             SELECT a.naam,
                    a.groep,
                    ala.kwalificatie,
@@ -3134,13 +3253,11 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
                 AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE ST_Intersects(ls.geometrie, {point})
-              AND a.is_tophaak = FALSE
-              AND a.naam NOT ILIKE '%%gereguleerd in%%'
-              AND a.naam NOT ILIKE '%%gereguleerd bij%%'
+              AND a.identificatie NOT IN (SELECT id FROM scaffolding)
             GROUP BY a.naam, a.groep, ala.kwalificatie
             ORDER BY a.groep, ala.kwalificatie, a.naam
             """,
-            (x, y),
+            (x, y, x, y),
         )
         activiteitlocatieaanduidingen = cur.fetchall()
 
@@ -3241,6 +3358,50 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
         )
         wro_bestemmingen = cur.fetchall()
 
+        # GeoInformatieObjecten — alle GIO's die het punt dekken, via de
+        # basisgeo-junctieketen (locatie → basisgeo:id → GIO). Een GIO ís de
+        # FRBR (work = hoofdobject, expression = versie); `naam` is een
+        # leesbaar label dat ~35% van de GIO's heeft (groep-label of
+        # locatie-naam), de rest valt terug op de FRBR-work-staart.
+        # `gekoppeld` markeert of op dezelfde locatie ook een GA/ALA/normwaarde
+        # zit: gekoppeld=TRUE dupliceert een al getoond object (GIO is de
+        # geometrie eronder), gekoppeld=FALSE is nieuwe info — typisch een
+        # omgevingsvisie/programma-GIO dat niet als gebiedsaanwijzing is
+        # geannoteerd en anders onzichtbaar blijft.
+        cur.execute(
+            f"""
+            WITH gio_loc AS (
+                SELECT DISTINCT
+                       gio.frbr_expression, gio.frbr_work, gio.naam,
+                       gio.regeling_expression, gl.locatie_id
+                FROM p2p.locatie_subdiv ls
+                JOIN p2p.gio_locatie gl ON gl.locatie_id = ls.identificatie
+                JOIN p2p.geo_informatieobject gio ON gio.frbr_expression = gl.gio_frbr
+                WHERE ST_Intersects(ls.geometrie, {point})
+            )
+            SELECT gl.frbr_expression, gl.frbr_work, gl.naam,
+                   r.opschrift AS regeling, r.documenttype,
+                   ARRAY_AGG(DISTINCT gl.locatie_id) AS locatie_ids,
+                   bool_or(
+                       EXISTS (SELECT 1 FROM p2p.gebiedsaanwijzing ga
+                                WHERE ga.locatie_id = gl.locatie_id)
+                    OR EXISTS (SELECT 1 FROM p2p.activiteit_locatieaanduiding a
+                                WHERE a.locatie_id = gl.locatie_id)
+                    OR EXISTS (SELECT 1 FROM p2p.normwaarde nw
+                                WHERE nw.locatie_id = gl.locatie_id)
+                   ) AS gekoppeld
+            FROM gio_loc gl
+            LEFT JOIN p2p.regeling r ON r.frbr_expression = gl.regeling_expression
+            GROUP BY gl.frbr_expression, gl.frbr_work, gl.naam, r.opschrift, r.documenttype
+            ORDER BY gl.naam NULLS LAST, gl.frbr_work
+            """,
+            (x, y),
+        )
+        geo_informatieobjecten = [
+            {**row, "label": row["naam"] or _gio_work_label(row["frbr_work"])}
+            for row in cur.fetchall()
+        ]
+
     return {
         "locatie": {"x": x, "y": y},
         "gebiedsaanwijzingen": gebiedsaanwijzingen,
@@ -3248,6 +3409,7 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
         "omgevingsnormen": omgevingsnormen,
         "normwaarden": normwaarden,
         "ongetypeerde_locaties": ongetypeerde_locaties,
+        "geo_informatieobjecten": geo_informatieobjecten,
         "wro_bestemmingen": wro_bestemmingen,
     }
 
@@ -3345,9 +3507,28 @@ def viewer_ala(
         loc_filter = "AND ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))"
         loc_params = [x, y]
 
+    # 'meest-specifieke-wint': dezelfde structurele filter als viewer_objecten,
+    # zodat de kaart-ALA-laag en het objecten-panel exact dezelfde activiteiten
+    # tonen (geen koepels waarvan een specifiekere afstammeling ook geldt).
+    # Scope = deze regeling (+ optioneel het punt), gelijk aan de hoofd-query.
+    op_punt_ls_join = (
+        "JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id"
+        if loc_filter else ""
+    )
+    op_punt_sql = f"""
+        SELECT DISTINCT ala.activiteit_id AS id
+        FROM p2p.activiteit_locatieaanduiding ala
+        JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+        JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                                 AND te.regeling_expression = %s
+        {op_punt_ls_join}
+        WHERE TRUE {loc_filter}
+    """
+
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
+            WITH RECURSIVE {_meest_specifiek_cte(op_punt_sql)}
             SELECT DISTINCT ON (a.naam, ala.kwalificatie, l.identificatie)
                 a.naam              AS activiteit,
                 a.groep             AS activiteit_groep,
@@ -3365,9 +3546,10 @@ def viewer_ala(
                                          AND te.regeling_expression = %s
             {("JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id" if loc_filter else "")}
             WHERE TRUE {loc_filter}
+              AND a.identificatie NOT IN (SELECT id FROM scaffolding)
             ORDER BY a.naam, ala.kwalificatie, l.identificatie
             """,
-            (expression, *loc_params),
+            (expression, *loc_params, expression, *loc_params),
         )
         features = [
             {

@@ -25,6 +25,7 @@ niet alleen regelteksten waar de leek-termen toevallig in voorkomen.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -279,6 +280,75 @@ def killer_query(cur, matched_concept_rows: list[dict],
     return cur.fetchall()
 
 
+def _woordgrens_regex(keywords: list[str]) -> str | None:
+    """Bouw één case-insensitieve POSIX-regex die op woordgrens (`\\m`) matcht op
+    een van de domein-trefwoorden. Woordgrens i.p.v. substring voorkomt dat een
+    korte term als 'vee' matcht in 'verveelend' of 'mest' in 'domesticatie' —
+    FTS-achtige precisie zonder een tsvector-kolom. Termen < 5 tekens vallen af
+    (te generiek). Geeft None als er niets bruikbaars overblijft."""
+    META = r"([.\\^$*+?()\[\]{}|])"
+    alts = sorted({k.lower().strip() for k in keywords if len(k.strip()) >= 5})
+    if not alts:
+        return None
+    escaped = [re.sub(META, r"\\\1", k) for k in alts]
+    return r"\m(" + "|".join(escaped) + r")"
+
+
+def tekst_fallback_query(cur, keywords: list[str], x: float, y: float,
+                         limit: int) -> list[dict]:
+    """Tekst-fallback voor wanneer de activiteit-join niets oplevert.
+
+    De killer-query is structureel (SKOS-concept -> activiteit -> ALA): scherp,
+    maar leeg zodra de werkzaamheid->activiteit-mapping op deze locatie ontbreekt
+    of naar een irrelevante (andere gemeente) activiteit wijst. Deze fallback laat
+    de activiteit-eis los en zoekt de op de locatie geldende regelteksten waarvan
+    de tekst/opschrift een domein-trefwoord op woordgrens bevat.
+
+    Zo krijgt "boerderijen" alsnog de echte veehouderij-regels van het lokale
+    omgevingsplan, ook zonder kloppende activiteit-FK. `join_pad='tekst_fallback'`
+    maakt in de respons zichtbaar dat dit via tekst-match kwam.
+
+    Performance: een `loc_wids`-CTE dedupt eerst de wids op de locatie (via de
+    geo-join), daarna filtert de woordgrens-regex met early-stop `LIMIT`. ~0,2-0,7s.
+    Geen activiteit-kolom (die hoort bij de activiteit-join, niet bij tekst-match)
+    — `activiteit_naam/id` zijn leeg.
+    """
+    rx = _woordgrens_regex(keywords)
+    if rx is None:
+        return []
+    cur.execute(
+        """
+        WITH loc_wids AS (
+            SELECT DISTINCT jr.regeltekst_wid AS wid, jr.regeling_expression AS rexpr
+            FROM p2p.activiteit_locatieaanduiding ala
+            JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
+            JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+            WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+        )
+        SELECT DISTINCT ON (te.wid)
+            ''::text        AS activiteit_naam,
+            ''::text        AS activiteit_id,
+            te.opschrift    AS artikel,
+            r.opschrift     AS regeling,
+            r.frbr_expression AS regeling_expression,
+            r.documenttype,
+            REGEXP_REPLACE(te.inhoud, '<[^>]+>', '', 'g') AS inhoud,
+            'tekst_fallback'::text AS join_pad
+        FROM loc_wids lw
+        JOIN p2p.tekst_element te ON te.wid = lw.wid
+            AND (te.regeling_expression = lw.rexpr OR lw.rexpr IS NULL)
+        JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+        WHERE te.inhoud IS NOT NULL
+          AND length(te.inhoud) > 20
+          AND (te.inhoud ~* %(rx)s OR COALESCE(te.opschrift, '') ~* %(rx)s)
+        ORDER BY te.wid
+        LIMIT %(limit)s
+        """,
+        {"x": x, "y": y, "rx": rx, "limit": limit},
+    )
+    return cur.fetchall()
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Endpoint
 # ─────────────────────────────────────────────────────────────────────
@@ -320,18 +390,27 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
         # Stap 2-4 — killer query
         t0 = time.perf_counter()
         regel_rows = killer_query(cur, matched_rows, rd_x, rd_y, req.max_regelteksten)
+
+        # Domein-trefwoorden (concept-namen + SKOS-trefwoorden) + vraag-chips:
+        # basis voor zowel de tekst-fallback als het frontend object-filter.
+        domein_keywords = fetch_expanded_keywords(cur, [r["uri"] for r in matched_rows])
+        vraag_termen = extract_vraag_chips(cur, req.question)
+
+        # Stap 4b — tekst-fallback: vond de activiteit-join niets, zoek dan de op
+        # de locatie geldende regelteksten waarvan de tekst/opschrift een domein-
+        # trefwoord op woordgrens bevat. Vangt de gevallen waarin de werkzaamheid->
+        # activiteit-mapping ontbreekt of naar een andere gemeente wijst (zie
+        # tekst_fallback_query). Alleen domein-trefwoorden — vraag-chips als
+        # "geldt" zouden te breed matchen.
+        if not regel_rows:
+            regel_rows = tekst_fallback_query(
+                cur, domein_keywords, rd_x, rd_y, req.max_regelteksten,
+            )
         sql_ms = round((time.perf_counter() - t0) * 1000, 1)
 
         # Stap 5 — expanded keywords voor frontend object-filter:
         # SKOS-trefwoorden + de oorspronkelijke vraag-tokens (+ stem-varianten).
-        expanded_keywords = fetch_expanded_keywords(
-            cur, [r["uri"] for r in matched_rows],
-        )
-        expanded_keywords = merge_question_tokens(expanded_keywords, req.question)
-
-        # Stap 6 — vraag-chips voor de UI (specifieke termen uit de vraag,
-        # generieke werkwoorden gefilterd via SKOS-frequentiedrempel).
-        vraag_termen = extract_vraag_chips(cur, req.question)
+        expanded_keywords = merge_question_tokens(list(domein_keywords), req.question)
 
     matched_summaries = [
         MatchedConceptSummary(
