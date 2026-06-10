@@ -390,14 +390,21 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                             ow.append(row)
 
         # ── Query 3: Visie/Programma teksten ──
-        visie_kw_filter, visie_kw_params = _build_keyword_filter(kw, "te.inhoud")
-        opschrift_visie_filter, opschrift_visie_params = _build_keyword_filter(kw, "te.opschrift")
-        if visie_kw_filter and opschrift_visie_filter:
-            visie_text_filter = f"AND (({visie_kw_filter[4:]}) OR ({opschrift_visie_filter[4:]}))"
-            visie_text_params = visie_kw_params + opschrift_visie_params
-        elif visie_kw_filter:
-            visie_text_filter = visie_kw_filter
-            visie_text_params = visie_kw_params
+        # Perf (2026-06-10): zoektermen-filter via geïndexeerde FTS op
+        # inhoud_plain i.p.v. ILIKE op de XML-kolom `inhoud`. De ILIKE-variant
+        # (`inhoud ~~* '%..%'`) forceerde een Parallel Seq Scan over alle ~666k
+        # tekst_elementen (~5.7s lokaal / >10s timeout op prod) omdat het
+        # documenttype-filter op `regeling` niet naar `tekst_element` te pushen
+        # is. De tsvector-match gebruikt idx_tekst_element_inhoud_fts → ~0.5s.
+        # Zelfde FTS als de Ow-tak (Query 2B). Opschrift-match valt onder de
+        # FTS op inhoud_plain (de opschrifttekst zit in de regeltekst).
+        visie_fts = _build_fts_query(kw)
+        if visie_fts:
+            visie_text_filter = (
+                "AND to_tsvector('dutch', coalesce(te.inhoud_plain, '')) "
+                "@@ to_tsquery('dutch', %s)"
+            )
+            visie_text_params = [visie_fts]
         else:
             visie_text_filter = ""
             visie_text_params = []
