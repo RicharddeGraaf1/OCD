@@ -38,13 +38,18 @@ _TSQ = "nullif(replace(plainto_tsquery('dutch', %(q)s)::text, '&', '|'), '')::ts
 
 _HYBRID_SQL = f"""
 WITH scope AS (
-    SELECT DISTINCT te.regeling_expression AS expr
-    FROM p2p.activiteit_locatieaanduiding ala
-    JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
-    JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-    JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-        AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
+    -- Scope op regelingsgebied i.p.v. activiteit_locatieaanduiding-junction.
+    -- Regelingsgebied is per TPOD verplicht op elke regeling en is in OCD 100%
+    -- gevuld (1863/1863 regelingen). De activiteit-junction-route mist
+    -- structureel alle vrijetekst-instrumenten (Omgevingsvisie, Programma,
+    -- N2000-besluit) omdat die geen juridische_regel-elementen hebben — daar
+    -- viel cluster C op stuk (r34/r37/r39). Geo-coverage van regelingsgebied-
+    -- locaties in locatie_subdiv is volledig.
+    SELECT DISTINCT r.frbr_expression AS expr
+    FROM p2p.regeling r
+    JOIN p2p.locatie_subdiv ls ON ls.identificatie = r.regelingsgebied_id
     WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+      AND NOT r.inactief
 ),
 cand AS (
     SELECT id, regeling_expression, bron_soort, kop_pad, inhoud_plain, embedding, fts
@@ -139,15 +144,13 @@ def semantisch(req: SemantischRequest) -> SemantischResponse:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(_HYBRID_SQL, {"x": x, "y": y, "qv": qv, "q": req.question, "k": req.k})
         rows = cur.fetchall()
-        # aantal scope-regelingen (los, voor de trace)
+        # aantal scope-regelingen (los, voor de trace) — zelfde scope-definitie als _HYBRID_SQL
         cur.execute(
-            """SELECT count(DISTINCT te.regeling_expression) AS n
-               FROM p2p.activiteit_locatieaanduiding ala
-               JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
-               JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-               JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-                   AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
-               WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))""",
+            """SELECT count(DISTINCT r.frbr_expression) AS n
+               FROM p2p.regeling r
+               JOIN p2p.locatie_subdiv ls ON ls.identificatie = r.regelingsgebied_id
+               WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                 AND NOT r.inactief""",
             (x, y))
         scope_n = cur.fetchone()["n"]
     sql_ms = (time.time() - t0) * 1000
