@@ -20,6 +20,7 @@ Algoritme `/extract`:
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -50,6 +51,11 @@ STOP_WORDS: set[str] = {
     # zowel de chip-rij als de objectmatch (bv. "over" matcht "overkapping").
     "over", "qua", "geldt", "gelden", "geldend", "geldende",
     "omtrent", "inzake", "betreft", "betreffende", "regelgeving",
+    # "regels"/"regel"/"hierover" zijn vraag-vulwoorden ("wat zijn de regels
+    # hierover?"): geen domein-inhoud, maar matchen wél objecten als "Afwijken
+    # van regels in het omgevingsplan" en vervuilen de chips. Net als
+    # "regelgeving" hierboven weren.
+    "regels", "regel", "hierover",
 }
 
 
@@ -114,6 +120,13 @@ class ScoredKeyword(BaseModel):
     term: str
     relevantie: float = Field(..., ge=0.0, le=1.0)
     bron: str
+    is_actie: bool = Field(
+        False,
+        description="True als élk woord in `term` een actie-werkwoord is "
+                    "(_is_action_only): 'veranderen' → True, 'overkapping' → False. "
+                    "Consumenten (regelmix-score, frontend-objectfilter) wegen "
+                    "actie-only termen lichter (znw 1.0 / ww 0.5) of weren ze.",
+    )
 
 
 class ExtractResponse(BaseModel):
@@ -233,27 +246,55 @@ def _build_ngrams(tokens: list[str], max_n: int = 3) -> list[str]:
     return out
 
 
+# Relatieve concept-cutoff (G-77): houd concepten met score ≥ β × topscore. Knipt
+# de zwakke staart (brede-trefwoord-matches) weg náást de max_concepts-limiet, zonder
+# een vast drempelgetal dat per vraag niet klopt. Tunen op de proefvragen-set.
+_BETA_CONCEPT = 0.35
+
+
+def _centrality(bron_rank: int, n_trefw: int) -> float:
+    """Centraliteit van een term-match voor een concept (G-77).
+
+    Hoe centraal is de gematchte term voor dít concept?
+      - naam-match  (bron_rank 1) → 1.0   : de term ís het concept (autoritair)
+      - synoniem    (bron_rank 2) → 0.6   : sterk alternatief
+      - trefwoord   (bron_rank 3) → breedtepenalty 1/(1+ln(n_trefwoorden)):
+          de term is 1 van n trefwoorden. Een gefocust concept (n=8 → 0,32) is een
+          sterk signaal; een breed concept ("Bouwwerk onderhouden", n=551 → 0,14) een
+          zwak — daar vist de term toevallig één van honderden trefwoorden op. Dit is
+          de ontbrekende IDF-as: niet *hoe zeldzaam de term over concepten is*, maar
+          *hoe centraal de term ís voor het concept*.
+    """
+    if bron_rank <= 1:
+        return 1.0
+    if bron_rank == 2:
+        return 0.6
+    return 1.0 / (1.0 + math.log(max(1, n_trefw)))
+
+
 def _score_match_row(row: dict, freq_per_term: dict[str, int] | None = None) -> float:
     """Score voor één matched concept.
 
-    Componenten (allemaal multiplicatief):
+    Componenten (allemaal multiplicatief, per gematchte term):
       1. Lengte-bonus: een 2-woord-match telt zwaarder dan twee losse woord-
          matches (`wlen²`: 1, 4, 9 voor 1-, 2-, 3-woord-matches).
-      2. IDF-weging: termen die op weinig SKOS-concepten matchen ("antenne",
+      2. Cross-concept-IDF: termen die op weinig SKOS-concepten matchen ("antenne",
          freq=1) krijgen veel hoger gewicht dan termen die op veel matchen
-         ("bouwen", freq=7+). Voorkomt dat generieke werkwoorden de top-N
-         volstoppen ten koste van specifieke vraag-termen.
-      3. Werkzaamheden-boost (1.5×): juridisch herkenbare werkzaamheden zijn
+         ("bouwen", freq=7+). Voorkomt dat generieke werkwoorden de top-N volstoppen.
+      3. Centraliteit (G-77): naam-match autoritair, trefwoord-match op een breed
+         concept gepenaliseerd — zie `_centrality`. Zonder dit selecteert een
+         overkapping-vraag óók "Bouwwerk onderhouden" (1 trefwoord uit 551).
+      4. Werkzaamheden-boost (1.5×): juridisch herkenbare werkzaamheden zijn
          meestal de bedoelde inhoud van de vraag.
 
-    `freq_per_term` ontbreken (None of term niet in dict) → idf=1.0 als
-    fallback, zodat oude callers/tests blijven werken.
+    `freq_per_term` ontbreken → idf=1.0; `matched_bron_ranks`/`n_trefw` ontbreken →
+    centraliteit=1.0 (fallback, zodat oude callers/tests blijven werken).
     """
-    import math
-
     matched = row["matched_terms"]
+    bron_ranks = row.get("matched_bron_ranks") or [1] * len(matched)
+    n_trefw = row.get("n_trefw") or 0
     score = 0.0
-    for term in matched:
+    for term, brank in zip(matched, bron_ranks):
         wlen = len(term.split())
         if freq_per_term is None:
             idf = 1.0
@@ -261,7 +302,7 @@ def _score_match_row(row: dict, freq_per_term: dict[str, int] | None = None) -> 
             f = max(1, freq_per_term.get(term, 1))
             # f=1 → 1.0, f=2 → 0.59, f=5 → 0.38, f=10 → 0.30, f=50 → 0.20
             idf = 1.0 / (1.0 + math.log(f))
-        score += wlen * wlen * idf
+        score += wlen * wlen * idf * _centrality(brank, n_trefw)
     if row["scheme_naam"] == "Werkzaamheden":
         score *= 1.5
     return score
@@ -326,6 +367,7 @@ def extract_vraag_chips(cur, question: str, max_freq_for_1gram: int = 5) -> list
 
     seen: set[str] = set()
     out: list[str] = []
+    dropped_action: list[str] = []
     for term in candidates:
         key = term.lower()
         if key in seen:
@@ -333,8 +375,24 @@ def extract_vraag_chips(cur, question: str, max_freq_for_1gram: int = 5) -> list
         # 1-gram-drempel: te generieke werkwoorden vallen weg
         if " " not in term and freq.get(key, 0) > max_freq_for_1gram:
             continue
+        # Puur-actiewoord-chips ("veranderen", "bouwen of veranderen") dragen geen
+        # inhoud en vervuilen zowel de chip-rij als de objectmatch (woordgrens
+        # "veranderen" matcht élke "… bouwen of veranderen"-activiteit). Spiegelt
+        # de _is_action_only-filter die de SKOS-conceptselectie al beschermt.
+        # Apart bewaren als fallback voor actiewoord-only-vragen.
+        if _is_action_only(term):
+            dropped_action.append(term)
+            continue
         seen.add(key)
         out.append(term)
+    # Fallback: geen enkele inhouds-chip (bv. "wat mag ik hier slopen") → toon
+    # tóch de actiewoord-chips zodat de gebruiker niet met een lege chip-rij zit.
+    if not out:
+        for term in dropped_action:
+            key = term.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(term)
     return out
 
 
@@ -370,7 +428,8 @@ def build_scored_keywords(
         if key in seen:
             return
         seen.add(key)
-        keywords.append({"term": term, "relevantie": relevantie, "bron": bron})
+        keywords.append({"term": term, "relevantie": relevantie, "bron": bron,
+                         "is_actie": _is_action_only(term)})
 
     # 1. Letterlijke woorden uit de vraag
     tokens = _tokenize(question)
@@ -415,8 +474,9 @@ def match_skos_concepts(cur, question: str, max_concepts: int = 5) -> tuple[list
     """SKOS-match-helper, herbruikbaar door meerdere endpoints.
 
     Geeft (matched_rows, ngrams_tried) terug. Iedere row heeft de velden
-    `uri, naam, scheme_naam, werkzaamheid_urn, activiteit_imow_id, matched_terms`
-    plus een berekende `score`. Ranked op score, getrimd op `max_concepts`.
+    `uri, naam, scheme_naam, werkzaamheid_urn, activiteit_imow_id, matched_terms,
+    matched_bron_ranks, n_trefw` plus een berekende `score`. Ranked op score,
+    getrimd op een relatieve cutoff (G-77, `_BETA_CONCEPT`) én `max_concepts`.
     """
     tokens = _tokenize(question)
     if not tokens:
@@ -427,28 +487,38 @@ def match_skos_concepts(cur, question: str, max_concepts: int = 5) -> tuple[list
 
     cur.execute(
         """
-        WITH q(token) AS (SELECT UNNEST(%s::text[]))
+        WITH q(token) AS (SELECT UNNEST(%s::text[])),
+        hits AS (
+            -- bron_rank: 1=naam (autoritair), 2=synoniem, 3=trefwoord (G-77)
+            SELECT concept_uri, LOWER(trefwoord) AS lc, 3 AS bron_rank FROM skos.trefwoord
+            UNION ALL
+            SELECT uri,           LOWER(naam),     1            FROM skos.concept
+            UNION ALL
+            SELECT concept_uri, LOWER(synoniem),  2            FROM skos.synoniem
+        ),
+        matched AS (
+            -- per (concept, term) de sterkste match-bron (naam < synoniem < trefwoord)
+            SELECT h.concept_uri, q.token, MIN(h.bron_rank) AS bron_rank
+            FROM q JOIN hits h ON h.lc = q.token
+            GROUP BY h.concept_uri, q.token
+        )
         SELECT
             c.uri,
             c.naam,
             c.scheme_naam,
             c.werkzaamheid_urn,
             c.activiteit_imow_id,
-            array_agg(DISTINCT q.token ORDER BY q.token) AS matched_terms
-        FROM q
-        JOIN (
-            SELECT concept_uri, LOWER(trefwoord) AS lc FROM skos.trefwoord
-            UNION ALL
-            SELECT uri,           LOWER(naam)      FROM skos.concept
-            UNION ALL
-            SELECT concept_uri, LOWER(synoniem)  FROM skos.synoniem
-        ) hits ON hits.lc = q.token
-        JOIN skos.concept c ON c.uri = hits.concept_uri
+            array_agg(m.token     ORDER BY m.token) AS matched_terms,
+            array_agg(m.bron_rank ORDER BY m.token) AS matched_bron_ranks,
+            -- breedte: hoeveel trefwoorden heeft het concept (G-77-penalty-input)
+            (SELECT count(*) FROM skos.trefwoord tt WHERE tt.concept_uri = c.uri) AS n_trefw
+        FROM matched m
+        JOIN skos.concept c ON c.uri = m.concept_uri
         WHERE c.scheme_naam IN ('Werkzaamheden','Activiteiten','functie','bouw','erfgoed','natuur',
                                  'water en watersysteem','ruimtelijk gebruik','energievoorziening',
                                  'omgevingsnorm','type gebiedsaanwijzing','Gemeentelijk begrippenkader VNG')
         GROUP BY c.uri, c.naam, c.scheme_naam, c.werkzaamheid_urn, c.activiteit_imow_id
-        ORDER BY array_length(array_agg(DISTINCT q.token), 1) DESC
+        ORDER BY array_length(array_agg(m.token), 1) DESC
         LIMIT %s
         """,
         (ngrams, max_concepts * 4),
@@ -478,6 +548,15 @@ def match_skos_concepts(cur, question: str, max_concepts: int = 5) -> tuple[list
     for r in rows:
         r["score"] = _score_match_row(r, freq_per_term)
     rows.sort(key=lambda r: r["score"], reverse=True)
+
+    # G-77: relatieve cutoff op conceptniveau. Door de centraliteit-weging
+    # (`_centrality`) zakken brede-trefwoord-matches ("Bouwwerk onderhouden":
+    # 1 trefwoord uit 551) ver onder een naam-/gefocust-trefwoord-match. Knip de
+    # zwakke staart weg vóór de max_concepts-trim, zodat hun trefwoorden niet
+    # downstream de keyword-set/regelmix overspoelen. Altijd ≥1 (de top blijft).
+    top = rows[0]["score"]
+    if top > 0:
+        rows = [r for r in rows if r["score"] >= _BETA_CONCEPT * top]
     return rows[:max_concepts], ngrams
 
 

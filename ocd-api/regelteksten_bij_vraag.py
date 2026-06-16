@@ -25,6 +25,7 @@ niet alleen regelteksten waar de leek-termen toevallig in voorkomen.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from typing import Any
@@ -36,7 +37,7 @@ from pydantic import BaseModel, Field, model_validator
 from db import get_conn
 from keywords import (
     match_skos_concepts, extract_vraag_chips, _stem_variant, _tokenize,
-    _fetch_freq_per_term,
+    _fetch_freq_per_term, _is_action_only, build_scored_keywords, ScoredKeyword,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,13 @@ class RegeltekstHit(BaseModel):
         description="Welke join-strategie deze regeltekst opleverde "
                     "(werkzaamheid_fk / werkzaamheid_naam / activiteit_uri / tekst_fallback)",
     )
+    relevantie: float | None = Field(
+        None,
+        description="Begrippen-gewogen relevantiescore (Σ woordsoort × IDF × bron "
+                    "over de aanwezige begrippen, objectnaam-match zwaarder). Hoger "
+                    "= relevanter; bedoeld voor frontend-sortering. None als er geen "
+                    "scoorbare begrippen waren (structurele join is dan het signaal).",
+    )
 
 
 class RegeltekstenTrace(BaseModel):
@@ -133,6 +141,13 @@ class RegeltekstenResponse(BaseModel):
                     "alle 2-/3-grams + zeldzame 1-grams (freq ≤ 5 in SKOS-graaf). "
                     "Generieke werkwoorden als 'bouwen' worden weggefilterd "
                     "zodat de chips de gebruiker concrete filter-context geven.",
+    )
+    keywords: list[ScoredKeyword] = Field(
+        default_factory=list,
+        description="Begrippen met relevantie (0-1) + bron-tag (letterlijk/skos-*; "
+                    "woordsoort znw vs. actiewoord). Voor de frontend-objectfilter en "
+                    "chip-weging — sterke begrippen (znw, letterlijk) zwaarder dan "
+                    "zwakke (actiewoorden, broader/related). Spiegelt /v1/keywords/extract.",
     )
     trace: RegeltekstenTrace
 
@@ -194,10 +209,19 @@ def merge_question_tokens(cur, expanded: list[str], question: str) -> list[str]:
     # SKOS-frequentie per uniek token bepaalt of een niet-bevestigd token
     # specifiek genoeg is om de objectmatch in te gaan.
     freq = _fetch_freq_per_term(cur, list({t.lower() for t in tokens}))
+    # Heeft de vraag een inhouds-token (znw)? Zo ja, weer dan de puur-actiewoord-
+    # tokens ("veranderen") uit de objectmatch-keywords: anders matcht "veranderen"
+    # op woordgrens élke "… bouwen of veranderen"-activiteit (de objectpaneel-ruis,
+    # 131 → handvol). Spiegelt _is_action_only die de SKOS-conceptselectie al
+    # beschermt. Geen inhouds-token (bv. "wat mag ik hier slopen") → actiewoorden
+    # tóch toelaten als enige signaal (fallback).
+    heeft_inhoud = any(not _is_action_only(t) for t in tokens if len(t) >= 3)
     for t in tokens:
         if len(t) < 3:
             continue
         if freq.get(t.lower(), 0) == 0 and len(t) < 4:
+            continue
+        if heeft_inhoud and _is_action_only(t):
             continue
         if t.lower() not in seen:
             expanded.append(t)
@@ -456,6 +480,140 @@ def tekst_fallback_query(cur, keywords: list[str], x: float, y: float,
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Begrippen-gewogen score + cutoff (Fase 3)
+# ─────────────────────────────────────────────────────────────────────
+
+# Relatieve cutoff: houd regels met score ≥ α × topscore. Ruim startpunt (0,4):
+# liever te veel tonen en later aanscherpen dan relevante regels wegknippen bij
+# een vlakke score-verdeling. Tunen op de proefvragen-set (geen viewer-eval-set).
+_ALPHA_CUTOFF = 0.4
+# Een begrip in de objectnaam (annotatie) weegt zwaarder dan in de lopende tekst.
+_NAAM_BONUS = 1.5
+
+
+def fetch_trefw_broader(cur, uris: list[str]) -> tuple[dict[str, list[str]], dict[str, list[dict]]]:
+    """Trefwoorden + broader-namen per concept-URI, voor build_scored_keywords."""
+    trefw_by_uri: dict[str, list[str]] = {u: [] for u in uris}
+    broader_by_uri: dict[str, list[dict]] = {u: [] for u in uris}
+    if not uris:
+        return trefw_by_uri, broader_by_uri
+    cur.execute(
+        "SELECT concept_uri, trefwoord FROM skos.trefwoord WHERE concept_uri = ANY(%s)",
+        (uris,),
+    )
+    for r in cur.fetchall():
+        trefw_by_uri.setdefault(r["concept_uri"], []).append(r["trefwoord"])
+    cur.execute(
+        """
+        SELECT r.source_uri, c.naam
+        FROM skos.relation r
+        LEFT JOIN skos.concept c ON c.uri = r.target_uri
+        WHERE r.source_uri = ANY(%s) AND r.type = 'broader'
+        """,
+        (uris,),
+    )
+    for r in cur.fetchall():
+        broader_by_uri.setdefault(r["source_uri"], []).append({"naam": r["naam"]})
+    return trefw_by_uri, broader_by_uri
+
+
+def _term_regex(term: str) -> re.Pattern | None:
+    """Linker-woordgrens-regex voor één term (Python re). Spiegelt de frontend
+    `vraagTermRegex`: compounds matchen ("vee" → "veehouderij"), mid-woord niet.
+    Termen < 3 tekens vallen weg (te generiek)."""
+    t = term.lower().strip()
+    if len(t) < 3:
+        return None
+    return re.compile(r"(?<![a-z0-9])" + re.escape(t))
+
+
+def compute_term_weights(cur, scored: list[dict]) -> list[dict]:
+    """Per scored keyword een gewicht = woordsoort × specificiteit(IDF) × bron.
+
+      - woordsoort  : znw 1.0, puur-actiewoord 0.5 (_is_action_only)
+      - specificiteit: IDF uit de SKOS-frequentie (zeldzaam = zwaarder); multi-woord
+                       en niet-SKOS-termen krijgen idf 1.0
+      - bron        : de `relevantie` uit build_scored_keywords (letterlijk 1.0 …
+                       skos-related 0.4)
+
+    Geeft list of {term, regex, gewicht, is_content}, sterkste eerst. Termen die
+    geen bruikbare woordgrens-regex opleveren (< 3 tekens) vallen weg.
+    """
+    if not scored:
+        return []
+    freq = _fetch_freq_per_term(cur, [k["term"].lower() for k in scored])
+    out: list[dict] = []
+    for k in scored:
+        term = k["term"]
+        rx = _term_regex(term)
+        if rx is None:
+            continue
+        is_action = _is_action_only(term)
+        woordsoort = 0.5 if is_action else 1.0
+        f = max(1, freq.get(term.lower(), 1))
+        idf = 1.0 / (1.0 + math.log(f))
+        out.append({
+            "term": term,
+            "regex": rx,
+            "gewicht": woordsoort * idf * float(k["relevantie"]),
+            "is_content": not is_action,
+        })
+    out.sort(key=lambda x: x["gewicht"], reverse=True)
+    return out
+
+
+def score_en_cutoff(rows: list[dict], term_weights: list[dict],
+                    limit: int, alpha: float = _ALPHA_CUTOFF) -> list[dict]:
+    """Scoor regelteksten op aanwezige begrippen en pas de hybride cutoff toe.
+
+    Score per regel = Σ gewicht(begrip) voor elk begrip dat op woordgrens in de
+    objectnaam (× _NAAM_BONUS) of in de tekst/opschrift voorkomt.
+
+    Cutoff (zie [[Relevantiescoring en cutoff voor viewer-retrieval]] §3):
+      1. harde bodem  — een regel die alléén op actiewoorden matcht valt weg
+                        (tenzij er geen enkele inhouds-match is — dan behouden);
+      2. relatief     — houd score ≥ alpha × topscore;
+      3. vangrails    — altijd ≥1, nooit meer dan `limit`.
+
+    Geen enkele scoorbare match → val terug op de oorspronkelijke (deterministische)
+    volgorde: de structurele activiteit-join is dan zelf het relevantiesignaal.
+    """
+    if not rows:
+        return rows
+    if not term_weights:
+        for r in rows:
+            r["relevantie"] = None
+        return rows[:limit]
+    for r in rows:
+        naam = (r.get("activiteit_naam") or "").lower()
+        tekst = ((r.get("inhoud") or "") + " " + (r.get("artikel") or "")).lower()
+        score = 0.0
+        content_hit = False
+        for tw in term_weights:
+            in_naam = bool(tw["regex"].search(naam))
+            in_tekst = in_naam or bool(tw["regex"].search(tekst))
+            if not in_tekst:
+                continue
+            score += tw["gewicht"] * (_NAAM_BONUS if in_naam else 1.0)
+            if tw["is_content"]:
+                content_hit = True
+        r["relevantie"] = round(score, 4)
+        r["_content_hit"] = content_hit
+
+    scoorbaar = [r for r in rows if (r.get("relevantie") or 0) > 0]
+    if not scoorbaar:
+        for r in rows:
+            r["relevantie"] = None
+        return rows[:limit]
+    content = [r for r in scoorbaar if r.get("_content_hit")]
+    pool = content if content else scoorbaar          # harde bodem (met fallback)
+    pool.sort(key=lambda r: r["relevantie"], reverse=True)
+    top = pool[0]["relevantie"]
+    kept = [r for r in pool if r["relevantie"] >= alpha * top] or pool[:1]
+    return kept[:limit]
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Endpoint
 # ─────────────────────────────────────────────────────────────────────
 
@@ -486,6 +644,13 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
             fallback_rows = tekst_fallback_query(
                 cur, vraag_termen_leeg, rd_x, rd_y, req.max_regelteksten,
             )
+            # Geen SKOS-concepten → scored keywords uit de vraag-tokens alleen
+            # (letterlijk/phrase), dan begrippen-gewogen score + cutoff.
+            scored_leeg = build_scored_keywords(req.question, [], {}, {})
+            term_weights_leeg = compute_term_weights(cur, scored_leeg)
+            fallback_rows = score_en_cutoff(
+                fallback_rows, term_weights_leeg, req.max_regelteksten,
+            )
             verrijk_met_artikel(cur, fallback_rows)
             sql_ms = round((time.perf_counter() - t0) * 1000, 1)
             return RegeltekstenResponse(
@@ -493,6 +658,7 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
                 matched_concepts=[],
                 expanded_keywords=merge_question_tokens(cur, [], req.question),
                 vraag_termen=vraag_termen_leeg,
+                keywords=[ScoredKeyword(**k) for k in scored_leeg],
                 trace=RegeltekstenTrace(
                     tokens_count=len(ngrams),
                     matched_concepts_count=0,
@@ -522,13 +688,23 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
                 cur, domein_keywords, rd_x, rd_y, req.max_regelteksten,
             )
 
+        # Stap 5 — begrippen-gewogen score + cutoff op de regelmix. De scored
+        # keywords (relevantie + bron + woordsoort) komen uit dezelfde SKOS-match;
+        # de cutoff zet de sterke begrippen (znw, letterlijk, zeldzaam) bovenaan en
+        # snoeit de zwakke staart. Zie [[Relevantiescoring en cutoff voor viewer-retrieval]].
+        trefw_by_uri, broader_by_uri = fetch_trefw_broader(cur, [r["uri"] for r in matched_rows])
+        scored = build_scored_keywords(req.question, matched_rows, trefw_by_uri, broader_by_uri)
+        term_weights = compute_term_weights(cur, scored)
+        regel_rows = score_en_cutoff(regel_rows, term_weights, req.max_regelteksten)
+
         # Verrijk met de voorouder-Artikel + Hoofdstuk zodat lid-niveau teksten
         # als "Artikel 2.5 <opschrift> (Hoofdstuk 2)" getoond kunnen worden.
         verrijk_met_artikel(cur, regel_rows)
         sql_ms = round((time.perf_counter() - t0) * 1000, 1)
 
-        # Stap 5 — expanded keywords voor frontend object-filter:
-        # SKOS-trefwoorden + de oorspronkelijke vraag-tokens (+ stem-varianten).
+        # Stap 6 — expanded keywords voor frontend object-filter (legacy, additief
+        # naast `keywords`): SKOS-trefwoorden + vraag-tokens (actiewoorden geweerd
+        # in merge_question_tokens). De frontend prefereert `keywords` als die er is.
         expanded_keywords = merge_question_tokens(cur, list(domein_keywords), req.question)
 
     matched_summaries = [
@@ -558,6 +734,7 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
             artikel_opschrift=r.get("artikel_opschrift"),
             hoofdstuk_nummer=r.get("hoofdstuk_nummer"),
             join_pad=r["join_pad"],
+            relevantie=r.get("relevantie"),
         )
         for r in regel_rows
     ]
@@ -567,6 +744,7 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
         matched_concepts=matched_summaries,
         expanded_keywords=expanded_keywords,
         vraag_termen=vraag_termen,
+        keywords=[ScoredKeyword(**k) for k in scored],
         trace=RegeltekstenTrace(
             tokens_count=len(ngrams),
             matched_concepts_count=len(matched_rows),
