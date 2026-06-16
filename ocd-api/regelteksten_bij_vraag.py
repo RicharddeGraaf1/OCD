@@ -87,10 +87,22 @@ class RegeltekstHit(BaseModel):
     )
     documenttype: str | None = None
     inhoud: str
+    wid: str | None = Field(
+        None, description="STOP-wid van de regeltekst (OW) — voor klik-naar-leestekst.",
+    )
+    artikel_nummer: str | None = Field(
+        None, description="Nummer van de Artikel-voorouder, bv. '2.5'.",
+    )
+    artikel_opschrift: str | None = Field(
+        None, description="Opschrift van de Artikel-voorouder.",
+    )
+    hoofdstuk_nummer: str | None = Field(
+        None, description="Nummer van de Hoofdstuk-voorouder, bv. '2'.",
+    )
     join_pad: str = Field(
         ...,
         description="Welke join-strategie deze regeltekst opleverde "
-                    "(werkzaamheid_fk / werkzaamheid_naam / activiteit_uri)",
+                    "(werkzaamheid_fk / werkzaamheid_naam / activiteit_uri / tekst_fallback)",
     )
 
 
@@ -212,6 +224,60 @@ def fetch_expanded_keywords(cur, concept_uris: list[str]) -> list[str]:
     return out
 
 
+def resolve_artikel_context(cur, te_ids: list[int]) -> dict[int, dict]:
+    """Resolve per tekst_element-id de voorouder-Artikel (nummer + opschrift) en
+    het Hoofdstuk-nummer via een single-pass tree-walk omhoog langs `parent_id`.
+
+    Regelteksten zijn vaak op lid-niveau (leeg `opschrift`); dit haalt de kop van
+    het omvattende Artikel op zodat de frontend "Artikel 2.5 <opschrift> (Hoofdstuk 2)"
+    kan tonen i.p.v. een kale "Regel". Spiegelt de verrijking van het
+    regelmix-detail-endpoint (`viewer_regelmix_document`). Alleen OW.
+    """
+    if not te_ids:
+        return {}
+    cur.execute(
+        """
+        WITH RECURSIVE walk AS (
+            SELECT t.id AS origin, t.id, t.parent_id,
+                CASE WHEN t.element_type = 'Artikel'   THEN t.nummer   END AS art_nr,
+                CASE WHEN t.element_type = 'Artikel'   THEN t.opschrift END AS art_op,
+                CASE WHEN t.element_type = 'Hoofdstuk' THEN t.nummer   END AS hfd_nr
+            FROM p2p.tekst_element t
+            WHERE t.id = ANY(%(ids)s)
+            UNION ALL
+            SELECT w.origin, p.id, p.parent_id,
+                COALESCE(w.art_nr, CASE WHEN p.element_type = 'Artikel'   THEN p.nummer   END),
+                COALESCE(w.art_op, CASE WHEN p.element_type = 'Artikel'   THEN p.opschrift END),
+                COALESCE(w.hfd_nr, CASE WHEN p.element_type = 'Hoofdstuk' THEN p.nummer   END)
+            FROM walk w
+            JOIN p2p.tekst_element p ON p.id = w.parent_id
+            WHERE w.art_nr IS NULL OR w.hfd_nr IS NULL
+        )
+        SELECT origin,
+               max(art_nr) AS artikel_nummer,
+               max(art_op) AS artikel_opschrift,
+               max(hfd_nr) AS hoofdstuk_nummer
+        FROM walk GROUP BY origin
+        """,
+        {"ids": te_ids},
+    )
+    return {r["origin"]: r for r in cur.fetchall()}
+
+
+def verrijk_met_artikel(cur, rows: list[dict]) -> list[dict]:
+    """Voeg artikel_nummer/artikel_opschrift/hoofdstuk_nummer toe aan retrieval-
+    rijen (in-place) op basis van hun `te_id`. No-op als de rijen geen te_id
+    dragen of leeg zijn."""
+    te_ids = [r["te_id"] for r in rows if r.get("te_id") is not None]
+    ctx = resolve_artikel_context(cur, te_ids)
+    for r in rows:
+        c = ctx.get(r.get("te_id"), {})
+        r["artikel_nummer"] = c.get("artikel_nummer")
+        r["artikel_opschrift"] = c.get("artikel_opschrift")
+        r["hoofdstuk_nummer"] = c.get("hoofdstuk_nummer")
+    return rows
+
+
 def killer_query(cur, matched_concept_rows: list[dict],
                  x: float, y: float, limit: int) -> list[dict]:
     """Voer de drie-pads activity-join uit met geo-filter, retourneer regelteksten."""
@@ -249,6 +315,8 @@ def killer_query(cur, matched_concept_rows: list[dict],
             WHERE a.identificatie = ANY(%(act_imow)s)
         )
         SELECT
+            te.id         AS te_id,
+            te.wid        AS wid,
             a.naam        AS activiteit_naam,
             a.identificatie AS activiteit_id,
             te.opschrift  AS artikel,
@@ -319,13 +387,32 @@ def tekst_fallback_query(cur, keywords: list[str], x: float, y: float,
     cur.execute(
         """
         WITH loc_wids AS (
+            -- Pad A: wids van regels die op de locatie gelden via de activiteit-junction
+            -- (alle artikelstructuur-regelingen: omgevingsplan, AMvB, waterschap, OvOv).
             SELECT DISTINCT jr.regeltekst_wid AS wid, jr.regeling_expression AS rexpr
             FROM p2p.activiteit_locatieaanduiding ala
             JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
             JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
             WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+            UNION
+            -- Pad B: wids van alle tekst_elementen in regelingen waarvan
+            -- regelingsgebied de coord raakt — vangt vrijetekst-instrumenten
+            -- (omgevingsvisie, programma, N2000-besluit, projectbesluit) die geen
+            -- juridische_regel hebben en dus via Pad A onbereikbaar zijn. Dezelfde
+            -- scope-filosofie als /v1/semantisch sinds 2026-06-11. Cluster C-fix.
+            SELECT te.wid, te.regeling_expression AS rexpr
+            FROM p2p.regeling r
+            JOIN p2p.locatie_subdiv ls ON ls.identificatie = r.regelingsgebied_id
+            JOIN p2p.tekst_element te ON te.regeling_expression = r.frbr_expression
+            WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+              AND NOT r.inactief
+              AND r.documenttype IN ('Omgevingsvisie','Programma',
+                                     'Aanwijzingsbesluit N2000','Projectbesluit',
+                                     'Toegangsbeperkingsbesluit')
         )
         SELECT DISTINCT ON (te.wid)
+            te.id           AS te_id,
+            te.wid          AS wid,
             ''::text        AS activiteit_naam,
             ''::text        AS activiteit_id,
             te.opschrift    AS artikel,
@@ -369,19 +456,28 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
         matched_rows, ngrams = match_skos_concepts(cur, req.question, req.max_concepts)
 
         if not matched_rows:
-            # SKOS gaf 0 matches — toch de oorspronkelijke vraag-tokens
-            # meesturen zodat de frontend op de letterlijke woorden uit de
-            # vraag kan filteren (specialistische termen zonder SKOS-concept).
+            # SKOS gaf 0 matches (komt voor bij beleids-/visievragen waar het
+            # vocabulaire buiten de SKOS-omgevingsnorm-/activiteit-schema's valt:
+            # "hoogwaterbescherming", "Lelylijn", "broeikasgassen"). Toch een
+            # tekst-fallback proberen met de vraag-tokens als keywords — dekt
+            # vrijetekst-instrumenten (omgevingsvisie/programma) waar de relevante
+            # term letterlijk in de proza staat. Cluster C-fix 2026-06-16.
             vraag_termen_leeg = extract_vraag_chips(cur, req.question)
+            t0 = time.perf_counter()
+            fallback_rows = tekst_fallback_query(
+                cur, vraag_termen_leeg, rd_x, rd_y, req.max_regelteksten,
+            )
+            verrijk_met_artikel(cur, fallback_rows)
+            sql_ms = round((time.perf_counter() - t0) * 1000, 1)
             return RegeltekstenResponse(
-                regelteksten=[],
+                regelteksten=[RegeltekstHit(**r) for r in fallback_rows],
                 matched_concepts=[],
                 expanded_keywords=merge_question_tokens([], req.question),
                 vraag_termen=vraag_termen_leeg,
                 trace=RegeltekstenTrace(
                     tokens_count=len(ngrams),
                     matched_concepts_count=0,
-                    sql_query_ms=0,
+                    sql_query_ms=sql_ms,
                     address_resolution_ms=address_resolution_ms,
                     rd_x=rd_x, rd_y=rd_y,
                 ),
@@ -406,6 +502,10 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
             regel_rows = tekst_fallback_query(
                 cur, domein_keywords, rd_x, rd_y, req.max_regelteksten,
             )
+
+        # Verrijk met de voorouder-Artikel + Hoofdstuk zodat lid-niveau teksten
+        # als "Artikel 2.5 <opschrift> (Hoofdstuk 2)" getoond kunnen worden.
+        verrijk_met_artikel(cur, regel_rows)
         sql_ms = round((time.perf_counter() - t0) * 1000, 1)
 
         # Stap 5 — expanded keywords voor frontend object-filter:
@@ -434,6 +534,10 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
             regeling_expression=r["regeling_expression"],
             documenttype=r["documenttype"],
             inhoud=r["inhoud"],
+            wid=r.get("wid"),
+            artikel_nummer=r.get("artikel_nummer"),
+            artikel_opschrift=r.get("artikel_opschrift"),
+            hoofdstuk_nummer=r.get("hoofdstuk_nummer"),
             join_pad=r["join_pad"],
         )
         for r in regel_rows
