@@ -22,6 +22,7 @@ Per ZIP halen we drie soorten data — alleen UUIDs, geen coördinaten:
 """
 
 from pathlib import Path
+import re
 import zipfile
 
 from lxml import etree
@@ -150,6 +151,85 @@ def extract_gio_basisgeo(zip_path: Path) -> list[tuple[str, str]]:
     return rows
 
 
+# Strip een trailing instantie-suffix als " #10" van een locatie-naam, zodat
+# "bed & breakfast #10" en "bed & breakfast #11" tot één label "bed & breakfast"
+# collapsen (= het groep-label).
+_LOC_SUFFIX = re.compile(r"\s*#\d+\s*$")
+
+
+def _join_labels(labels: list[str]) -> str:
+    """Voeg distinct labels samen met ' / ', gecapt op 5 om mega-strings te
+    vermijden."""
+    naam = " / ".join(labels[:5])
+    if len(labels) > 5:
+        naam += f" (+{len(labels) - 5})"
+    return naam
+
+
+def extract_gio_naam(zip_path: Path) -> dict[str, str]:
+    """Parse alle GIO-GMLs → {gio_frbr: naam}, met een leesbaar label per GIO.
+
+    Een GIO zélf heeft géén naam op versieniveau (geverifieerd: ook simpele
+    TPOD-GIO's niet). De leesbare namen zitten één niveau dieper:
+
+      1. `geo:groepen/geo:Groep/geo:label` (locatiegroep-GIO) — clean labels
+         als "bed & breakfast". Distinct, samengevoegd met ' / '.
+      2. anders: `geo:locaties/geo:Locatie/geo:naam` met een trailing " #n"
+         gestript en gededupliceerd. Dekt zowel single-locatie GIO's
+         ("Bedrijf categorie 2") als groeploze GIO's met benoemde locaties.
+      3. anders: niet opgenomen → naam blijft NULL. Dit zijn anonieme
+         geometrie-dragers (kale-hash FRBR, geen labels/namen); de UI valt
+         daar terug op de FRBR.
+
+    De GIO-identiteit blijft de FRBR (PK van geo_informatieobject); `naam` is
+    puur een leesbaar label.
+    """
+    mapping: dict[str, str] = {}
+    z = zipfile.ZipFile(zip_path)
+    for name in z.namelist():
+        if not name.endswith(".gml"):
+            continue
+        with z.open(name) as f:
+            try:
+                tree = etree.parse(f, _TOLERANT_PARSER)
+            except etree.XMLSyntaxError:
+                continue
+        root = tree.getroot()
+        if not root.tag.endswith("}GeoInformatieObjectVaststelling"):
+            continue
+
+        versie = root.find(
+            "geo:vastgesteldeVersie/geo:GeoInformatieObjectVersie", NS
+        )
+        if versie is None:
+            continue
+        frbr_el = versie.find("geo:FRBRExpression", NS)
+        if frbr_el is None or not frbr_el.text:
+            continue
+        frbr = frbr_el.text.strip()
+
+        # 1. groep-labels (locatiegroep-GIO)
+        labels: list[str] = []
+        for lbl in versie.iterfind("geo:groepen/geo:Groep/geo:label", NS):
+            txt = (lbl.text or "").strip()
+            if txt and txt not in labels:
+                labels.append(txt)
+        if labels:
+            mapping[frbr] = _join_labels(labels)
+            continue
+
+        # 2. locatie-namen (suffix gestript, gededupliceerd)
+        loc_namen: list[str] = []
+        for lnaam in versie.iterfind("geo:locaties/geo:Locatie/geo:naam", NS):
+            txt = _LOC_SUFFIX.sub("", (lnaam.text or "").strip()).strip()
+            if txt and txt not in loc_namen:
+                loc_namen.append(txt)
+        if loc_namen:
+            mapping[frbr] = _join_labels(loc_namen)
+        # 3. niets → naam blijft NULL
+    return mapping
+
+
 # ── DB-updates ───────────────────────────────────────────────────────
 
 def update_locatie_basisgeo(conn, rows: list[tuple[str, str]]) -> int:
@@ -189,7 +269,8 @@ def update_gio_basisgeo(conn, rows: list[tuple[str, str]]) -> int:
 
 
 def insert_missing_gios(conn, gio_rows: list[tuple[str, str]],
-                         regeling_expression: str | None = None) -> int:
+                         regeling_expression: str | None = None,
+                         naam_map: dict[str, str] | None = None) -> int:
     """Vul p2p.geo_informatieobject aan met GIO-FRBRs uit de ZIP die nog
     niet bekend zijn uit ExtIoRef.target_ref (optie A).
 
@@ -197,21 +278,34 @@ def insert_missing_gios(conn, gio_rows: list[tuple[str, str]],
     tekst-content via ExtIoRef worden aangewezen. Voor de drieslag-keten
     is dit nuttig — we kunnen nu ook IntIoRef matchen die toevallig naar
     de huidige expressie verwijst.
+
+    `naam_map` (frbr → geo:naam) vult de leesbare titel. Op bestaande rijen
+    wordt de naam alsnog gezet als die nog NULL is (COALESCE-update), zodat
+    een reguliere loader-run GIO's die al via ExtIoRef bekend waren retroactief
+    van een naam voorziet.
     """
     if not gio_rows:
         return 0
+    naam_map = naam_map or {}
     unique_frbrs = {frbr for frbr, _ in gio_rows}
     inserted = 0
     with conn.cursor() as cur:
         for frbr in unique_frbrs:
+            # RETURNING (xmax = 0) onderscheidt een echte INSERT (xmax 0) van
+            # een DO UPDATE op een bestaande rij, zodat de telling alleen
+            # nieuwe GIO's telt en niet de naam-backfill van bekende rijen.
             cur.execute(
                 """INSERT INTO p2p.geo_informatieobject
-                     (frbr_expression, frbr_work, regeling_expression)
-                   VALUES (%s, %s, %s)
-                   ON CONFLICT (frbr_expression) DO NOTHING""",
-                (frbr, frbr.split("@")[0], regeling_expression),
+                     (frbr_expression, frbr_work, regeling_expression, naam)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (frbr_expression) DO UPDATE
+                     SET naam = COALESCE(p2p.geo_informatieobject.naam, EXCLUDED.naam)
+                   RETURNING (xmax = 0) AS was_insert""",
+                (frbr, frbr.split("@")[0], regeling_expression, naam_map.get(frbr)),
             )
-            inserted += cur.rowcount
+            row = cur.fetchone()
+            if row and row["was_insert"]:
+                inserted += 1
     return inserted
 
 
@@ -229,7 +323,8 @@ def process_zip(zip_path: Path, conn=None,
     try:
         loc_rows = build_locatie_basisgeo_rows(zip_path)
         gio_rows = extract_gio_basisgeo(zip_path)
-        new_gios = insert_missing_gios(conn, gio_rows, regeling_expression)
+        naam_map = extract_gio_naam(zip_path)
+        new_gios = insert_missing_gios(conn, gio_rows, regeling_expression, naam_map)
         loc_inserted = update_locatie_basisgeo(conn, loc_rows)
         gio_inserted = update_gio_basisgeo(conn, gio_rows)
         conn.commit()

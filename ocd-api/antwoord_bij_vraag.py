@@ -32,6 +32,7 @@ from regelteksten_bij_vraag import (
     killer_query,
     resolve_address,
     tekst_fallback_query,
+    verrijk_met_artikel,
 )
 
 logger = logging.getLogger("ocd_api.antwoord")
@@ -132,6 +133,10 @@ def _hit_models(rows: list[dict]) -> list[RegeltekstHit]:
             regeling_expression=r["regeling_expression"],
             documenttype=r["documenttype"],
             inhoud=r["inhoud"],
+            wid=r.get("wid"),
+            artikel_nummer=r.get("artikel_nummer"),
+            artikel_opschrift=r.get("artikel_opschrift"),
+            hoofdstuk_nummer=r.get("hoofdstuk_nummer"),
             join_pad=r["join_pad"],
         )
         for r in rows
@@ -193,6 +198,7 @@ def antwoord_bij_vraag(req: AntwoordRequest):
         if not regel_rows:
             keywords = fetch_expanded_keywords(cur, [r["uri"] for r in matched_rows])
             regel_rows = tekst_fallback_query(cur, keywords, rd_x, rd_y, req.max_regelteksten)
+        verrijk_met_artikel(cur, regel_rows)
         sql_ms = round((time.perf_counter() - t0) * 1000, 1)
 
     bronnen = _hit_models(regel_rows)

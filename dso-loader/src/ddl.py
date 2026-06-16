@@ -233,7 +233,8 @@ CREATE INDEX IF NOT EXISTS idx_tekst_element_inhoud_fts ON p2p.tekst_element
 CREATE TABLE IF NOT EXISTS p2p.geo_informatieobject (
     frbr_expression     TEXT PRIMARY KEY,
     frbr_work           TEXT NOT NULL,
-    regeling_expression TEXT NULL REFERENCES p2p.regeling(frbr_expression)
+    regeling_expression TEXT NULL REFERENCES p2p.regeling(frbr_expression),
+    naam                TEXT NULL    -- geo:naam uit de GIO-GML; leesbare titel voor objectlijsten
 );
 
 CREATE TABLE IF NOT EXISTS p2p.juridische_borging (

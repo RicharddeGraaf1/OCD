@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 from src.loaders.gio_zip import (
     extract_gio_geometrie_ids,
+    extract_gio_naam,
     update_geo_informatieobject_gids,
 )
 
@@ -88,6 +89,22 @@ class TestExtractGioGeometrieIds:
             assert len(result) == 2
             # Beide hebben een eigen UUID
             assert len(set(result.values())) == 2
+
+
+class TestExtractGioNaam:
+    def test_versie_naam_wordt_opgepakt(self):
+        # Bedrijf_categorie_2 is een simpele TPOD-GIO met geo:naam op
+        # versieniveau ('Bedrijf categorie 2').
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = _build_test_zip(Path(tmp), ["Bedrijf_categorie_2.gml"])
+            result = extract_gio_naam(zip_path)
+            assert len(result) == 1
+            assert list(result.values()) == ["Bedrijf categorie 2"]
+
+    def test_geen_gml_levert_lege_mapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = _build_test_zip(Path(tmp), ["GIO001-Bedrijf_categorie_2.xml"])
+            assert extract_gio_naam(zip_path) == {}
 
 
 class TestUpdateGeoInformatieobjectGids:
