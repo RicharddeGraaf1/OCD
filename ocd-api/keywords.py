@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from db import get_conn
+from action_words import ACTION_WORDS
 
 router = APIRouter(prefix="/v1/keywords", tags=["keywords"])
 
@@ -148,6 +149,21 @@ def _tokenize(question: str) -> list[str]:
     cleaned = re.sub(r"[^\w\s\-&]", " ", question.lower())
     tokens = [t for t in cleaned.split() if t and t not in STOP_WORDS and len(t) > 1]
     return tokens
+
+
+_WORD_RE = re.compile(r"[a-zà-ÿ]+")
+
+
+def _is_action_only(term: str) -> bool:
+    """True als élk woord in `term` een actie-werkwoord is (geen inhoud/znw).
+
+    "veranderen" -> True, "overkapping" -> False, "brug aanpassen" -> False
+    (bevat het znw "brug"). Gebruikt om begrippen die alléén via een actie-
+    werkwoord matchten te onderscheiden van begrippen die via een inhoudsterm
+    (znw) matchten. Zie action_words.py / tools/build_action_words.py.
+    """
+    woorden = _WORD_RE.findall(term.lower())
+    return bool(woorden) and all(w in ACTION_WORDS for w in woorden)
 
 
 def _stem_variant(token: str) -> str | None:
@@ -440,6 +456,20 @@ def match_skos_concepts(cur, question: str, max_concepts: int = 5) -> tuple[list
     rows = cur.fetchall()
     if not rows:
         return [], ngrams
+
+    # Woordsoort-filter (znw stuurt, werkwoord corroboreert). Een begrip dat
+    # alléén via een actie-werkwoord matchte ("veranderen", "aanpassen") is een
+    # zwak signaal: dat werkwoord komt als synoniem op tientallen werkzaamheden
+    # voor en sleept onverwante begrippen mee (brug/beschoeiing bij een
+    # overkapping-vraag). Een begrip dat via een inhoudsterm (znw, bv.
+    # "overkapping") matchte is sturend. Zijn er inhouds-begrippen, dan vallen
+    # de puur-werkwoord-begrippen weg. Geen enkel inhouds-begrip (bv. "wat mag
+    # ik hier veranderen") -> alles houden (fallback). Zie action_words.py.
+    content_rows = [r for r in rows
+                    if any(not _is_action_only(t) for t in r["matched_terms"])]
+    if content_rows:
+        rows = content_rows
+
     # IDF-weging: tel per gematchte term hoe vaak 'ie in de SKOS-graaf
     # voorkomt, zodat zeldzame (specifieke) termen zwaarder wegen dan
     # generieke werkwoorden als "bouwen".
