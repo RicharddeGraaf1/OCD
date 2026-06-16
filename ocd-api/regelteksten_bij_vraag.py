@@ -34,7 +34,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from db import get_conn
-from keywords import match_skos_concepts, extract_vraag_chips, _stem_variant, _tokenize
+from keywords import (
+    match_skos_concepts, extract_vraag_chips, _stem_variant, _tokenize,
+    _fetch_freq_per_term,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +165,7 @@ def resolve_address(q: str) -> tuple[float, float, str]:
 # ─────────────────────────────────────────────────────────────────────
 
 
-def merge_question_tokens(expanded: list[str], question: str) -> list[str]:
+def merge_question_tokens(cur, expanded: list[str], question: str) -> list[str]:
     """Voeg de oorspronkelijke tokens van de vraag (+ stem-varianten) toe aan
     expanded_keywords. Dedupe op lowercase, behoud volgorde.
 
@@ -173,12 +176,28 @@ def merge_question_tokens(expanded: list[str], question: str) -> list[str]:
     op deze locatie. In beide gevallen wil je dat de downstream object-filter
     daarop kan matchen, óók zonder dat SKOS er een concept aan koppelt.
 
-    Tokens < 3 letters worden weggefilterd om false positives te beperken.
+    Filter (om over-brede substring-objectmatch te voorkomen):
+      - tokens < 3 letters vallen altijd weg;
+      - tokens die NIET in SKOS voorkomen (freq 0) moeten ≥ 4 letters zijn —
+        zo lekken korte/generieke ruis-woorden niet de objectmatch in, terwijl
+        vaktermen die buiten SKOS vallen ("recreatiewoning", "datacentrum")
+        wél meegaan. Tokens die wél in SKOS staan gaan altijd mee, ook kort
+        (bv. "vee"), want dan is het een bevestigde domein-term.
+
+    Stopwoord-achtige functie-/meta-woorden ("over", "qua", "geldt",
+    "regelgeving", …) zijn al door `_tokenize` (STOP_WORDS) weggefilterd.
     """
     tokens = _tokenize(question)
+    if not tokens:
+        return expanded
     seen = {t.lower() for t in expanded}
+    # SKOS-frequentie per uniek token bepaalt of een niet-bevestigd token
+    # specifiek genoeg is om de objectmatch in te gaan.
+    freq = _fetch_freq_per_term(cur, list({t.lower() for t in tokens}))
     for t in tokens:
         if len(t) < 3:
+            continue
+        if freq.get(t.lower(), 0) == 0 and len(t) < 4:
             continue
         if t.lower() not in seen:
             expanded.append(t)
@@ -472,7 +491,7 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
             return RegeltekstenResponse(
                 regelteksten=[RegeltekstHit(**r) for r in fallback_rows],
                 matched_concepts=[],
-                expanded_keywords=merge_question_tokens([], req.question),
+                expanded_keywords=merge_question_tokens(cur, [], req.question),
                 vraag_termen=vraag_termen_leeg,
                 trace=RegeltekstenTrace(
                     tokens_count=len(ngrams),
@@ -510,7 +529,7 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
 
         # Stap 5 — expanded keywords voor frontend object-filter:
         # SKOS-trefwoorden + de oorspronkelijke vraag-tokens (+ stem-varianten).
-        expanded_keywords = merge_question_tokens(list(domein_keywords), req.question)
+        expanded_keywords = merge_question_tokens(cur, list(domein_keywords), req.question)
 
     matched_summaries = [
         MatchedConceptSummary(

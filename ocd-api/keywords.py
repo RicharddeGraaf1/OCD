@@ -44,6 +44,11 @@ STOP_WORDS: set[str] = {
     "wil", "wilt", "wilde", "willen", "als", "dan", "nog", "al", "maar", "ook", "zo",
     "gebruiken", "doen", "gaan", "komen", "laten", "maken",
     "iets", "wel", "graag", "even", "eigenlijk",
+    # Functie-/meta-woorden die typisch in "wat geldt hier qua ..."-vragen
+    # opduiken: dragen geen domein-inhoud en vervuilen als losse substring
+    # zowel de chip-rij als de objectmatch (bv. "over" matcht "overkapping").
+    "over", "qua", "geldt", "gelden", "geldend", "geldende",
+    "omtrent", "inzake", "betreft", "betreffende", "regelgeving",
 }
 
 
