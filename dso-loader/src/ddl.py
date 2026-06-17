@@ -511,6 +511,17 @@ CREATE TABLE IF NOT EXISTS i2a.toepasbaar_regelbestand (
     regelbeheerobject   TEXT NULL REFERENCES i2a.regelbeheerobject(functionele_structuur_ref)
 );
 
+-- Beslisgraaf (niveau-B DMN-reductie) per regelbestand. De imtr_loader downloadt
+-- de volledige DMN-XML; deze kolom bewaart de gereduceerde, uitvoerbare graaf
+-- (external_variables / nodes met logic+hit_policy / edges) zodat de toepasbare
+-- regel naspeelbaar is. Scalars zijn audit-ankers voor de data-health-laag.
+-- Zie OCD/docs/imtr-beslistabellen-loader-uitbreiding.md.
+ALTER TABLE i2a.toepasbaar_regelbestand
+    ADD COLUMN IF NOT EXISTS beslisgraaf      JSONB NULL,
+    ADD COLUMN IF NOT EXISTS aantal_decisions INT  NULL,
+    ADD COLUMN IF NOT EXISTS aantal_regels    INT  NULL,
+    ADD COLUMN IF NOT EXISTS heeft_logica     BOOLEAN NOT NULL DEFAULT FALSE;
+
 CREATE TABLE IF NOT EXISTS i2a.dmn_element (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     regelbestand_ns     TEXT NOT NULL REFERENCES i2a.toepasbaar_regelbestand(namespace) ON DELETE CASCADE,
