@@ -308,6 +308,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
             f"""
             SELECT r.opschrift AS regeling, r.documenttype,
                    ocd_artikel_label(te.opschrift, te.wid) AS artikel, te.inhoud,
+                   te.wid AS wid, r.frbr_expression AS regeling_expression,
                    string_agg(DISTINCT a.naam, ' | ') AS activiteit,
                    string_agg(DISTINCT ala.kwalificatie, ' | ') AS kwalificatie
             FROM p2p.activiteit_locatieaanduiding ala
@@ -319,7 +320,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
             LEFT JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
             WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
             {combined_filter}
-            GROUP BY r.opschrift, r.documenttype, te.opschrift, te.wid, te.inhoud
+            GROUP BY r.opschrift, r.documenttype, te.opschrift, te.wid, te.inhoud, r.frbr_expression
             """,
             (x, y, *combined_params),
         )
@@ -358,7 +359,8 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                     cur.execute(
                         f"""
                         SELECT r.opschrift AS regeling, r.documenttype,
-                               ocd_artikel_label(te.opschrift, te.wid) AS artikel, te.inhoud
+                               ocd_artikel_label(te.opschrift, te.wid) AS artikel, te.inhoud,
+                               te.wid AS wid, r.frbr_expression AS regeling_expression
                         FROM p2p.tekst_element te
                         JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
                         WHERE r.frbr_work = %s
@@ -380,6 +382,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                         """
                         SELECT r.opschrift AS regeling, r.documenttype,
                                ocd_artikel_label(te.opschrift, te.wid) AS artikel, te.inhoud,
+                               te.wid AS wid, r.frbr_expression AS regeling_expression,
                                ts_rank(
                                  to_tsvector('dutch', coalesce(te.inhoud_plain, '')),
                                  to_tsquery('dutch', %s)
@@ -439,7 +442,8 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
         cur.execute(
             f"""
             SELECT r.opschrift AS regeling, r.documenttype,
-                   ocd_artikel_label(te.opschrift, te.wid) AS artikel, te.inhoud
+                   ocd_artikel_label(te.opschrift, te.wid) AS artikel, te.inhoud,
+                   te.wid AS wid, r.frbr_expression AS regeling_expression
             FROM p2p.tekst_element te
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE r.documenttype IN ('Omgevingsvisie', 'Programma')
@@ -576,11 +580,41 @@ def vraag_op_locatie(req: RegeltekstenRequest):
     rows = list(geldt.get("ow_regels") or []) + list(geldt.get("visies") or [])
     ranked = rank_regelteksten(rows, req.question, skos_weights)
 
+    # Map naar de RegeltekstenBijVraag-respons-vorm zodat de viewer deze endpoint
+    # 1-op-1 kan gebruiken i.p.v. /v1/regelteksten-bij-vraag (RegeltekstHit-velden).
+    hits = [{
+        "activiteit_naam": (r.get("activiteit") or ""),
+        "activiteit_id": "",
+        "artikel": r.get("artikel"),
+        "artikel_nummer": None,
+        "artikel_opschrift": r.get("artikel"),
+        "hoofdstuk_nummer": None,
+        "regeling": r.get("regeling"),
+        "regeling_expression": r.get("regeling_expression"),
+        "documenttype": r.get("documenttype"),
+        "inhoud": r.get("inhoud") or "",
+        "wid": r.get("wid"),
+        "join_pad": "vraag-op-locatie",
+        "relevantie": r.get("_relevance_score"),
+    } for r in ranked[: req.max_regelteksten]]
+
+    expanded, seen = [], set()
+    for k in scored:
+        t = (k.get("term") or "")
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            expanded.append(t)
+
     return {
-        "regelteksten": ranked[: req.max_regelteksten],
-        "matched_concepts": [
-            {"naam": r["naam"], "score": round(r["score"], 2)} for r in rows_skos
-        ],
+        "regelteksten": hits,
+        "matched_concepts": [{
+            "uri": r.get("uri"), "naam": r["naam"], "scheme": r.get("scheme_naam"),
+            "matched_terms": r.get("matched_terms") or [],
+            "werkzaamheid_urn": r.get("werkzaamheid_urn"),
+            "activiteit_imow_id": r.get("activiteit_imow_id"),
+            "score": round(r["score"], 2),
+        } for r in rows_skos],
+        "expanded_keywords": expanded,
         "keywords": scored,
         "rd_x": rd_x, "rd_y": rd_y,
     }

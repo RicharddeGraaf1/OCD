@@ -27,6 +27,7 @@ from pathlib import Path
 import httpx
 
 API = os.getenv("OCD_API_BASE", "http://127.0.0.1:8001")
+ENDPOINT = os.getenv("OCD_ENDPOINT", "/v1/regelteksten-bij-vraag")
 HERE = Path(__file__).resolve().parent
 SNAPSHOT = HERE.parent / "viewer_golden_set.json"
 # casuslijst uit de bot-repo (zelfde 13 gevallen als de retrieval-eval)
@@ -56,7 +57,7 @@ def _payload(case: dict) -> dict:
 
 def _snapshot_case(client: httpx.Client, case: dict) -> dict:
     resp = client.post(
-        f"{API}/v1/regelteksten-bij-vraag",
+        f"{API}{ENDPOINT}",
         json=_payload(case),
         timeout=60,
     )
