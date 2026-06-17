@@ -18,9 +18,20 @@ from antwoord_bij_vraag import router as antwoord_router
 from db import get_conn, pool
 from expand import router as expand_router
 from kennis import router as kennis_router
-from keywords import router as keywords_router
+from keywords import (
+    build_scored_keywords,
+    match_skos_concepts,
+    router as keywords_router,
+)
 from ponsenkaart import router as ponsenkaart_router
-from regelteksten_bij_vraag import router as regelteksten_router
+from rank import rank_regelteksten
+from regelteksten_bij_vraag import (
+    RegeltekstenRequest,
+    fetch_expanded_keywords,
+    fetch_trefw_broader,
+    resolve_address,
+    router as regelteksten_router,
+)
 from semantisch import router as semantisch_router
 from vergunningen import router as vergunningen_router
 
@@ -521,6 +532,58 @@ def locatie(
     """Wat geldt op RD-coordinaten?"""
     kw_list = [kw.strip() for kw in zoektermen.split(",") if kw.strip()] if zoektermen else None
     return _wat_geldt_hier(x, y, zoektermen=kw_list)
+
+
+@app.post("/v1/vraag-op-locatie", dependencies=[Depends(verify_key)])
+def vraag_op_locatie(req: RegeltekstenRequest):
+    """Gedeelde retrieval-engine (convergentie richting B): de bot-engine
+    server-side — brede ophaal (`_wat_geldt_hier`) + geporte bot-rank
+    (`rank_regelteksten`) + gewogen SKOS. Eén bron die de viewer (en later de
+    bot) kan gebruiken i.p.v. `killer_query`. Zie vault "Plan refactor gedeelde
+    retrieval-laag bot en viewer" §richting B.
+    """
+    rd_x, rd_y = req.x, req.y
+    if req.location and (rd_x is None or rd_y is None):
+        rd_x, rd_y, _ = resolve_address(req.location)
+    if rd_x is None or rd_y is None:
+        raise HTTPException(400, "Geef location of x/y op.")
+
+    with get_conn() as conn, conn.cursor() as cur:
+        rows_skos, _ng = match_skos_concepts(cur, req.question, req.max_concepts)
+        uris = [r["uri"] for r in rows_skos]
+        trefw_by_uri, broader_by_uri = fetch_trefw_broader(cur, uris) if uris else ({}, {})
+        scored = build_scored_keywords(req.question, rows_skos, trefw_by_uri, broader_by_uri)
+    # zoektermen voor de brede ophaal = concept-NAMEN + letterlijke vraag-termen
+    # (zoals de bot). Bewust NIET de volledige trefwoord-cloud (fetch_expanded_keywords):
+    # dat maakt de _wat_geldt_hier-filter te breed → statement timeout (r08). De
+    # vraag-termen erbij zorgen dat _wat_geldt_hier ook bij 0 concepten op de vraag
+    # filtert en de provinciale verordening surfacet (r24 Zeeland).
+    zoektermen = [r["naam"] for r in rows_skos]
+    zoektermen += re.findall(r"[a-zà-ÿ0-9]{4,}", req.question.lower())
+    zoektermen = list(dict.fromkeys(zoektermen))
+
+    # Gewogen-SKOS-map (identiek aan de bot): woordsoort × relevantie.
+    skos_weights: dict[str, float] = {}
+    for k in scored:
+        term = (k.get("term") or "").strip().lower()
+        if not term or len(term) < 3:
+            continue
+        w = (0.5 if k.get("is_actie") else 1.0) * float(k.get("relevantie") or 0.0)
+        if w > skos_weights.get(term, 0.0):
+            skos_weights[term] = w
+
+    geldt = _wat_geldt_hier(rd_x, rd_y, zoektermen=list(zoektermen) or None)
+    rows = list(geldt.get("ow_regels") or []) + list(geldt.get("visies") or [])
+    ranked = rank_regelteksten(rows, req.question, skos_weights)
+
+    return {
+        "regelteksten": ranked[: req.max_regelteksten],
+        "matched_concepts": [
+            {"naam": r["naam"], "score": round(r["score"], 2)} for r in rows_skos
+        ],
+        "keywords": scored,
+        "rd_x": rd_x, "rd_y": rd_y,
+    }
 
 
 @app.get("/v1/zoek", dependencies=[Depends(verify_key)])
