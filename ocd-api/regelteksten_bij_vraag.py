@@ -794,3 +794,21 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
             rd_x=rd_x, rd_y=rd_y,
         ),
     )
+
+
+@router.post("/fast-path")
+def fast_path_endpoint(req: RegeltekstenRequest):
+    """Lichtgewicht gedeelde bron voor bot én viewer: intent + deterministisch
+    norm-`fast_path`, zónder SKOS/killer_query/LLM. De bot consulteert dit vóór
+    zijn eigen norm-Path-A zodat bot en viewer hetzelfde exacte antwoord geven
+    (één bron voor de deterministische norm-logica). Geeft None-fast_path bij
+    ambiguïteit → caller valt terug op zijn eigen (rijkere) logica."""
+    rd_x, rd_y = req.x, req.y
+    if req.location and (rd_x is None or rd_y is None):
+        rd_x, rd_y, _ = resolve_address(req.location)
+    info = detect_intent(req.question)
+    fp = None
+    if info["intent"] == "norm" and rd_x is not None and rd_y is not None and info["norm_naam"]:
+        with get_conn() as conn, conn.cursor() as cur:
+            fp = norm_fast_path(cur, rd_x, rd_y, info["norm_naam"])
+    return {"intent": info["intent"], "fast_path": fp, "rd_x": rd_x, "rd_y": rd_y}
