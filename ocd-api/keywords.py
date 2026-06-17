@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from db import get_conn
 from action_words import ACTION_WORDS
+from intent import detect_activiteit, detect_bestemming, detect_intent, detect_norm
 
 router = APIRouter(prefix="/v1/keywords", tags=["keywords"])
 
@@ -141,6 +142,13 @@ class ExtractResponse(BaseModel):
         description="V7: gewogen trefwoorden met bron-tag. Bedoeld als input "
                     "voor /v1/objecten en /v1/regels (passeer als term:gewicht-paren).",
     )
+    # Gedeelde intent-detectie (intent.py) — single source voor bot én viewer.
+    # De drie losse detector-resultaten (onafhankelijk, zoals de bot ze gebruikt)
+    # plus de precedentie-`intent` (norm>activiteit>bestemming) voor de viewer.
+    norm_naam: str | None = Field(None, description="Norm-detector: naam-query, of None.")
+    soort: str | None = Field(None, description="Activiteit-detector: soort, of None.")
+    bestemming: bool = Field(False, description="Bestemming-detector: True bij bestemming-patroon.")
+    intent: str = Field("algemeen", description="Precedentie-intent: norm|activiteit|bestemming|algemeen.")
     trace: ExtractTrace
 
 
@@ -572,6 +580,13 @@ def match_skos_concepts(cur, question: str, max_concepts: int = 5) -> tuple[list
 @router.post("/extract", response_model=ExtractResponse)
 def extract(req: ExtractRequest):
     """Vind SKOS-concepten die op de vraag passen, en geef zoektermen terug."""
+    # Gedeelde intent-detectie (single source met de bot): onafhankelijke
+    # detector-resultaten + precedentie-intent. Alleen regex op de vraag.
+    _norm = detect_norm(req.question)
+    _soort = detect_activiteit(req.question)
+    _best = detect_bestemming(req.question)
+    _intent = detect_intent(req.question)["intent"]
+
     with get_conn() as conn, conn.cursor() as cur:
         rows, ngrams = match_skos_concepts(cur, req.question, req.max_concepts)
         tokens = _tokenize(req.question)
@@ -585,6 +600,7 @@ def extract(req: ExtractRequest):
                 matched_concepts=[],
                 expanded_keywords=[],
                 keywords=[ScoredKeyword(**k) for k in scored],
+                norm_naam=_norm, soort=_soort, bestemming=_best, intent=_intent,
                 trace=ExtractTrace(
                     tokens=tokens, ngrams_tried=len(ngrams),
                     ngrams_matched=0, sql_match_rows=0,
@@ -649,6 +665,7 @@ def extract(req: ExtractRequest):
             matched_concepts=matched_concepts,
             expanded_keywords=expanded,
             keywords=[ScoredKeyword(**k) for k in scored],
+            norm_naam=_norm, soort=_soort, bestemming=_best, intent=_intent,
             trace=ExtractTrace(
                 tokens=tokens,
                 ngrams_tried=len(ngrams),
