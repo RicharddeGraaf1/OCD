@@ -61,7 +61,7 @@ def rank_regelteksten(
         score = 0.0
         tekst = _tekst(rt).lower()
 
-        if (rt.get("inhoud") or rt.get("tekst") or rt.get("content")) and len(tekst) > 50:
+        if (rt.get("inhoud") or rt.get("tekst") or rt.get("documentTekst") or rt.get("content")) and len(tekst) > 50:
             score += 3.0
 
         if tekst:
@@ -71,8 +71,20 @@ def rank_regelteksten(
                 score += sum(1 for kw in topic_kw if kw in tekst) * 3.0
             score += sum(1 for kw in location_kw if kw in tekst) * 1.0
 
-        # Bestuurslaag-bonus: lokaal > waterschap > provincie > rijk.
-        btext = f"{rt.get('regeling') or ''} {rt.get('documenttype') or ''}".lower()
+        # Source-priority (zoals bot `_rank_by_relevance`): annotaties/structuur >
+        # Presenteren > overig. Alleen bot-rijen dragen `bron`; _wat_geldt_hier-rijen
+        # niet → dan geen bonus (ongewijzigd viewer-gedrag).
+        bron = rt.get("bron") or ""
+        if "annotaties" in bron or "documentstructuur" in bron:
+            score += 2.0
+        elif "Presenteren" in bron:
+            score += 1.0
+
+        # Bestuurslaag-bonus: lokaal > waterschap > provincie > rijk. Veld-tolerant:
+        # _wat_geldt_hier-rijen dragen regeling/documenttype; bot-rijen document_titel
+        # /opgesteldDoor — beide meenemen zodat de rank in beide contexten klopt.
+        btext = (f"{rt.get('regeling') or ''} {rt.get('document_titel') or ''} "
+                 f"{rt.get('documenttype') or ''} {rt.get('opgesteldDoor') or ''}").lower()
         if "gemeente" in btext or "omgevingsplan" in btext:
             score += 4.0
         elif "waterschap" in btext or "hoogheemraadschap" in btext:

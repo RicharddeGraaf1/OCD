@@ -620,6 +620,23 @@ def vraag_op_locatie(req: RegeltekstenRequest):
     }
 
 
+class RankRequest(BaseModel):
+    question: str
+    rows: list[dict] = []
+    skos_weights: dict[str, float] = {}
+
+
+@app.post("/v1/rank", dependencies=[Depends(verify_key)])
+def rank_endpoint(req: RankRequest):
+    """Rank-only (performante 2.4): rangschik rijen die de client AL heeft, met de
+    gedeelde `rank_regelteksten`. Geen DB-fetch, geen SKOS → goedkoop. De bot
+    delegeert hiermee alleen de ranking i.p.v. de hele retrieval → rank-logica op
+    één plek (gedeeld met de viewer via /v1/vraag-op-locatie) zonder dubbele ophaal.
+    """
+    ranked = rank_regelteksten(req.rows, req.question, req.skos_weights or None)
+    return {"regelteksten": ranked}
+
+
 @app.get("/v1/zoek", dependencies=[Depends(verify_key)])
 def zoek(q: str = Query(..., min_length=2), limit: int = Query(20, le=100)):
     """Full-text ILIKE zoek over Ow + Wro teksten."""
