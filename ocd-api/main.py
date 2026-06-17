@@ -498,10 +498,35 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
     return {"ow_regels": ow, "wro_bestemmingen": wro, "visies": visies}
 
 
+def _rank_geldt(geldt: dict, vraag: str, top_k: int = 20) -> list[dict]:
+    """Performante 2.4 ("ranking meeleveren"): rank de ow_regels+visies die net zijn
+    opgehaald, server-side met de gedeelde `rank_regelteksten` (zelfde als de viewer),
+    en geef alleen top_k terug. Zo verlaat de ongerankte (soms grote) set OCD nooit —
+    geen tweede fetch, geen grote HTTP-payload. SKOS-gewichten worden uit de vraag
+    afgeleid (lichte query; niet de trage _wat_geldt_hier)."""
+    rows = list(geldt.get("ow_regels") or []) + list(geldt.get("visies") or [])
+    if not rows:
+        return []
+    with get_conn() as conn, conn.cursor() as cur:
+        rows_skos, _ = match_skos_concepts(cur, vraag, 5)
+        uris = [r["uri"] for r in rows_skos]
+        trefw, broader = fetch_trefw_broader(cur, uris) if uris else ({}, {})
+        scored = build_scored_keywords(vraag, rows_skos, trefw, broader)
+    weights: dict[str, float] = {}
+    for k in scored:
+        t = (k.get("term") or "").strip().lower()
+        if t and len(t) >= 3:
+            w = (0.5 if k.get("is_actie") else 1.0) * float(k.get("relevantie") or 0.0)
+            if w > weights.get(t, 0.0):
+                weights[t] = w
+    return rank_regelteksten(rows, vraag, weights)[:top_k]
+
+
 @app.get("/v1/adres", dependencies=[Depends(verify_key)])
 def adres(
     q: str = Query(..., description="Adres (bijv. 'Prinsengracht 263, Amsterdam')"),
     zoektermen: str = Query("", description="Komma-gescheiden zoektermen voor server-side filtering"),
+    vraag: str = Query("", description="Optioneel: vraag waarop server-side gerankt wordt; voegt `ranked` (top-K) toe"),
 ):
     """Wat geldt op een adres? Cross-regime: Ow-regels + Wro-bestemmingen.
 
@@ -520,10 +545,13 @@ def adres(
     coords = doc["centroide_rd"].replace("POINT(", "").replace(")", "").split()
     x, y = float(coords[0]), float(coords[1])
     kw_list = [kw.strip() for kw in zoektermen.split(",") if kw.strip()] if zoektermen else None
+    geldt = _wat_geldt_hier(x, y, zoektermen=kw_list)
+    if vraag:
+        geldt["ranked"] = _rank_geldt(geldt, vraag)
     return {
         "adres": doc.get("weergavenaam", q),
         "rd": {"x": x, "y": y},
-        **_wat_geldt_hier(x, y, zoektermen=kw_list),
+        **geldt,
     }
 
 
@@ -532,10 +560,14 @@ def locatie(
     x: float = Query(...),
     y: float = Query(...),
     zoektermen: str = Query("", description="Komma-gescheiden zoektermen"),
+    vraag: str = Query("", description="Optioneel: vraag waarop server-side gerankt wordt; voegt `ranked` (top-K) toe"),
 ):
     """Wat geldt op RD-coordinaten?"""
     kw_list = [kw.strip() for kw in zoektermen.split(",") if kw.strip()] if zoektermen else None
-    return _wat_geldt_hier(x, y, zoektermen=kw_list)
+    geldt = _wat_geldt_hier(x, y, zoektermen=kw_list)
+    if vraag:
+        geldt["ranked"] = _rank_geldt(geldt, vraag)
+    return geldt
 
 
 @app.post("/v1/vraag-op-locatie", dependencies=[Depends(verify_key)])
