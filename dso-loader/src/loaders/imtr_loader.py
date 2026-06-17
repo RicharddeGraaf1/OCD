@@ -462,6 +462,40 @@ def _load_werkzaamheden(conn) -> dict:
     return stats
 
 
+# Activiteit-URN-patroon zoals het in de functioneleStructuurRef voorkomt, bv.
+# .../id/concept/Conclusie<nl.imow-mnre1034.activiteit.ATActTestAanslg>.
+_ACTIVITEIT_URN_RX = r'nl\.imow-[a-z0-9]+\.activiteit\.[A-Za-z0-9_]+'
+
+
+def backfill_rbo_activiteit(conn) -> int:
+    """Koppel regelbeheerobjecten aan hun activiteit via de functioneleStructuurRef.
+
+    De activiteit-identificatie zit ingebakken in de fsr (achter het
+    Conclusie/Indieningsvereisten-prefix). We extraheren 'm en zetten
+    `activiteit_id` — FK-veilig, dus alleen waar de activiteit in p2p bestaat.
+    Order-onafhankelijk: draai dit ná zowel de p2p- als de i2a-load.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE i2a.regelbeheerobject rbo
+               SET activiteit_id = sub.urn
+               FROM (
+                   SELECT functionele_structuur_ref AS fsr,
+                          substring(functionele_structuur_ref FROM %s) AS urn
+                   FROM i2a.regelbeheerobject
+               ) sub
+               WHERE rbo.functionele_structuur_ref = sub.fsr
+                 AND sub.urn IS NOT NULL
+                 AND rbo.activiteit_id IS DISTINCT FROM sub.urn
+                 AND EXISTS (SELECT 1 FROM p2p.activiteit a WHERE a.identificatie = sub.urn)""",
+            (_ACTIVITEIT_URN_RX,),
+        )
+        n = cur.rowcount
+    conn.commit()
+    console.print(f"  [green]{n} regelbeheerobjecten gekoppeld aan activiteit[/green]")
+    return n
+
+
 def load_imtr_for(organisatie_code: str, naam: str):
     """Load IMTR content for a specific bestuursorgaan."""
     conn = get_conn()
@@ -473,6 +507,7 @@ def load_imtr_for(organisatie_code: str, naam: str):
             count, oin = result, ""
         if oin:
             _load_sttr_regelbestanden(conn, oin, naam)
+        backfill_rbo_activiteit(conn)
     finally:
         conn.close()
 
@@ -488,6 +523,7 @@ def load_imtr():
             count, oin = result, cfg.POC_OIN
         _load_sttr_regelbestanden(conn, oin or cfg.POC_OIN, cfg.POC_GEMEENTE_NAAM)
         _load_werkzaamheden(conn)
+        backfill_rbo_activiteit(conn)
         console.print("[bold green]IMTR loading complete![/bold green]")
     finally:
         conn.close()
