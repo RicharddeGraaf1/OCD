@@ -391,11 +391,27 @@ def load_wro_structuurvisies_cmd(niveau, code):
 
 
 @cli.command("load-imtr")
-def load_imtr():
+@click.option("--overheid", "-o", default=None,
+              help="Overheidscode (bv. ws0372, pv26). Default: PoC-gemeente.")
+@click.option("--alle-ontbrekend", is_flag=True,
+              help="Laad alle bronhouders met imtr_geladen=False.")
+@click.option("--bestuurslaag", default=None,
+              help="Filter de batch op bestuurslaag (provincie/waterschap/gemeente).")
+def load_imtr(overheid, alle_ontbrekend, bestuurslaag):
     """Load toepasbare regels (RTR activiteiten + STTR regelbestanden)."""
-    from src.loaders.imtr_loader import load_imtr
-    console.print(f"[bold]Loading IMTR[/bold] for {cfg.POC_GEMEENTE_NAAM} (OIN {cfg.POC_OIN})")
-    load_imtr()
+    from src.loaders.imtr_loader import load_imtr as _load_imtr
+    from src.loaders.imtr_loader import load_imtr_bronhouder, load_imtr_ontbrekend
+
+    if alle_ontbrekend:
+        console.print(f"[bold]Loading IMTR[/bold] — alle ontbrekende bronhouders"
+                      f"{f' ({bestuurslaag})' if bestuurslaag else ''}")
+        load_imtr_ontbrekend(bestuurslaag)
+    elif overheid:
+        console.print(f"[bold]Loading IMTR[/bold] for {overheid}")
+        load_imtr_bronhouder(overheid)
+    else:
+        console.print(f"[bold]Loading IMTR[/bold] for {cfg.POC_GEMEENTE_NAAM} (OIN {cfg.POC_OIN})")
+        _load_imtr()
 
 
 @cli.command("load-ow")

@@ -527,3 +527,70 @@ def load_imtr():
         console.print("[bold green]IMTR loading complete![/bold green]")
     finally:
         conn.close()
+
+
+def load_imtr_bronhouder(overheidscode: str):
+    """Laad IMTR voor één bronhouder op overheidscode (bv. ws0372, pv26).
+
+    De RTR-organisatieCode is de KALE numerieke code (zonder gm/pv/ws-prefix);
+    gemeente "gm0344" → "0344", waterschap "ws0372" → "0372". Markeert
+    core.bronhouder.imtr_geladen na afloop, zodat een batch-load weet wat nog mist.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT naam, label FROM core.bronhouder WHERE overheidscode = %s",
+                (overheidscode,),
+            )
+            row = cur.fetchone()
+        naam = (row["label"] or row["naam"]) if row else overheidscode
+        bare = re.sub(r"^[a-z]+", "", overheidscode)
+
+        result = _load_rtr_activiteiten(conn, bare, naam)
+        oin = result[1] if isinstance(result, tuple) else ""
+        if oin:
+            _load_sttr_regelbestanden(conn, oin, naam)
+        backfill_rbo_activiteit(conn)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE core.bronhouder SET imtr_geladen = TRUE WHERE overheidscode = %s",
+                (overheidscode,),
+            )
+        conn.commit()
+        console.print(f"[bold green]IMTR geladen voor {naam} ({overheidscode})[/bold green]")
+    finally:
+        conn.close()
+
+
+def load_imtr_ontbrekend(bestuurslaag: str | None = None) -> int:
+    """Laad IMTR voor alle bronhouders met imtr_geladen=False.
+
+    Optioneel gefilterd op bestuurslaag (bv. 'provincie' of 'waterschap'), zodat je
+    de pv/ws-dekking gericht kunt aanvullen zonder alle gemeenten opnieuw te raken.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if bestuurslaag:
+                cur.execute(
+                    """SELECT overheidscode FROM core.bronhouder
+                       WHERE NOT imtr_geladen AND bestuurslaag = %s ORDER BY overheidscode""",
+                    (bestuurslaag,),
+                )
+            else:
+                cur.execute(
+                    "SELECT overheidscode FROM core.bronhouder WHERE NOT imtr_geladen ORDER BY overheidscode"
+                )
+            codes = [r["overheidscode"] for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+    console.print(f"  {len(codes)} bronhouders te laden{f' ({bestuurslaag})' if bestuurslaag else ''}")
+    for code in codes:
+        try:
+            load_imtr_bronhouder(code)
+        except Exception as exc:  # noqa: BLE001 — één bronhouder mag de batch niet stoppen
+            console.print(f"  [yellow]{code} faalde: {exc}[/yellow]")
+    return len(codes)
