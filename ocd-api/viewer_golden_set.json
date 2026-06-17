@@ -1,0 +1,4240 @@
+[
+  {
+    "id": "r01-maximale-bouwhoogte-amersfoort",
+    "question": "Wat is hier de maximale bouwhoogte?",
+    "location": "154799, 466865",
+    "n_regelteksten": 1,
+    "top_regelingen": [
+      "Omgevingsplan gemeente Amersfoort"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Omgevingsplan gemeente Amersfoort",
+        "artikel": "5.9",
+        "join_pad": "tekst_fallback",
+        "relevantie": 2.5406
+      }
+    ],
+    "matched_concepts": [
+      {
+        "naam": "bouwhoogte",
+        "score": 0.59
+      }
+    ],
+    "expanded_keywords": [
+      "bouwhoogte",
+      "maximale"
+    ],
+    "scored_keywords": [
+      {
+        "term": "bouwhoogte",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "maximale",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "maximale bouwhoogte",
+        "relevantie": 0.95,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r05-maximale-bouwhoogte-amersfoort",
+    "question": "Wat is hier de maximale bouwhoogte?",
+    "location": "Boldershof 32 3811GN Amersfoort",
+    "n_regelteksten": 2,
+    "top_regelingen": [
+      "Omgevingsplan gemeente Amersfoort"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Omgevingsplan gemeente Amersfoort",
+        "artikel": "22.31",
+        "join_pad": "tekst_fallback",
+        "relevantie": 0.5906
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Amersfoort",
+        "artikel": "22.28",
+        "join_pad": "tekst_fallback",
+        "relevantie": 0.5906
+      }
+    ],
+    "matched_concepts": [
+      {
+        "naam": "bouwhoogte",
+        "score": 0.59
+      }
+    ],
+    "expanded_keywords": [
+      "bouwhoogte",
+      "maximale"
+    ],
+    "scored_keywords": [
+      {
+        "term": "bouwhoogte",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "maximale",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "maximale bouwhoogte",
+        "relevantie": 0.95,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r08-winkel-beginnen-hilversum",
+    "question": "Mag ik hier een winkel beginnen?",
+    "location": "'s-Gravelandseweg 9, 1211BN Hilversum",
+    "n_regelteksten": 5,
+    "top_regelingen": [
+      "Omgevingsplan gemeente Hilversum",
+      "Omgevingsvisie Hilversum 2040"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Omgevingsplan gemeente Hilversum",
+        "artikel": "22.12",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.5269
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Hilversum",
+        "artikel": "22.12",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.1134
+      },
+      {
+        "regeling": "Omgevingsvisie Hilversum 2040",
+        "artikel": "Kostenverhaal",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0489
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Hilversum",
+        "artikel": "6.15",
+        "join_pad": "tekst_fallback",
+        "relevantie": 0.6642
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Hilversum",
+        "artikel": "22.7",
+        "join_pad": "tekst_fallback",
+        "relevantie": 0.6642
+      }
+    ],
+    "matched_concepts": [
+      {
+        "naam": "Woning, bedrijfspand of ander nieuw gebouw bouwen",
+        "score": 0.11
+      },
+      {
+        "naam": "Groepen mensen ontvangen of huisvesten in een gebouw of op een terrein",
+        "score": 0.11
+      },
+      {
+        "naam": "Detailhandel of ambachtsbedrijf",
+        "score": 0.1
+      },
+      {
+        "naam": "Bestaand gebouw verbouwen",
+        "score": 0.09
+      },
+      {
+        "naam": "Bouwwerk of deel van een bouwwerk slopen, of asbest verwijderen",
+        "score": 0.08
+      }
+    ],
+    "expanded_keywords": [
+      "BSO",
+      "BSO starten",
+      "Bestaand gebouw verbouwen",
+      "Bouwwerk of deel van een bouwwerk slopen, of asbest verwijderen",
+      "Detailhandel of ambachtsbedrijf",
+      "Groepen mensen ontvangen of huisvesten in een gebouw of op een terrein",
+      "PV-paneel",
+      "Woning, bedrijfspand of ander nieuw gebouw bouwen",
+      "aanbouw",
+      "aanbouw slopen",
+      "aanrijdbeveiliging",
+      "aardpen",
+      "achterdeur",
+      "afbreken",
+      "afdak",
+      "afvalbak",
+      "afvalcontainer",
+      "afvoerpijp",
+      "ambachtsbedrijf",
+      "amoveren",
+      "apotheek",
+      "appartementen bouwen",
+      "arkel",
+      "artistiek kunstwerk weghalen",
+      "asbest",
+      "asbest dak verwijderen",
+      "asbest golfplaten verwijderen",
+      "asbest saneren",
+      "asbest verwijderen",
+      "automaterialenwinkel",
+      "avondwinkel",
+      "babyspeciaalzaak",
+      "badkamer verbouwen",
+      "bakkerij",
+      "balkon",
+      "balkon plaatsen",
+      "balkon uitbreiden",
+      "balkon vergroten",
+      "balkon verwijderen",
+      "balkonafscheiding",
+      "balkonscherm",
+      "ballenvanger weghalen",
+      "bank",
+      "banketbakkerij",
+      "basketbalpaal",
+      "bedrijfsgebouw",
+      "bedrijfsgebouw bouwen",
+      "bedrijfspand",
+      "bedrijfspand bouwen",
+      "beeldhouwwerk",
+      "beeldhouwwerk weghalen",
+      "beginn",
+      "beginnen",
+      "bejaardentehuis",
+      "bemalingsinstallatie",
+      "berging",
+      "bestaand gebouw",
+      "bibliotheek",
+      "bijbehorend bouwwerk",
+      "bijgebouw",
+      "bijkeuken",
+      "bioscoop",
+      "blokhut",
+      "boeideel",
+      "boerderijwinkel",
+      "boothuis slopen",
+      "bouwcentrum",
+      "bouwen woning",
+      "bouwlaag",
+      "bouwmarkt",
+      "bouwwerk",
+      "bouwwerk brandveilig gebruiken",
+      "bouwwerk slopen",
+      "bovenleiding",
+      "brandmeldinstallatie",
+      "brandtrap",
+      "brandveilig gebruik",
+      "brandveilig gebruiken",
+      "brandveilig gebruiksmelding",
+      "brandveiligheid",
+      "bubbelbad",
+      "buitendeur",
+      "buitenfitness",
+      "buitengevel",
+      "buitenkeuken",
+      "buitenschools",
+      "buitenschoolse opvang",
+      "buitenschoolse opvang starten",
+      "bungalow",
+      "bungalow bouwen",
+      "bushok",
+      "buspoortje",
+      "bussluis",
+      "café",
+      "carport",
+      "casino",
+      "chalet",
+      "chocolaterie",
+      "computerservice",
+      "congrescentrum",
+      "constructie wijzigen",
+      "constructieve doorbraak",
+      "constructieve wijziging",
+      "dak isoleren",
+      "dak verbouwen",
+      "dakgoot",
+      "dakisolatie",
+      "dakkapel",
+      "daklicht",
+      "dakopbouw",
+      "dakpan",
+      "dakpannen",
+      "dakpannen vernieuwen",
+      "dakpannen vervangen",
+      "dakplaat",
+      "dakplaten",
+      "dakplaten vernieuwen",
+      "dakplaten vervangen",
+      "dakraam",
+      "dakrenovatie",
+      "dakserre",
+      "dakterras",
+      "dakterras aanleggen",
+      "dakterrassen",
+      "daktuin",
+      "dakverhoging",
+      "delicatessenwinkel",
+      "demonteren",
+      "detailhandel",
+      "dierenverblijf",
+      "dierenwinkel",
+      "discotheek",
+      "doe-het-zelfwinkel",
+      "doorbraak",
+      "doorbreken",
+      "draagconstructie aanpassen",
+      "draagconstructie verwijderen",
+      "draagmuur doorbreken",
+      "draagmuur slopen",
+      "draagmuur verwijderen",
+      "draaimolen",
+      "drogisterij",
+      "edelsmid",
+      "elektriciteitsopwekking",
+      "elektronica",
+      "entresolvloer",
+      "erker",
+      "etage",
+      "etenswaren verkopen",
+      "extra verdieping",
+      "faunapassage",
+      "fietsenberging",
+      "fietsenhok",
+      "fietsenschuur",
+      "fietsenstalling",
+      "fietsenwinkel",
+      "flitspaal",
+      "fotowinkel",
+      "fourniturenwinkel",
+      "functie veranderen",
+      "funderen",
+      "fundering",
+      "funderingsherstel",
+      "garage",
+      "garage slopen",
+      "garagebox",
+      "gastenverblijf",
+      "gebouw bouwen",
+      "gebouw slopen",
+      "gebouw verbouwen",
+      "gebruiksmelding",
+      "gereedschap verkopen",
+      "gereedschapmaker",
+      "gevangenis",
+      "gevel",
+      "gevelbekleding",
+      "gevelpaneel",
+      "gevelplaat",
+      "glijbaan",
+      "goal",
+      "goudsmid",
+      "groencentrum",
+      "groentewinkel",
+      "groepen mensen ontvangen",
+      "groepsaccommodatie",
+      "grondanode",
+      "heat pipes",
+      "heien",
+      "heipaal",
+      "hobbydierenverblijf",
+      "hobbyruimte",
+      "hondenhok",
+      "hoofdgebouw",
+      "hoofdgebouw bouwen",
+      "hotel",
+      "hottub",
+      "houthandel",
+      "houtskeletschuur",
+      "huis",
+      "huis bouwen",
+      "huis slopen",
+      "huis verbouwen",
+      "hut",
+      "ijzerwaren verkopen",
+      "infiltratievoorziening",
+      "inlaat",
+      "instrumentmaker",
+      "intern verbouwen",
+      "interne verbouwing",
+      "isolatie dak",
+      "isolatieplaat",
+      "jacuzzi",
+      "kaasmakerij",
+      "kaaswinkel",
+      "kabelbaan",
+      "kamer",
+      "kamer verhuren",
+      "kamers verhuren",
+      "kamerverhuur",
+      "kampeerwinkel",
+      "kantine",
+      "kantoor",
+      "kantoorgebouw",
+      "kelder",
+      "kelder bouwen",
+      "kelder maken",
+      "kelderwand",
+      "kerk",
+      "keuken",
+      "keuken verbouwen",
+      "keukeninrichting verkopen",
+      "kinderdagverblijf",
+      "kinderopvang",
+      "kippenhok",
+      "kippenren",
+      "kledingwinkel",
+      "kledingzaak",
+      "klimrek",
+      "klimtoestel",
+      "klokkenmaker",
+      "knikarmscherm",
+      "koekoek",
+      "koelcel",
+      "koeling",
+      "koffiebranderij",
+      "kozijn",
+      "kozijninvulling",
+      "kuilvoerplaat",
+      "kunststof kozijn",
+      "kunstwerk artistiek",
+      "laadpaal",
+      "lantaarn",
+      "lantaarnpaal",
+      "levensmiddelenwinkel",
+      "lichtkoepel",
+      "lichtmast",
+      "lichtstraat",
+      "lift",
+      "loggia",
+      "logiesgebouw",
+      "loods",
+      "lozingspunt",
+      "lozingsvoorziening",
+      "luifel",
+      "luik",
+      "mantelzorgunit",
+      "mantelzorgwoning",
+      "markies",
+      "melding brandveilig gebruik",
+      "melktank",
+      "mestplaat",
+      "mestsilo",
+      "meubelwinkel",
+      "moskee",
+      "motel",
+      "museum",
+      "muur doorbreken",
+      "nieuw bedrijfspand",
+      "nieuw gebouw",
+      "nieuw gebouw bouwen",
+      "nieuw huis bouwen",
+      "nieuwbouw",
+      "nieuwbouw appartementen",
+      "nieuwbouwwoning",
+      "nieuwbouwwoningen",
+      "nieuwe dakpannen",
+      "nieuwe dakplaten",
+      "nieuwe verdieping",
+      "nokverhoging",
+      "non-food verkopen",
+      "nutsvoorziening",
+      "ombouw",
+      "ondergrondse huisvuilcontainer",
+      "onderkelderen",
+      "opbouw",
+      "opbouw plaatsen",
+      "opslagruimte",
+      "optoppen",
+      "optopping",
+      "overdekte parkeerplaats",
+      "overstortvoorziening",
+      "paal",
+      "paardenstal",
+      "pand",
+      "parfumerie",
+      "parkeergarage",
+      "pergola",
+      "perronmeubilair",
+      "plaatsen",
+      "poelier",
+      "poolhouse",
+      "prieel",
+      "pui",
+      "raam",
+      "recreatief nachtverblijf",
+      "recreatiewoning",
+      "rekstok",
+      "renovatie",
+      "renovatie dak",
+      "renoveren",
+      "restaurant",
+      "restaureren",
+      "retail",
+      "rijwielhandel",
+      "riooloverstort",
+      "rolhek",
+      "rolluik",
+      "rolpoort",
+      "romney",
+      "rookkanaal aanleggen",
+      "sanitairwinkel",
+      "schoenwinkel",
+      "schommel",
+      "school",
+      "schoolgebouw",
+      "schoorsteen afbreken",
+      "schoorsteen plaatsen",
+      "schoorsteen slopen",
+      "schoorsteen vervangen",
+      "schoorsteen weghalen",
+      "schuifdeur",
+      "schuifpui",
+      "schuur",
+      "schuur slopen",
+      "screens",
+      "sculptuur",
+      "seinpaal",
+      "serre",
+      "silo",
+      "sirene",
+      "slagerij",
+      "slijterij",
+      "sloop",
+      "sloop garage",
+      "sloop gebouw",
+      "sloop schoorsteen",
+      "sloop schuur",
+      "sloop woning",
+      "sloopmelding",
+      "sloopvergunning",
+      "sloopwerkzaamheden",
+      "slopen",
+      "slopen schoorsteen",
+      "souterrain",
+      "speciaalzaak",
+      "speelhuis",
+      "speeltoestel",
+      "speeltuin",
+      "spoelwatertank",
+      "sporthal",
+      "sportkantine",
+      "sportschool",
+      "sporttoestel",
+      "sporttribune",
+      "stadion",
+      "stal",
+      "standbeeld",
+      "standbeeld weghalen",
+      "stoffenwinkel",
+      "straatmeubilair",
+      "strandpaviljoen",
+      "supermarkt",
+      "synagoge",
+      "taludbak",
+      "taludtrap",
+      "tentoonstellingsgebouw",
+      "textielservice",
+      "textielwinkel",
+      "theater",
+      "tiny house",
+      "tiny house bouwen",
+      "tiny house plaatsen",
+      "tolpoort",
+      "traiteur",
+      "transformatorhuisje",
+      "transformatorstation",
+      "trap",
+      "tribune",
+      "trimbaan",
+      "tuincentrum",
+      "tuinhuis",
+      "tuinhuis slopen",
+      "tuinkamer",
+      "tuinkantoor",
+      "tuinmeubilair",
+      "tweedehandsgoederen verkopen",
+      "uitbouw",
+      "uitlaatconstructie",
+      "uitstroomgoot",
+      "uitstroomvoorziening",
+      "uitvalscherm",
+      "universiteit",
+      "vakantiehuis",
+      "vakantiewoning",
+      "vaste bloembak",
+      "vaste trap",
+      "vaste trap plaatsen",
+      "venster",
+      "veranda",
+      "verbouw woning",
+      "verbouwen",
+      "verbouwen woning",
+      "verbouwing",
+      "verdieping toevoegen",
+      "verkeersbord",
+      "verkeerszuil",
+      "verkopen",
+      "vernieuwen",
+      "vervangen",
+      "vervangen dakpannen",
+      "vervangen dakplaten",
+      "verwijderen",
+      "verwijderen asbest",
+      "verzorgingshuis",
+      "vide",
+      "vijver",
+      "villa",
+      "villa bouwen",
+      "vishandel",
+      "visverwerking",
+      "viswinkel",
+      "vlaggenmast",
+      "vlaggenstok",
+      "vloer",
+      "vloer isoleren",
+      "vloer slopen",
+      "vloer vervangen",
+      "vloerenhandel",
+      "vloerisolatie",
+      "vloerverwarming aanleggen",
+      "voedersilo",
+      "vogelkijkhut",
+      "vogelkijkhut weghalen",
+      "voordeur",
+      "wandconstructie aanpassen",
+      "warenhuis",
+      "warmteopwekking",
+      "watersportwinkel",
+      "wateruitlaat",
+      "webshop",
+      "wegaanduiding",
+      "weghalen",
+      "werkplaats",
+      "whirlpool",
+      "wijkgebouw",
+      "winkel",
+      "winkel bouwen",
+      "winkelcentrum",
+      "wip",
+      "wipkip",
+      "witgoed verkopen",
+      "woning",
+      "woning bouwen",
+      "woning slopen",
+      "woning verbouwen",
+      "woningbouw",
+      "woningen bouwen",
+      "woninginrichting",
+      "woongebouw",
+      "woonhuis",
+      "woonhuis bouwen",
+      "woonlaag",
+      "woonunit",
+      "woonunit plaatsen",
+      "woonwagen",
+      "woonwagen plaatsen",
+      "woonzorgcomplex",
+      "zandbak",
+      "ziekenhuis",
+      "zilversmid",
+      "zolderlicht",
+      "zolderraam",
+      "zonneboiler",
+      "zonnecel",
+      "zonnecollector",
+      "zonnepaneel",
+      "zonnewijzer",
+      "zonwering",
+      "zwembad",
+      "zwemvijver"
+    ],
+    "scored_keywords": [
+      {
+        "term": "beginnen",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "winkel",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "winkel beginnen",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "Groepen mensen ontvangen of huisvesten in een gebouw of op een terrein",
+        "relevantie": 0.8,
+        "is_actie": false
+      },
+      {
+        "term": "Bouwwerk of deel van een bouwwerk slopen, of asbest verwijderen",
+        "relevantie": 0.8,
+        "is_actie": false
+      },
+      {
+        "term": "Woning, bedrijfspand of ander nieuw gebouw bouwen",
+        "relevantie": 0.8,
+        "is_actie": false
+      },
+      {
+        "term": "Detailhandel of ambachtsbedrijf",
+        "relevantie": 0.8,
+        "is_actie": false
+      },
+      {
+        "term": "Bestaand gebouw verbouwen",
+        "relevantie": 0.8,
+        "is_actie": false
+      },
+      {
+        "term": "bouwwerk brandveilig gebruiken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "ondergrondse huisvuilcontainer",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "buitenschoolse opvang starten",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "asbest golfplaten verwijderen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tweedehandsgoederen verkopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "draagconstructie verwijderen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "artistiek kunstwerk weghalen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "brandveilig gebruiksmelding",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "melding brandveilig gebruik",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "draagconstructie aanpassen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "keukeninrichting verkopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "wandconstructie aanpassen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vloerverwarming aanleggen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "groepen mensen ontvangen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "recreatief nachtverblijf",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nieuwbouw appartementen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "constructieve wijziging",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "constructieve doorbraak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "elektriciteitsopwekking",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "overdekte parkeerplaats",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tentoonstellingsgebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "infiltratievoorziening",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "asbest dak verwijderen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "beeldhouwwerk weghalen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bedrijfsgebouw bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "brandveilig gebruiken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "buitenschoolse opvang",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schoorsteen vervangen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "draagmuur verwijderen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "ballenvanger weghalen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vogelkijkhut weghalen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "appartementen bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "brandmeldinstallatie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "automaterialenwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "gereedschap verkopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "levensmiddelenwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakplaten vernieuwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "draagmuur doorbreken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "verdieping toevoegen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "rookkanaal aanleggen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakpannen vernieuwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "constructie wijzigen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schoorsteen plaatsen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bemalingsinstallatie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "uitstroomvoorziening",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schoorsteen weghalen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "transformatorstation",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bijbehorend bouwwerk",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schoorsteen afbreken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "overstortvoorziening",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bedrijfspand bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tiny house plaatsen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nieuw gebouw bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "brandveilig gebruik",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "etenswaren verkopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "ijzerwaren verkopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vervangen dakpannen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakplaten vervangen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vervangen dakplaten",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakpannen vervangen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakterras aanleggen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vaste trap plaatsen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "hobbydierenverblijf",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "transformatorhuisje",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kunstwerk artistiek",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "standbeeld weghalen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "hoofdgebouw bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nieuw bedrijfspand",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woonwagen plaatsen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "groepsaccommodatie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "delicatessenwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "doe-het-zelfwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "functie veranderen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "badkamer verbouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "interne verbouwing",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "uitlaatconstructie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schoorsteen slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "balkon verwijderen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "lozingsvoorziening",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sloopwerkzaamheden",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "asbest verwijderen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "slopen schoorsteen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "verwijderen asbest",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "aanrijdbeveiliging",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tiny house bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nieuw huis bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nieuwbouwwoningen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woonunit plaatsen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kinderdagverblijf",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "non-food verkopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "fourniturenwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "funderingsherstel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nieuwe verdieping",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "balkon uitbreiden",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sloop schoorsteen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "balkonafscheiding",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "babyspeciaalzaak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "watersportwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "gereedschapmaker",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woninginrichting",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "witgoed verkopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nieuwe dakpannen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "gebouw verbouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "verbouwen woning",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "draagmuur slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "balkon vergroten",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woning verbouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "keuken verbouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "extra verdieping",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "intern verbouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nieuwe dakplaten",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "houtskeletschuur",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "mantelzorgwoning",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kunststof kozijn",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bungalow bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nieuwbouwwoning",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woningen bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woonhuis bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "strandpaviljoen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bejaardentehuis",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "brandveiligheid",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "verzorgingshuis",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kamers verhuren",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woonzorgcomplex",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "gebruiksmelding",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "koffiebranderij",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "instrumentmaker",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "ambachtsbedrijf",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "boerderijwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "computerservice",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "muur doorbreken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vloer vervangen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "opbouw plaatsen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "balkon plaatsen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bestaand gebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nutsvoorziening",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "straatmeubilair",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kozijninvulling",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "fietsenstalling",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "perronmeubilair",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "warmteopwekking",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bouwwerk slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tuinhuis slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "recreatiewoning",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sloopvergunning",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "boothuis slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bedrijfsgebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "congrescentrum",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kamer verhuren",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sanitairwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "banketbakkerij",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "textielservice",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vloer isoleren",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "verbouw woning",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "huis verbouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dierenverblijf",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "afvalcontainer",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "riooloverstort",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "asbest saneren",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "aanbouw slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "mantelzorgunit",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vakantiewoning",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vaste bloembak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "gevelbekleding",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "zonnecollector",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "fietsenberging",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "gastenverblijf",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "spoelwatertank",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kantoorgebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bouwen woning",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "gebouw bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "winkel bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woning bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "buitenschools",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "parkeergarage",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "winkelcentrum",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "groentewinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "rijwielhandel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "textielwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vloerenhandel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kledingwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kampeerwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "stoffenwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "visverwerking",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "fietsenwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kelder bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vloerisolatie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "renovatie dak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dak verbouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "onderkelderen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "entresolvloer",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "basketbalpaal",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "buitenfitness",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "gebouw slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tuinmeubilair",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woning slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "wegaanduiding",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "uitstroomgoot",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schuur slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kuilvoerplaat",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "garage slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "isolatieplaat",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "knikarmscherm",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "fietsenschuur",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "beeldhouwwerk",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "villa bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bedrijfspand",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nieuw gebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kinderopvang",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "universiteit",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sportkantine",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kamerverhuur",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schoolgebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sporttribune",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "logiesgebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "chocolaterie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "speciaalzaak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dierenwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schoenwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "detailhandel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "klokkenmaker",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "meubelwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "groencentrum",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kelder maken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "nokverhoging",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakverhoging",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakrenovatie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dak isoleren",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakterrassen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "isolatie dak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "speeltoestel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "balkonscherm",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sporttoestel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vloer slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sloop garage",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "buitenkeuken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "verkeerszuil",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vakantiehuis",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "lantaarnpaal",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sloop gebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sloopmelding",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bovenleiding",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "opslagruimte",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sloop schuur",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "verkeersbord",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sloop woning",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "faunapassage",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "uitvalscherm",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "wateruitlaat",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vogelkijkhut",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "hoofdgebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "huis bouwen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sportschool",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "BSO starten",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bibliotheek",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kaasmakerij",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "avondwinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "drogisterij",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tuincentrum",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "elektronica",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bouwcentrum",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kledingzaak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "restaureren",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakisolatie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "zonnewijzer",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vlaggenmast",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "paardenstal",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "zonnepaneel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "lichtkoepel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "zonneboiler",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "huis slopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "verwijderen",
+        "relevantie": 0.7,
+        "is_actie": true
+      },
+      {
+        "term": "gevelpaneel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "klimtoestel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tuinkantoor",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "hobbyruimte",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "zolderlicht",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vlaggenstok",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "lozingspunt",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "buitengevel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "lichtstraat",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vernieuwen",
+        "relevantie": 0.7,
+        "is_actie": true
+      },
+      {
+        "term": "tiny house",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "grondanode",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woningbouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woongebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "wijkgebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "restaurant",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "supermarkt",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "gevangenis",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "discotheek",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "zilversmid",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "houthandel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "fotowinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "parfumerie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kaaswinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kelderwand",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "souterrain",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "doorbreken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vaste trap",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "ziekenhuis",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "verbouwing",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "werkplaats",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "zwemvijver",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "demonteren",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "voedersilo",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "draaimolen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "fietsenhok",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "afvoerpijp",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "buitendeur",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "achterdeur",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "gevelplaat",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "heat pipes",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schuifdeur",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "zolderraam",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "buspoortje",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "standbeeld",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "fundering",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woonwagen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vervangen",
+        "relevantie": 0.7,
+        "is_actie": true
+      },
+      {
+        "term": "nieuwbouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "warenhuis",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vishandel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bouwmarkt",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "slijterij",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "viswinkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "verbouwen",
+        "relevantie": 0.7,
+        "is_actie": true
+      },
+      {
+        "term": "renoveren",
+        "relevantie": 0.7,
+        "is_actie": true
+      },
+      {
+        "term": "optopping",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "renovatie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakplaten",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakopbouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakterras",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "doorbraak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakpannen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "brandtrap",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "poolhouse",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "zonwering",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "whirlpool",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "speeltuin",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kippenhok",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bijkeuken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tuinkamer",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "lichtmast",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "mestplaat",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schuifpui",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bijgebouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kabelbaan",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "hondenhok",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "PV-paneel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "garagebox",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kippenren",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bubbelbad",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "speelhuis",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "flitspaal",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sculptuur",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "taludtrap",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "plaatsen",
+        "relevantie": 0.7,
+        "is_actie": true
+      },
+      {
+        "term": "bungalow",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woonunit",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woonhuis",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "funderen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bioscoop",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sporthal",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "synagoge",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "slagerij",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "traiteur",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "goudsmid",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "verkopen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bakkerij",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "apotheek",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "edelsmid",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakplaat",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "optoppen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woonlaag",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bouwlaag",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bouwwerk",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "trimbaan",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "lantaarn",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "rolpoort",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "seinpaal",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tuinhuis",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakserre",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "glijbaan",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "taludbak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "afbreken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "afvalbak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "amoveren",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "melktank",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "weghalen",
+        "relevantie": 0.7,
+        "is_actie": true
+      },
+      {
+        "term": "zonnecel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakkapel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "boeideel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bussluis",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "voordeur",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "laadpaal",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tolpoort",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "daklicht",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "mestsilo",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schommel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "aardpen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "heipaal",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "tribune",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "zwembad",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "theater",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kantoor",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kantine",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "stadion",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "webshop",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "poelier",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "koekoek",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "daktuin",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "aanbouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "koelcel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakgoot",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "zandbak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "markies",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "blokhut",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "screens",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "venster",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "carport",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "jacuzzi",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "koeling",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "veranda",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "pergola",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "berging",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "rolluik",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "rekstok",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakraam",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "klimrek",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "uitbouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "woning",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kelder",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "casino",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "school",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "museum",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "moskee",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "retail",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "balkon",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "dakpan",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "keuken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "loggia",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "opbouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sirene",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "chalet",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "ombouw",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "schuur",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "slopen",
+        "relevantie": 0.7,
+        "is_actie": true
+      },
+      {
+        "term": "hottub",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "wipkip",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "romney",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "prieel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "inlaat",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "garage",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kozijn",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bushok",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vijver",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "rolhek",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "asbest",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "luifel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "villa",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "heien",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "motel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "hotel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vloer",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kamer",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "etage",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "sloop",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "erker",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "arkel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "loods",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "serre",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "gevel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "afdak",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "paal",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "pand",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "huis",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "kerk",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "café",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "lift",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vide",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "trap",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bank",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "raam",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "goal",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "silo",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "stal",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "luik",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "BSO",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "pui",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "wip",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "hut",
+        "relevantie": 0.7,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r11-houtzagerij-beginnen-tytsjerksteradiel",
+    "question": "Mag ik hier een houtzagerij beginnen?",
+    "location": "Krúspaed 9, 9264TE Earnewâld",
+    "n_regelteksten": 3,
+    "top_regelingen": [
+      "Omgevingsplan gemeente Tytsjerksteradiel"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Omgevingsplan gemeente Tytsjerksteradiel",
+        "artikel": "22.157",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.1604
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Tytsjerksteradiel",
+        "artikel": "22.154",
+        "join_pad": "tekst_fallback",
+        "relevantie": 0.7
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Tytsjerksteradiel",
+        "artikel": "22.155",
+        "join_pad": "tekst_fallback",
+        "relevantie": 0.7
+      }
+    ],
+    "matched_concepts": [
+      {
+        "naam": "Bedrijf in de papierindustrie, houtindustrie, textielindustrie of leerindustrie",
+        "score": 0.33
+      }
+    ],
+    "expanded_keywords": [
+      "Bedrijf in de papierindustrie, houtindustrie, textielindustrie of leerindustrie",
+      "OSB",
+      "beginn",
+      "beginnen",
+      "behandelen",
+      "bleken",
+      "bloemen verven",
+      "chemische stoffen",
+      "complexe houtindustrie",
+      "complexe papierindustrie",
+      "complexe textielindustrie",
+      "conservering",
+      "hout conserveren",
+      "houtindustrie",
+      "houtproducten",
+      "houtproducten conserveren",
+      "houtverduurzaming",
+      "houtzagerij",
+      "industrie",
+      "karton",
+      "leerindustrie",
+      "looien van huiden",
+      "ontharen van huiden",
+      "oppervlaktebehandeling",
+      "oriented strand board",
+      "papier",
+      "papierindustrie",
+      "papierpulp",
+      "papierstof",
+      "planten coaten",
+      "spaanplaat",
+      "textiel",
+      "textielindustrie",
+      "textielveredeling",
+      "textielververij",
+      "textielvezels",
+      "textielweverij",
+      "timmerfabriek",
+      "vezelplaat",
+      "werkplaats"
+    ],
+    "scored_keywords": [
+      {
+        "term": "houtzagerij",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "beginnen",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "houtzagerij beginnen",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "Bedrijf in de papierindustrie, houtindustrie, textielindustrie of leerindustrie",
+        "relevantie": 0.8,
+        "is_actie": false
+      },
+      {
+        "term": "complexe textielindustrie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "houtproducten conserveren",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "complexe papierindustrie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "oppervlaktebehandeling",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "complexe houtindustrie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "oriented strand board",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "ontharen van huiden",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "textielveredeling",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "looien van huiden",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "houtverduurzaming",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "chemische stoffen",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "textielindustrie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "hout conserveren",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "papierindustrie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "textielververij",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bloemen verven",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "textielweverij",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "planten coaten",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "houtindustrie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "leerindustrie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "textielvezels",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "houtproducten",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "timmerfabriek",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "conservering",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "spaanplaat",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "werkplaats",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "papierpulp",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "behandelen",
+        "relevantie": 0.7,
+        "is_actie": true
+      },
+      {
+        "term": "papierstof",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "vezelplaat",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "industrie",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "textiel",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "bleken",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "karton",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "papier",
+        "relevantie": 0.7,
+        "is_actie": false
+      },
+      {
+        "term": "OSB",
+        "relevantie": 0.7,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r15-dakopbouw-bouwen-utrecht",
+    "question": "Mag ik hier een dakopbouw bouwen?",
+    "location": "Does 30, 3453MD De Meern",
+    "n_regelteksten": 5,
+    "top_regelingen": [
+      "Omgevingsplan gemeente Utrecht"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Omgevingsplan gemeente Utrecht",
+        "artikel": "4.22",
+        "join_pad": "tekst_fallback",
+        "relevantie": 2.503
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Utrecht",
+        "artikel": "4.23",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.553
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Utrecht",
+        "artikel": "1.1",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.553
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Utrecht",
+        "artikel": "4.42",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.553
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Utrecht",
+        "artikel": "4.21",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.3906
+      }
+    ],
+    "matched_concepts": [
+      {
+        "naam": "bouw",
+        "score": 1.0
+      },
+      {
+        "naam": "dakopbouw",
+        "score": 0.59
+      }
+    ],
+    "expanded_keywords": [
+      "bouw",
+      "dakopbouw"
+    ],
+    "scored_keywords": [
+      {
+        "term": "dakopbouw",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "bouwen",
+        "relevantie": 1.0,
+        "is_actie": true
+      },
+      {
+        "term": "dakopbouw bouwen",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "bouw",
+        "relevantie": 0.8,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r18-dakkapel-bouwen-utrecht",
+    "question": "Mag ik hier een dakkapel bouwen?",
+    "location": "Does 30, 3453MD De Meern",
+    "n_regelteksten": 7,
+    "top_regelingen": [
+      "Besluit bouwwerken leefomgeving",
+      "Omgevingsplan gemeente Utrecht"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Omgevingsplan gemeente Utrecht",
+        "artikel": "4.43",
+        "join_pad": "activiteit_uri",
+        "relevantie": 2.9138
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Utrecht",
+        "artikel": "4.20",
+        "join_pad": "activiteit_uri",
+        "relevantie": 2.9138
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Utrecht",
+        "artikel": "4.1",
+        "join_pad": "activiteit_uri",
+        "relevantie": 2.9138
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Utrecht",
+        "artikel": "4.1",
+        "join_pad": "activiteit_uri",
+        "relevantie": 2.9138
+      },
+      {
+        "regeling": "Besluit bouwwerken leefomgeving",
+        "artikel": "2.27",
+        "join_pad": "activiteit_uri",
+        "relevantie": 2.9138
+      },
+      {
+        "regeling": "Besluit bouwwerken leefomgeving",
+        "artikel": "2.27",
+        "join_pad": "activiteit_uri",
+        "relevantie": 2.9138
+      },
+      {
+        "regeling": "Besluit bouwwerken leefomgeving",
+        "artikel": "2.27",
+        "join_pad": "activiteit_uri",
+        "relevantie": 2.9138
+      }
+    ],
+    "matched_concepts": [
+      {
+        "naam": "Dakkapel bouwen",
+        "score": 2.36
+      },
+      {
+        "naam": "dakkapel bouwen",
+        "score": 2.36
+      },
+      {
+        "naam": "bouw",
+        "score": 1.0
+      }
+    ],
+    "expanded_keywords": [
+      "bouw",
+      "dakkapel",
+      "dakkapel bouwen"
+    ],
+    "scored_keywords": [
+      {
+        "term": "dakkapel",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "bouwen",
+        "relevantie": 1.0,
+        "is_actie": true
+      },
+      {
+        "term": "dakkapel bouwen",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "bouw",
+        "relevantie": 0.8,
+        "is_actie": false
+      },
+      {
+        "term": "Activiteit gereguleerd in het omgevingsplan gemeente Utrecht",
+        "relevantie": 0.6,
+        "is_actie": false
+      },
+      {
+        "term": "Bouwactiviteit (technisch)",
+        "relevantie": 0.6,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r24-doden-zwervende-damherten-zeeland",
+    "question": "Welke regels gelden hier t.a.v. het doden van zwervende damherten?",
+    "location": "Perceel Westkapelle (WKP00) F 2523",
+    "n_regelteksten": 20,
+    "top_regelingen": [
+      "Nationaal Programma Ruimte voor Defensie",
+      "Omgevingsplan gemeente Veere",
+      "Omgevingsvisie Veere 2047"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Omgevingsplan gemeente Veere",
+        "artikel": "22.12",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Veere",
+        "artikel": "22.241",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Veere",
+        "artikel": "22.247",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Veere",
+        "artikel": "22.60",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsplan gemeente Veere",
+        "artikel": "22.300",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsvisie Veere 2047",
+        "artikel": "Veerse opgaven",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Nationaal Programma Ruimte voor Defensie",
+        "artikel": "Planologisch proces gericht op snelle uitvoering",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Nationaal Programma Ruimte voor Defensie",
+        "artikel": null,
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Nationaal Programma Ruimte voor Defensie",
+        "artikel": null,
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Nationaal Programma Ruimte voor Defensie",
+        "artikel": null,
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      }
+    ],
+    "matched_concepts": [],
+    "expanded_keywords": [
+      "damhert",
+      "damherten",
+      "doden",
+      "welke",
+      "zwervende"
+    ],
+    "scored_keywords": [
+      {
+        "term": "zwervende",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "damherten",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "welke",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "doden",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "doden zwervende damherten",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "welke doden zwervende",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "zwervende damherten",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "doden zwervende",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "welke doden",
+        "relevantie": 0.95,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r28-overstromingskans-fryslan",
+    "question": "Wat is hier de overstromingskans?",
+    "location": "Krúspaed 9, 9264TE Earnewâld",
+    "n_regelteksten": 3,
+    "top_regelingen": [
+      "Besluit kwaliteit leefomgeving",
+      "Omgevingsverordening Fryslân 2022"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Besluit kwaliteit leefomgeving",
+        "artikel": "11.11",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Besluit kwaliteit leefomgeving",
+        "artikel": "11.9",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsverordening Fryslân 2022",
+        "artikel": "3.7",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      }
+    ],
+    "matched_concepts": [],
+    "expanded_keywords": [
+      "overstromingskan",
+      "overstromingskans"
+    ],
+    "scored_keywords": [
+      {
+        "term": "overstromingskans",
+        "relevantie": 1.0,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r29-overstromingskans-fryslan",
+    "question": "Wat is hier de overstromingskans?",
+    "location": "Perceel Oostermeer (OTM00) K 530",
+    "n_regelteksten": 2,
+    "top_regelingen": [
+      "Besluit kwaliteit leefomgeving"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Besluit kwaliteit leefomgeving",
+        "artikel": "11.11",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Besluit kwaliteit leefomgeving",
+        "artikel": "11.9",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      }
+    ],
+    "matched_concepts": [],
+    "expanded_keywords": [
+      "overstromingskan",
+      "overstromingskans"
+    ],
+    "scored_keywords": [
+      {
+        "term": "overstromingskans",
+        "relevantie": 1.0,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r33-kans-wateroverlast-overijssel",
+    "question": "Wat is hier de kans op wateroverlast?",
+    "location": "Welle 23D, 7411CC Deventer",
+    "n_regelteksten": 7,
+    "top_regelingen": [
+      "Besluit activiteiten leefomgeving",
+      "Nationale Omgevingsvisie"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Besluit activiteiten leefomgeving",
+        "artikel": "2.2",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.5906
+      },
+      {
+        "regeling": "Nationale Omgevingsvisie",
+        "artikel": "Waarborgen van de waterveiligheid en de klimaatbestendigheid (inclusief vitale infrastructuur voor water en mobiliteit)",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.5906
+      },
+      {
+        "regeling": "Nationale Omgevingsvisie",
+        "artikel": "Een klimaatbestendige delta",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.5906
+      },
+      {
+        "regeling": "Nationale Omgevingsvisie",
+        "artikel": "Klimaatbestendigheid en waterrobuustheid",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.5906
+      },
+      {
+        "regeling": "Nationale Omgevingsvisie",
+        "artikel": "Beleidskeuze 1.1",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.5906
+      },
+      {
+        "regeling": "Nationale Omgevingsvisie",
+        "artikel": "Beleidskeuze 2.2",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.5906
+      },
+      {
+        "regeling": "Nationale Omgevingsvisie",
+        "artikel": "Beleidskeuze 4.1",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.5906
+      }
+    ],
+    "matched_concepts": [
+      {
+        "naam": "wateroverlast",
+        "score": 0.59
+      }
+    ],
+    "expanded_keywords": [
+      "kans",
+      "wateroverlast"
+    ],
+    "scored_keywords": [
+      {
+        "term": "wateroverlast",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "kans",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "kans wateroverlast",
+        "relevantie": 0.95,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r34-beleid-hoogwaterbescherming-ienw",
+    "question": "Wat is hier het beleid t.a.v. hoogwaterbescherming?",
+    "location": "Rijnstraat 1-13, 6916BC Tolkamer",
+    "n_regelteksten": 20,
+    "top_regelingen": [
+      "Omgevingsvisie Zevenaar 2040",
+      "Regionale Energie Strategie Groene Metropoolregio Arnhem-Nijmegen"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Omgevingsvisie Zevenaar 2040",
+        "artikel": "Open ruimtes in bebouwingstructuren (Lintbebouwing)",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsvisie Zevenaar 2040",
+        "artikel": "Nieuwe mogelijkheden",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsvisie Zevenaar 2040",
+        "artikel": "Effectscores",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Regionale Energie Strategie Groene Metropoolregio Arnhem-Nijmegen",
+        "artikel": "Lokaal energie opwekken en consumeren: local for local",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsvisie Zevenaar 2040",
+        "artikel": "Algemeen",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Regionale Energie Strategie Groene Metropoolregio Arnhem-Nijmegen",
+        "artikel": "Regionale visie op het Decentrale Energiesysteem",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsvisie Zevenaar 2040",
+        "artikel": "Algemeen",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Regionale Energie Strategie Groene Metropoolregio Arnhem-Nijmegen",
+        "artikel": "Regionaal Uitvoeringsplan Energiesysteem",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Regionale Energie Strategie Groene Metropoolregio Arnhem-Nijmegen",
+        "artikel": "Milieueffectonderzoek: vooral kansen voor windenergie langs grote doorgaande wegen",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsvisie Zevenaar 2040",
+        "artikel": "Afwegingskader",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      }
+    ],
+    "matched_concepts": [],
+    "expanded_keywords": [
+      "beleid",
+      "hoogwaterbescherming"
+    ],
+    "scored_keywords": [
+      {
+        "term": "hoogwaterbescherming",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "beleid",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "beleid hoogwaterbescherming",
+        "relevantie": 0.95,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r38-lange-termijnvisie-doorontwikk-vro-neder-betuwe",
+    "question": "Welke lange termijnvisie is hier op een doorontwikkeling van de Betuwelijn?",
+    "location": "Saneringsweg 3a, IJzendoorn",
+    "n_regelteksten": 20,
+    "top_regelingen": [
+      "Omgevingsvisie Neder-Betuwe",
+      "Programma Buitengebied gemeente Neder-Betuwe",
+      "Programma Economie gemeente Neder-Betuwe 2024-2028",
+      "Wijziging omgevingsplan gemeente Neder-Betuwe, deelgebied Kernen"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Omgevingsvisie Neder-Betuwe",
+        "artikel": "Kennisinstrumenten &amp; uitgangspunten beleidscyclus",
+        "join_pad": "tekst_fallback",
+        "relevantie": 2.0
+      },
+      {
+        "regeling": "Programma Economie gemeente Neder-Betuwe 2024-2028",
+        "artikel": "Opmaat naar uitvoering",
+        "join_pad": "tekst_fallback",
+        "relevantie": 2.0
+      },
+      {
+        "regeling": "Omgevingsvisie Neder-Betuwe",
+        "artikel": "Wat doet de gemeente?",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsvisie Neder-Betuwe",
+        "artikel": "Wat houdt dit speerpunt in?",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Omgevingsvisie Neder-Betuwe",
+        "artikel": "Inleiding",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Programma Economie gemeente Neder-Betuwe 2024-2028",
+        "artikel": "Aanleiding en doel",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Programma Buitengebied gemeente Neder-Betuwe",
+        "artikel": "Inleiding",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Wijziging omgevingsplan gemeente Neder-Betuwe, deelgebied Kernen",
+        "artikel": "22.241",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Wijziging omgevingsplan gemeente Neder-Betuwe, deelgebied Kernen",
+        "artikel": "22.247",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      },
+      {
+        "regeling": "Wijziging omgevingsplan gemeente Neder-Betuwe, deelgebied Kernen",
+        "artikel": "22.60",
+        "join_pad": "tekst_fallback",
+        "relevantie": 1.0
+      }
+    ],
+    "matched_concepts": [],
+    "expanded_keywords": [
+      "betuwelijn",
+      "doorontwikkeling",
+      "lange",
+      "termijnvisie",
+      "welke"
+    ],
+    "scored_keywords": [
+      {
+        "term": "doorontwikkeling",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "termijnvisie",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "betuwelijn",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "welke",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "lange",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "termijnvisie doorontwikkeling betuwelijn",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "lange termijnvisie doorontwikkeling",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "termijnvisie doorontwikkeling",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "doorontwikkeling betuwelijn",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "welke lange termijnvisie",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "lange termijnvisie",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "welke lange",
+        "relevantie": 0.95,
+        "is_actie": false
+      }
+    ]
+  },
+  {
+    "id": "r39-ambitie-terugdringen-broeikasg-gelderland",
+    "question": "Welke ambitie is hier t.a.v. het terugdringen van broeikasgassen?",
+    "location": "Laan van Westenenk 701, 7334DP Apeldoorn",
+    "n_regelteksten": 4,
+    "top_regelingen": [
+      "Omgevingsvisie gemeente Apeldoorn"
+    ],
+    "top_hits": [
+      {
+        "regeling": "Omgevingsvisie gemeente Apeldoorn",
+        "artikel": "Hoe we stadmaken, vitale dorpen en buitengebied realiseren",
+        "join_pad": "tekst_fallback",
+        "relevantie": 3.0
+      },
+      {
+        "regeling": "Omgevingsvisie gemeente Apeldoorn",
+        "artikel": null,
+        "join_pad": "tekst_fallback",
+        "relevantie": 2.0
+      },
+      {
+        "regeling": "Omgevingsvisie gemeente Apeldoorn",
+        "artikel": "Fysiek fundament uitbouwen",
+        "join_pad": "tekst_fallback",
+        "relevantie": 2.0
+      },
+      {
+        "regeling": "Omgevingsvisie gemeente Apeldoorn",
+        "artikel": "Intermezzo Oefenen met de toekomst",
+        "join_pad": "tekst_fallback",
+        "relevantie": 2.0
+      }
+    ],
+    "matched_concepts": [],
+    "expanded_keywords": [
+      "ambitie",
+      "broeikasgass",
+      "broeikasgassen",
+      "terugdring",
+      "terugdringen",
+      "welke"
+    ],
+    "scored_keywords": [
+      {
+        "term": "broeikasgassen",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "terugdringen",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "ambitie",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "welke",
+        "relevantie": 1.0,
+        "is_actie": false
+      },
+      {
+        "term": "ambitie terugdringen broeikasgassen",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "terugdringen broeikasgassen",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "welke ambitie terugdringen",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "ambitie terugdringen",
+        "relevantie": 0.95,
+        "is_actie": false
+      },
+      {
+        "term": "welke ambitie",
+        "relevantie": 0.95,
+        "is_actie": false
+      }
+    ]
+  }
+]

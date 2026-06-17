@@ -23,6 +23,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from db import get_conn
+from fastpaths import norm_fast_path
+from intent import detect_intent
 from keywords import match_skos_concepts
 from llm import llm
 from regelteksten_bij_vraag import (
@@ -176,6 +178,33 @@ def antwoord_bij_vraag(req: AntwoordRequest):
     location_str = req.location or f"{rd_x}, {rd_y}"
 
     with get_conn() as conn, conn.cursor() as cur:
+        # Fast-path: deterministisch norm-antwoord (HOOG) zonder LLM als het
+        # ondubbelzinnig is. Spiegelt de kernel; het viewer-antwoordpaneel wordt zo
+        # exact + direct voor eenduidige norm-vragen. Anders: door naar SKOS/LLM.
+        intent_info = detect_intent(req.question)
+        if (intent_info["intent"] == "norm" and rd_x is not None
+                and rd_y is not None and intent_info["norm_naam"]):
+            fp = norm_fast_path(cur, rd_x, rd_y, intent_info["norm_naam"])
+            if fp:
+                eenheid = (fp["eenheid"] or "").strip()
+                bron = (fp["regeling"] or "").strip()
+                art = (fp["artikel"] or "").strip()
+                antwoord = f"De {fp['naam']} op deze locatie is {fp['waarde']} {eenheid}".rstrip()
+                if bron:
+                    antwoord += f" (Bron: {bron}" + (f", {art}" if art else "") + ")."
+                else:
+                    antwoord += "."
+                return AntwoordResponse(
+                    antwoord=antwoord,
+                    confidence="HOOG",
+                    bronnen=[],
+                    matched_concepts=[],
+                    trace=AntwoordTrace(
+                        matched_concepts_count=0, sql_query_ms=0.0,
+                        address_resolution_ms=address_ms, rd_x=rd_x, rd_y=rd_y,
+                    ),
+                )
+
         matched_rows, _ngrams = match_skos_concepts(cur, req.question, req.max_concepts)
 
         if not matched_rows:

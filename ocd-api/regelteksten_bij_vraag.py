@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import time
 from typing import Any
@@ -35,6 +36,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from db import get_conn
+from fastpaths import norm_fast_path
+from intent import detect_intent
 from keywords import (
     match_skos_concepts, extract_vraag_chips, _stem_variant, _tokenize,
     _fetch_freq_per_term, _is_action_only, build_scored_keywords, ScoredKeyword,
@@ -148,6 +151,19 @@ class RegeltekstenResponse(BaseModel):
                     "woordsoort znw vs. actiewoord). Voor de frontend-objectfilter en "
                     "chip-weging — sterke begrippen (znw, letterlijk) zwaarder dan "
                     "zwakke (actiewoorden, broader/related). Spiegelt /v1/keywords/extract.",
+    )
+    intent: str | None = Field(
+        None,
+        description="Intent-classificatie van de vraag (norm | activiteit | "
+                    "bestemming | algemeen). Additief — convergentie bot↔viewer: "
+                    "geeft de viewer/antwoord-wrapper hetzelfde signaal als de bot. "
+                    "Zie intent.detect_intent.",
+    )
+    fast_path: dict | None = Field(
+        None,
+        description="Gestructureerd deterministisch antwoord (bv. exacte norm- of "
+                    "bestemmingswaarde) als de intent dat toelaat — gevuld in een "
+                    "volgende increment. Null = val terug op regelteksten + LLM.",
     )
     trace: RegeltekstenTrace
 
@@ -622,6 +638,8 @@ def score_en_cutoff(rows: list[dict], term_weights: list[dict],
 def regelteksten_bij_vraag(req: RegeltekstenRequest):
     """Vraag + locatie -> regelteksten via SKOS-activity-join met geo-filter."""
     address_resolution_ms = None
+    intent_info = detect_intent(req.question)
+    intent = intent_info["intent"]
     rd_x, rd_y = req.x, req.y
     if req.location and (rd_x is None or rd_y is None):
         t0 = time.perf_counter()
@@ -629,6 +647,13 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
         address_resolution_ms = round((time.perf_counter() - t0) * 1000, 1)
 
     with get_conn() as conn, conn.cursor() as cur:
+        # Stap 0 — fast_path: deterministisch norm-antwoord als het ondubbelzinnig
+        # is (anders None → val terug op regelteksten/LLM). Conservatief; rijke
+        # interpretatie (max/maatvoering-fallback) hoort bij de bot-migratie.
+        fast_path = None
+        if intent == "norm" and rd_x is not None and rd_y is not None and intent_info["norm_naam"]:
+            fast_path = norm_fast_path(cur, rd_x, rd_y, intent_info["norm_naam"])
+
         # Stap 1 — SKOS-extractie
         matched_rows, ngrams = match_skos_concepts(cur, req.question, req.max_concepts)
 
@@ -659,6 +684,8 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
                 expanded_keywords=merge_question_tokens(cur, [], req.question),
                 vraag_termen=vraag_termen_leeg,
                 keywords=[ScoredKeyword(**k) for k in scored_leeg],
+                intent=intent,
+                fast_path=fast_path,
                 trace=RegeltekstenTrace(
                     tokens_count=len(ngrams),
                     matched_concepts_count=0,
@@ -677,13 +704,25 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
         domein_keywords = fetch_expanded_keywords(cur, [r["uri"] for r in matched_rows])
         vraag_termen = extract_vraag_chips(cur, req.question)
 
-        # Stap 4b — tekst-fallback: vond de activiteit-join niets, zoek dan de op
-        # de locatie geldende regelteksten waarvan de tekst/opschrift een domein-
-        # trefwoord op woordgrens bevat. Vangt de gevallen waarin de werkzaamheid->
-        # activiteit-mapping ontbreekt of naar een andere gemeente wijst (zie
-        # tekst_fallback_query). Alleen domein-trefwoorden — vraag-chips als
-        # "geldt" zouden te breed matchen.
-        if not regel_rows:
+        # Stap 4b — brede regelingsgebied-arm.
+        # KERNEL_BROAD_ARM aan (R1, convergentie bot↔viewer): naast de scherpe
+        # activiteit-join (killer_query) áltijd óók de op de locatie geldende
+        # regelteksten ophalen waarvan tekst/opschrift een domein-trefwoord op
+        # woordgrens bevat; union + dedup op te_id, daarna één score_en_cutoff over
+        # de unie. Vangt cluster C (visies/programma's) en gevallen waar de
+        # werkzaamheid->activiteit-mapping ontbreekt, zónder de killer-precisie te
+        # verliezen. GEEN RRF — één ranking. Zie vault
+        # [[Plan refactor gedeelde retrieval-laag bot en viewer]].
+        # Flag uit (default): legacy gedrag — tekst-fallback alleen als de
+        # activiteit-join leeg is. Houdt de productie-viewer ongewijzigd tot de
+        # golden-set-diff groen is.
+        if os.getenv("KERNEL_BROAD_ARM", "0") == "1":
+            breed_rows = tekst_fallback_query(
+                cur, domein_keywords, rd_x, rd_y, req.max_regelteksten,
+            )
+            gezien = {r["te_id"] for r in regel_rows}
+            regel_rows = regel_rows + [r for r in breed_rows if r["te_id"] not in gezien]
+        elif not regel_rows:
             regel_rows = tekst_fallback_query(
                 cur, domein_keywords, rd_x, rd_y, req.max_regelteksten,
             )
@@ -745,6 +784,8 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
         expanded_keywords=expanded_keywords,
         vraag_termen=vraag_termen,
         keywords=[ScoredKeyword(**k) for k in scored],
+        intent=intent,
+        fast_path=fast_path,
         trace=RegeltekstenTrace(
             tokens_count=len(ngrams),
             matched_concepts_count=len(matched_rows),
