@@ -1,11 +1,24 @@
 # Plan — IMTR-beslistabellen in de loader (i2a uitvuldatie)
 
 **Datum:** 2026-06-17
-**Status:** ontwerp, klaar voor go/no-go
+**Status:** fase 0-3 UITGEVOERD (zie hieronder); fase 4 (health) open
 **Aanleiding:** de toepasbare-regel-checker (TRCG) heeft een *uitvoerbaar*
 bronhoudermodel nodig om de toepasbare regel tegen de regeltekst af te zetten
 (outcome-equivalentie). Dat model is met de huidige loader niet uit `i2a` te
 reconstrueren.
+
+> **Uitvoeringsstatus (2026-06-17).** Gekozen voor JSONB-opslag (v1, sectie 3).
+> - **Fase 0** spike: 5/5 live `sttrBestand` → uitvoerbare graaf. GO.
+> - **Fase 1** DDL: `beslisgraaf JSONB` + scalars toegevoegd (commit `c367d84`).
+> - **Fase 2** loader: `_build_beslisgraaf` (dual-namespace) 1-op-1 geverifieerd
+>   tegen `trcg/dmn/reduce.py`; PoC Utrecht herladen → **169/169** regelbestanden
+>   met beslisgraaf (tot 698 regels).
+> - **Fase 3** TRCG: `executable_graph_from_i2a` leest + executet de modellen uit
+>   OCD (TRCG commit `c6ad9d0`).
+> - **Open**: fase 4 (health-metric + audit-anker), een loader-regressietest, en de
+>   volledige checker-lus met Ollama (LLM-referentie). De outcome-test bleek voor
+>   weinig échte modellen toepasbaar (veel/niet-boolean variabelen) — structuur-spoor
+>   blijft nodig.
 
 ---
 
