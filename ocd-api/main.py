@@ -519,7 +519,18 @@ def _rank_geldt(geldt: dict, vraag: str, top_k: int = 20) -> list[dict]:
             w = (0.5 if k.get("is_actie") else 1.0) * float(k.get("relevantie") or 0.0)
             if w > weights.get(t, 0.0):
                 weights[t] = w
-    return rank_regelteksten(rows, vraag, weights)[:top_k]
+    ranked = rank_regelteksten(rows, vraag, weights)[:top_k]
+    # _wat_geldt_hier levert `inhoud` als RAUWE XML (anders dan killer_query, die
+    # de tags strip't). De bot's normale pad schoont via parse_response; voor de
+    # meegeleverde ranking strippen we de tags hier zodat de LLM schone tekst krijgt
+    # (rauwe XML in de context kostte ~2pp; r13/r27). Kopieën, geen mutatie van ow_regels.
+    out = []
+    for r in ranked:
+        rc = dict(r)
+        if rc.get("inhoud"):
+            rc["inhoud"] = re.sub(r"<[^>]+>", "", rc["inhoud"])
+        out.append(rc)
+    return out
 
 
 @app.get("/v1/adres", dependencies=[Depends(verify_key)])
