@@ -20,6 +20,7 @@ from expand import router as expand_router
 from kennis import router as kennis_router
 from keywords import router as keywords_router
 from ponsenkaart import router as ponsenkaart_router
+from planvoorraad import router as planvoorraad_router
 from regelteksten_bij_vraag import router as regelteksten_router
 from semantisch import router as semantisch_router
 from vergunningen import router as vergunningen_router
@@ -191,6 +192,7 @@ app.include_router(antwoord_router, dependencies=[Depends(verify_key)])
 app.include_router(semantisch_router, dependencies=[Depends(verify_key)])
 app.include_router(vergunningen_router, dependencies=[Depends(verify_key)])
 app.include_router(ponsenkaart_router, dependencies=[Depends(verify_key)])
+app.include_router(planvoorraad_router, dependencies=[Depends(verify_key)])
 app.include_router(expand_router, dependencies=[Depends(verify_key)])
 app.include_router(kennis_router, dependencies=[Depends(verify_key)])
 
