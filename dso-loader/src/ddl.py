@@ -492,6 +492,47 @@ CREATE TABLE IF NOT EXISTS wro.wro_bronbestand (
     UNIQUE (instrument_idn, bestandsnaam)
 );
 
+-- -------------------------------------------------------------
+-- RP-planvoorraad: temporele snapshots van het IMRO-manifest.
+-- Bron: RP-Opvragen API v4 (/plannen). Meet de leegloop van de
+-- bestemmingsplan-voorraad als tegenhanger van de pons-aangroei
+-- (zie vault analysis/RP-planvoorraad.md). Twee modi in één model:
+--   * event  -> verwijderd_op (autoritatief, backfillbaar ~17 mnd)
+--   * presence -> afgeleid uit voorkomen van identificatie over snapshots
+-- identificatie joint op wro.ruimtelijk_instrument.idn (geen harde FK:
+-- de RP-API lijst ook plannen die niet via PDOK zijn geladen).
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS wro.wro_snapshot (
+    snapshot_id     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    datum           DATE NOT NULL,
+    bron            TEXT NOT NULL DEFAULT 'rp-opvragen-v4',
+    aantal_plannen  INT NULL,
+    aangemaakt_op   TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (datum, bron)
+);
+
+CREATE TABLE IF NOT EXISTS wro.wro_plan_observatie (
+    snapshot_id             BIGINT NOT NULL REFERENCES wro.wro_snapshot(snapshot_id) ON DELETE CASCADE,
+    identificatie           TEXT NOT NULL,
+    dossier                 TEXT NULL,
+    bronhouder_code         TEXT NULL,
+    bronhouder_naam         TEXT NULL,
+    titel                   TEXT NULL,
+    plantype                TEXT NULL,
+    planstatus              TEXT NULL,
+    planstatus_datum        DATE NULL,
+    dossierstatus           TEXT NULL,
+    is_tam                  BOOLEAN NOT NULL DEFAULT FALSE,
+    is_paraplu              BOOLEAN NOT NULL DEFAULT FALSE,
+    verwijderd_op           TIMESTAMPTZ NULL,
+    einde_rechtsgeldigheid  TEXT NULL,
+    relaties                JSONB NULL,
+    PRIMARY KEY (snapshot_id, identificatie)
+);
+CREATE INDEX IF NOT EXISTS idx_wro_planobs_ident ON wro.wro_plan_observatie(identificatie);
+CREATE INDEX IF NOT EXISTS idx_wro_planobs_bronhouder ON wro.wro_plan_observatie(bronhouder_code);
+CREATE INDEX IF NOT EXISTS idx_wro_planobs_verwijderd ON wro.wro_plan_observatie(verwijderd_op);
+
 -- =============================================================
 -- i2a.* — IMTR: Toepasbare regels en werkzaamheden
 -- =============================================================

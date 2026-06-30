@@ -277,6 +277,22 @@ def load_wro():
     load_wro_plans()
 
 
+@cli.command("load-planvoorraad")
+@click.option("--datum", default=None,
+              help="Snapshotdatum YYYY-MM-DD (default: vandaag).")
+@click.option("--page-size", type=int, default=100, help="pageSize voor /plannen.")
+@click.option("--max-pages", type=int, default=None,
+              help="Beperk aantal pagina's (dev/test; default: volledige trek).")
+def load_planvoorraad_cmd(datum, page_size, max_pages):
+    """Snapshot de IMRO-plannenvoorraad (bestemmingsplannen) via RP-Opvragen v4.
+
+    Meet de leegloop van de bestemmingsplan-voorraad (wro.wro_snapshot +
+    wro.wro_plan_observatie). Maandelijks draaien voor de temporele as.
+    """
+    from src.loaders.wro_planvoorraad import load_planvoorraad_snapshot
+    load_planvoorraad_snapshot(datum=datum, page_size=page_size, max_pages=max_pages)
+
+
 @cli.command("load-gemeentegrenzen")
 def load_gemeentegrenzen_cmd():
     """Laad gemeente- + provinciegrenzen uit PDOK Bestuurlijke Gebieden.

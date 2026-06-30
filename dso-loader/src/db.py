@@ -32,6 +32,7 @@ TABLE_SCHEMA: dict[str, str] = {
     "ruimtelijk_instrument": "wro", "planobject": "wro",
     "wro_tekst_object": "wro", "wro_geleideformulier": "wro",
     "wro_bronbestand": "wro",
+    "wro_snapshot": "wro", "wro_plan_observatie": "wro",
     # i2a
     "regelbeheerobject": "i2a", "toepasbaar_regelbestand": "i2a",
     "dmn_element": "i2a", "uitvoeringsregel": "i2a",
