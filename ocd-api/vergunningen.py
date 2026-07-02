@@ -220,6 +220,14 @@ class DoorlooptijdUitkomst(BaseModel):
     mediaan_dagen: int | None
 
 
+class DoorlooptijdType(BaseModel):
+    """Aantal + mediaan per planafwijking-type (sluit het afwijk-filter uit)."""
+
+    type: str = Field(..., description="'bopa' (afwijkvergunning) of 'regulier'")
+    n: int
+    mediaan_dagen: int | None
+
+
 # Uitkomsten die standaard meetellen (een 'besluit'); ingetrokken is opt-in.
 _DLT_UITKOMSTEN = ("verleend", "geweigerd", "van_rechtswege", "ingetrokken")
 
@@ -238,11 +246,17 @@ class DoorlooptijdResponse(BaseModel):
     per_uitkomst: list[DoorlooptijdUitkomst] = Field(
         ..., description="Verdeling over uitkomsten — altijd ongefilterd"
     )
+    per_type: list[DoorlooptijdType] = Field(
+        ..., description="Verdeling over planafwijking-type (bopa/regulier) — sluit afwijk-filter uit"
+    )
     methode: str | None = Field(
         None, description="Actief methode-filter (None = beide trappen samen)"
     )
     uitkomst: list[str] = Field(
         ..., description="Actief uitkomst-filter (leeg = alle uitkomsten)"
+    )
+    afwijk: str | None = Field(
+        None, description="Actief type-filter: 'bopa' | 'regulier' | None (beide)"
     )
     min_bg: int = Field(
         ..., description="Effectieve BG-drempel (kan automatisch verlaagd zijn)"
@@ -623,6 +637,14 @@ def doorlooptijd(
             "ingetrokken. Leeg = alle uitkomsten. per_uitkomst blijft altijd ongefilterd."
         ),
     ),
+    afwijk: Literal["bopa", "regulier"] | None = Query(
+        None,
+        description=(
+            "Filter op planafwijking-type: 'bopa' (afwijkvergunning / buitenplanse "
+            "omgevingsplanactiviteit) of 'regulier'. Leeg = beide. per_type blijft "
+            "altijd ongefilterd. NB tekst-signaal (G-84): bopa is een ondergrens."
+        ),
+    ),
 ):
     """Voedt het doorlooptijd-dashboard.
 
@@ -649,6 +671,7 @@ def doorlooptijd(
     # Basisbron-helper: bouwt een (FROM-bron, params) uit actieve filters.
     m_filt = ("match_methode = %s", [methode]) if methode else None
     u_filt = ("uitkomst = ANY(%s)", [uitkomst]) if uitkomst else None
+    a_filt = ("is_afwijk = %s", [afwijk == "bopa"]) if afwijk else None
 
     def _src(*filters: tuple[str, list[Any]] | None) -> tuple[str, list[Any]]:
         active = [f for f in filters if f]
@@ -658,11 +681,12 @@ def doorlooptijd(
         params = [p for _, plist in active for p in plist]
         return f"(SELECT * FROM vth.dossier_doorlooptijd WHERE {where}) d", params
 
-    # Hoofdbron = beide filters. Facetten sluiten hun eigen dimensie uit zodat
-    # per_methode/per_uitkomst optellen tot het totaal van de huidige selectie.
-    src, pre = _src(m_filt, u_filt)
-    meth_src, meth_pre = _src(u_filt)  # per_methode: wel uitkomst-, geen methode-filter
-    uitk_src, uitk_pre = _src(m_filt)  # per_uitkomst: wel methode-, geen uitkomst-filter
+    # Hoofdbron = alle filters. Facetten sluiten hun eigen dimensie uit zodat
+    # per_methode/per_uitkomst/per_type optellen tot het totaal van de huidige selectie.
+    src, pre = _src(m_filt, u_filt, a_filt)
+    meth_src, meth_pre = _src(u_filt, a_filt)  # per_methode: geen methode-filter
+    uitk_src, uitk_pre = _src(m_filt, a_filt)  # per_uitkomst: geen uitkomst-filter
+    type_src, type_pre = _src(m_filt, u_filt)  # per_type: geen afwijk-filter
 
     with get_conn() as conn, conn.cursor() as cur:
         # KPI's
@@ -802,6 +826,23 @@ def doorlooptijd(
             for r in cur.fetchall()
         ]
 
+        # Verdeling over planafwijking-type (sluit het afwijk-filter uit → stabiele
+        # bopa/regulier-totalen; respecteert wel methode- en uitkomst-filter).
+        cur.execute(
+            "SELECT is_afwijk, count(*) AS n, "
+            "  percentile_disc(0.5) WITHIN GROUP (ORDER BY doorlooptijd_dagen) AS mediaan "
+            f"FROM {type_src} GROUP BY 1 ORDER BY 1 DESC",
+            type_pre,
+        )
+        per_type = [
+            DoorlooptijdType(
+                type="bopa" if r["is_afwijk"] else "regulier",
+                n=r["n"],
+                mediaan_dagen=r["mediaan"],
+            )
+            for r in cur.fetchall()
+        ]
+
     took = int((time.perf_counter() - t0) * 1000)
     return DoorlooptijdResponse(
         kpi=kpi,
@@ -811,8 +852,10 @@ def doorlooptijd(
         per_bevoegd_gezag=per_bg,
         per_methode=per_methode,
         per_uitkomst=per_uitkomst,
+        per_type=per_type,
         methode=methode,
         uitkomst=uitkomst,
+        afwijk=afwijk,
         min_bg=min_bg_eff,
         min_bg_verlaagd=min_bg_eff < min_bg,
         took_ms=took,
