@@ -58,6 +58,22 @@ def setup_koop():
         conn.close()
 
 
+@cli.command("setup-ovg")
+def setup_ovg_cmd():
+    """Apply vth.omgevingsvergunning_dso (DSO-satelliet). Vereist core.bronhouder + vth.vergunningkennisgeving."""
+    from src.loaders.dso_omgevingsvergunning import setup_ovg
+    console.print("[bold]Applying OVG schema (vth.omgevingsvergunning_dso)[/bold]")
+    setup_ovg()
+
+
+@cli.command("load-ovg")
+def load_ovg_cmd():
+    """Laad DSO-omgevingsvergunningen (presenteren/v8) → vth.omgevingsvergunning_dso + bronfout-detectie."""
+    from src.loaders.dso_omgevingsvergunning import load_ovg
+    console.print("[bold]Loading DSO omgevingsvergunningen[/bold]")
+    load_ovg()
+
+
 @cli.command("load-koop")
 @click.option("--from", "from_date", required=True, help="Startdatum YYYY-MM-DD (inclusief).")
 @click.option("--to", "to_date", required=True, help="Einddatum YYYY-MM-DD (inclusief).")

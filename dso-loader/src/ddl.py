@@ -1073,6 +1073,17 @@ CREATE TABLE IF NOT EXISTS vth.vergunningkennisgeving (
     datum_publicatie_ts  TIMESTAMPTZ,                    -- cup:datumTijdstipWijzigingWork (fijnere tijd dan datum_publicatie)
     subject_taxonomie    TEXT,                           -- dcterms:subject OVERHEID.TaxonomieBeleidsagendaDecentraal
 
+    -- Afwijkvergunning-classificatie (sinds 2026-07-01 — scripts/2026-07-classify-afwijkvergunning.py,
+    -- zie vault-analyse "Afwijkvergunning (BOPA) vastleggen" + gaps#G-84). Tekst-classificatie op
+    -- inhoud_tekst want een machine-leesbare BOPA-typering bestaat nergens. NULL afwijk_status = geen_opa.
+    afwijk_status        TEXT
+        CHECK (afwijk_status IS NULL OR afwijk_status IN
+               ('buitenplans_expliciet','binnenplans_expliciet','opa_onbepaald','geen_opa')),
+    procedure            TEXT
+        CHECK (procedure IS NULL OR procedure IN ('regulier','uitgebreid')),
+    afwijk_bron          TEXT,                           -- 'body-tekst' | 'titel' | 'dso-kenbaarheid'
+    afwijk_evidence      TEXT,                           -- matchende marker-frase (herleidbaar)
+
     -- Pipeline-metadata
     ingest_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     ingest_run_id        TEXT
@@ -1084,7 +1095,11 @@ ALTER TABLE vth.vergunningkennisgeving
     ADD COLUMN IF NOT EXISTS pdf_url             TEXT,
     ADD COLUMN IF NOT EXISTS datum_ontvangst     DATE,
     ADD COLUMN IF NOT EXISTS datum_publicatie_ts TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS subject_taxonomie   TEXT;
+    ADD COLUMN IF NOT EXISTS subject_taxonomie   TEXT,
+    ADD COLUMN IF NOT EXISTS afwijk_status       TEXT,
+    ADD COLUMN IF NOT EXISTS procedure           TEXT,
+    ADD COLUMN IF NOT EXISTS afwijk_bron         TEXT,
+    ADD COLUMN IF NOT EXISTS afwijk_evidence     TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_vk_bg_datum
     ON vth.vergunningkennisgeving (bg_naam, datum_publicatie DESC);
@@ -1117,6 +1132,8 @@ CREATE INDEX IF NOT EXISTS idx_vk_inhoud_geladen
     WHERE inhoud_geladen_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_vk_subject_taxonomie
     ON vth.vergunningkennisgeving (subject_taxonomie);
+CREATE INDEX IF NOT EXISTS idx_vk_afwijk_status
+    ON vth.vergunningkennisgeving (afwijk_status) WHERE afwijk_status IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_vk_datum_ontvangst
     ON vth.vergunningkennisgeving (datum_ontvangst)
     WHERE datum_ontvangst IS NOT NULL;
@@ -1173,4 +1190,52 @@ CREATE INDEX IF NOT EXISTS idx_deeplink_werkt
     ON vth.vergunning_deeplink (koop_id) WHERE werkt;
 CREATE INDEX IF NOT EXISTS idx_deeplink_unvalidated
     ON vth.vergunning_deeplink (gevonden_at) WHERE gevalideerd_at IS NULL;
+"""
+
+
+# ---------------------------------------------------------------------------
+# OVG_DDL — DSO-omgevingsvergunningen (satelliet naast het KOOP-register)
+#
+# Bron: DSO presenteren/v8 /omgevingsvergunningen. Opname in dit endpoint ÍS de
+# planafwijking (buitenplanse omgevingsplanactiviteit, BOPA) per definitie — een
+# binnenplanse vergunning hoeft geen omgevingsdocument te zijn. De tabel legt de
+# twee harde koppelingen vast (bevoegd gezag → core.bronhouder; publicatie →
+# vth.vergunningkennisgeving.koop_id) + de vergunningsgebied-geometrie, en
+# detecteert bronfouten (binnenplans-in-DSO). Zie de vault-analyse
+# "Afwijkvergunning (BOPA) vastleggen - DSO-bron, join en classificatie".
+#
+# LET OP: vereist dat core.bronhouder én vth.vergunningkennisgeving al bestaan
+# (aparte setup, niet in KOOP_DDL gebundeld want die kan vóór core draaien).
+# ---------------------------------------------------------------------------
+OVG_DDL = """
+CREATE SCHEMA IF NOT EXISTS vth;
+
+CREATE TABLE IF NOT EXISTS vth.omgevingsvergunning_dso (
+    identificatie           TEXT PRIMARY KEY,        -- DSO-id, bv. 'gm0230/RxMissionzaak...-01'
+    koop_id                 TEXT UNIQUE
+                              REFERENCES vth.vergunningkennisgeving(koop_id),  -- 1:1, nullable (~9% geen KOOP-tegenhanger)
+    bevoegd_gezag_code      TEXT NOT NULL
+                              REFERENCES core.bronhouder(overheidscode),        -- hard, 100% geverifieerd
+    officiele_titel         TEXT,
+    referentienummer        TEXT,                    -- zaaknummer BG
+    publicatie_id           TEXT NOT NULL,           -- akn/.../gmb/2024/114849 — bron voor koop_id-afleiding
+    begin_geldigheid        DATE,
+    begin_inwerking         DATE,
+    tijdstip_registratie    TIMESTAMPTZ,
+    versie                  INTEGER,
+    vergunningsgebied_id    TEXT,                    -- nl.imow-<bg>.gebied.<...>
+    geometrie_identificatie UUID,                    -- -> geometrieopvragen/v1 / locatie-keten
+    imro_planidentificatie  TEXT[],
+    is_planafwijking        BOOLEAN NOT NULL DEFAULT TRUE,  -- per definitie (lidmaatschap = BOPA)
+    binnenplans_anomalie    BOOLEAN,                 -- TRUE = binnenplans maar tóch in DSO -> vermoedelijke bronfout BG
+    ingest_run_id           TEXT,
+    ingest_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ovg_bg
+    ON vth.omgevingsvergunning_dso (bevoegd_gezag_code);
+CREATE INDEX IF NOT EXISTS idx_ovg_koop
+    ON vth.omgevingsvergunning_dso (koop_id);
+CREATE INDEX IF NOT EXISTS idx_ovg_anomalie
+    ON vth.omgevingsvergunning_dso (binnenplans_anomalie) WHERE binnenplans_anomalie;
 """
