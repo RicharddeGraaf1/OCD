@@ -258,6 +258,43 @@ def data_health(
     return {"samenvatting": samenvatting, "geo": geo}
 
 
+@app.get("/v1/load-status", dependencies=[Depends(verify_key)])
+def load_status():
+    """Data-actualiteit: wanneer is welke bron voor het laatst bijgewerkt?
+
+    Voedt het data-actualiteit-dashboard. `bronnen` = laatste run per bron
+    (core.v_load_status), `lopend` = runs die nu draaien, `laatst_bijgewerkt`
+    = meest recente geslaagde finished_at (glance), `bronhouders` = samenvatting
+    van core.bronhouder.laatst_geladen. Zie dso-loader/docs/bijwerken.md.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM core.v_load_status ORDER BY bron")
+        bronnen = cur.fetchall()
+
+        cur.execute(
+            "SELECT bron, scope, started_at FROM core.load_run "
+            "WHERE status = 'running' ORDER BY started_at")
+        lopend = cur.fetchall()
+
+        cur.execute(
+            "SELECT max(finished_at) AS laatst_bijgewerkt FROM core.load_run "
+            "WHERE status IN ('ok', 'deels')")
+        laatst_bijgewerkt = cur.fetchone()["laatst_bijgewerkt"]
+
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE laatst_geladen IS NOT NULL) AS met_laatst_geladen, "
+            "count(*) AS totaal, min(laatst_geladen) AS oudste, max(laatst_geladen) AS nieuwste "
+            "FROM core.bronhouder")
+        bronhouders = cur.fetchone()
+
+    return {
+        "bronnen": bronnen,
+        "lopend": lopend,
+        "laatst_bijgewerkt": laatst_bijgewerkt,
+        "bronhouders": bronhouders,
+    }
+
+
 def _build_keyword_filter(keywords: list[str], text_col: str) -> tuple[str, list]:
     """Build a SQL WHERE clause that matches any keyword in a text column.
 

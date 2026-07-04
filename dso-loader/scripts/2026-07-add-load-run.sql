@@ -41,6 +41,13 @@ CREATE TABLE IF NOT EXISTS core.load_run (
 CREATE INDEX IF NOT EXISTS idx_load_run_bron_started
     ON core.load_run (bron, started_at DESC);
 
+-- Leeslaag (fase 3): laatste run per bron. Voedt /v1/load-status + dashboard.
+CREATE OR REPLACE VIEW core.v_load_status AS
+SELECT DISTINCT ON (bron)
+    bron, scope, started_at, finished_at, status, n_verwerkt, n_fout
+FROM core.load_run
+ORDER BY bron, started_at DESC;
+
 -- ── Backfill (best-effort, uit échte bestaande timestamps) ───────────────────
 -- Zodat het dashboard niet leeg start. Leest alleen bronnen waarvoor een
 -- betrouwbare timestamp al in de DB staat; de rest vult zich vanaf de eerste
