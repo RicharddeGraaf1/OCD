@@ -15,6 +15,7 @@ from rich.table import Table
 from src.config import cfg
 from src.db import get_conn, execute_sql_file, table_count
 from src.ddl import DDL, LOOKUPS
+from src.run_log import load_run
 
 console = Console()
 
@@ -71,7 +72,8 @@ def load_ovg_cmd():
     """Laad DSO-omgevingsvergunningen (presenteren/v8) → vth.omgevingsvergunning_dso + bronfout-detectie."""
     from src.loaders.dso_omgevingsvergunning import load_ovg
     console.print("[bold]Loading DSO omgevingsvergunningen[/bold]")
-    load_ovg()
+    with load_run("ozon-afwijkvergunningen"):
+        load_ovg()
 
 
 @cli.command("load-koop")
@@ -85,7 +87,9 @@ def load_koop_cmd(from_date, to_date, force):
     console.print(f"[bold]Loading KOOP omgevingsvergunningen[/bold] {from_date} .. {to_date}")
     if force:
         console.print("  [yellow]--force: bestaande status='ok' dagen worden opnieuw verwerkt[/yellow]")
-    total = load_koop_range(from_date, to_date, force=force)
+    with load_run("koop-sru-vergunningen", scope=f"{from_date}..{to_date}") as run:
+        total = load_koop_range(from_date, to_date, force=force)
+        run.set(n_verwerkt=total)
     console.print(f"[green]Klaar: {total:,} upserts.[/green]")
 
 
@@ -111,10 +115,13 @@ def enrich_koop_cmd(limit, loop, sleep, stop_after_empty, type_besluit):
         type_filter = tuple(t.strip() for t in type_besluit.split(",") if t.strip())
         console.print(f"  Filtering op type_besluit IN {type_filter}")
     console.print(f"[bold]Enriching KOOP records[/bold] (limit={limit}, loop={loop})")
-    total = enrich_records(
-        limit=limit, loop=loop, sleep=sleep,
-        stop_after_empty=stop_after_empty, type_filter=type_filter,
-    )
+    scope = f"type_besluit={','.join(type_filter)}" if type_filter else "inhoud_geladen_at IS NULL"
+    with load_run("obk-vergunningen-inhoud", scope=scope) as run:
+        total = enrich_records(
+            limit=limit, loop=loop, sleep=sleep,
+            stop_after_empty=stop_after_empty, type_filter=type_filter,
+        )
+        run.set(n_verwerkt=total)
     console.print(f"[green]Klaar: {total:,} records verrijkt.[/green]")
 
 
@@ -290,7 +297,8 @@ def load_wro():
     """Load Wro bestemmingsplannen from PDOK for the PoC municipality."""
     from src.loaders.wro_pdok import load_wro_plans
     console.print(f"[bold]Loading Wro plans[/bold] for {cfg.POC_GEMEENTE_NAAM} (CBS {cfg.POC_CBS_CODE})")
-    load_wro_plans()
+    with load_run("pdok-bestemmingsplannen", scope=f"poc:{cfg.POC_CBS_CODE}"):
+        load_wro_plans()
 
 
 @cli.command("load-planvoorraad")
@@ -306,7 +314,8 @@ def load_planvoorraad_cmd(datum, page_size, max_pages):
     wro.wro_plan_observatie). Maandelijks draaien voor de temporele as.
     """
     from src.loaders.wro_planvoorraad import load_planvoorraad_snapshot
-    load_planvoorraad_snapshot(datum=datum, page_size=page_size, max_pages=max_pages)
+    with load_run("ihr-planvoorraad", scope=datum or "vandaag"):
+        load_planvoorraad_snapshot(datum=datum, page_size=page_size, max_pages=max_pages)
 
 
 @cli.command("load-gemeentegrenzen")
@@ -318,7 +327,8 @@ def load_gemeentegrenzen_cmd():
     """
     from src.loaders.gemeentegrens_pdok import load_gemeentegrenzen
     console.print("[bold]Loading Nederlandse gemeentegrenzen[/bold] (PDOK Bestuurlijke Gebieden)")
-    load_gemeentegrenzen()
+    with load_run("pdok-gemeentegrenzen"):
+        load_gemeentegrenzen()
 
 
 @cli.command("refresh-ponsenkaart-stats")
@@ -419,7 +429,15 @@ def load_wro_structuurvisies_cmd(niveau, code):
     from src.loaders.wro_pdok import load_wro_structuurvisies
     niveaus = list(niveau) if niveau else None
     codes = set(code) if code else None
-    load_wro_structuurvisies(niveaus=niveaus, codes=codes)
+    scope_parts = []
+    if niveaus:
+        scope_parts.append("niveau=" + "".join(niveaus))
+    if codes:
+        scope_parts.append("code=" + ",".join(sorted(codes)))
+    with load_run("pdok-structuurvisies", scope="/".join(scope_parts) or "alle") as run:
+        if codes:
+            run.markeer_bronhouder(*codes)
+        load_wro_structuurvisies(niveaus=niveaus, codes=codes)
 
 
 @cli.command("load-imtr")
@@ -435,15 +453,24 @@ def load_imtr(overheid, alle_ontbrekend, bestuurslaag):
     from src.loaders.imtr_loader import load_imtr_bronhouder, load_imtr_ontbrekend
 
     if alle_ontbrekend:
-        console.print(f"[bold]Loading IMTR[/bold] — alle ontbrekende bronhouders"
-                      f"{f' ({bestuurslaag})' if bestuurslaag else ''}")
-        load_imtr_ontbrekend(bestuurslaag)
+        scope = "alle-ontbrekend" + (f"/{bestuurslaag}" if bestuurslaag else "")
     elif overheid:
-        console.print(f"[bold]Loading IMTR[/bold] for {overheid}")
-        load_imtr_bronhouder(overheid)
+        scope = overheid
     else:
-        console.print(f"[bold]Loading IMTR[/bold] for {cfg.POC_GEMEENTE_NAAM} (OIN {cfg.POC_OIN})")
-        _load_imtr()
+        scope = f"poc:{cfg.POC_OIN}"
+
+    with load_run("rtr-toepasbare-regels", scope=scope) as run:
+        if alle_ontbrekend:
+            console.print(f"[bold]Loading IMTR[/bold] — alle ontbrekende bronhouders"
+                          f"{f' ({bestuurslaag})' if bestuurslaag else ''}")
+            load_imtr_ontbrekend(bestuurslaag)
+        elif overheid:
+            console.print(f"[bold]Loading IMTR[/bold] for {overheid}")
+            run.markeer_bronhouder(overheid)
+            load_imtr_bronhouder(overheid)
+        else:
+            console.print(f"[bold]Loading IMTR[/bold] for {cfg.POC_GEMEENTE_NAAM} (OIN {cfg.POC_OIN})")
+            _load_imtr()
 
 
 @cli.command("load-ow")
@@ -455,30 +482,37 @@ def load_ow(types, gemeente, overheid):
     from src.loaders.ow_loader import load_ow as _load_ow, load_ow_gemeente, load_ow_overheid
 
     doc_types = [t.strip() for t in types.split(",")] if types else None
+    doctype_scope = f" [{','.join(doc_types)}]" if doc_types else ""
 
     if overheid:
         parts = overheid.split(",", 1)
         code = parts[0].strip()
         naam = parts[1].strip() if len(parts) > 1 else code
-        console.print(f"[bold]Loading Ow regelingen[/bold] for {naam} ({code})")
-        if doc_types:
-            console.print(f"  Filtering: {doc_types}")
-        load_ow_overheid(code, naam, code, doc_types=doc_types)
+        with load_run("ozon-regelingen", scope=f"{code}{doctype_scope}") as run:
+            console.print(f"[bold]Loading Ow regelingen[/bold] for {naam} ({code})")
+            if doc_types:
+                console.print(f"  Filtering: {doc_types}")
+            run.markeer_bronhouder(code)
+            load_ow_overheid(code, naam, code, doc_types=doc_types)
     elif gemeente:
         parts = gemeente.split(",", 1)
         cbs = parts[0].strip()
         naam = parts[1].strip() if len(parts) > 1 else cbs
-        console.print(f"[bold]Loading Ow regelingen[/bold] for {naam} (CBS {cbs})")
-        if doc_types:
-            console.print(f"  Filtering: {doc_types}")
-        load_ow_gemeente(cbs, naam, doc_types=doc_types)
+        with load_run("ozon-regelingen", scope=f"gm{cbs}{doctype_scope}") as run:
+            console.print(f"[bold]Loading Ow regelingen[/bold] for {naam} (CBS {cbs})")
+            if doc_types:
+                console.print(f"  Filtering: {doc_types}")
+            run.markeer_bronhouder(cbs)
+            load_ow_gemeente(cbs, naam, doc_types=doc_types)
     else:
-        console.print(f"[bold]Loading Ow regelingen[/bold] for {cfg.POC_GEMEENTE_NAAM}")
-        if doc_types:
-            console.print(f"  Filtering: {doc_types}")
-            load_ow_gemeente(cfg.POC_CBS_CODE, cfg.POC_GEMEENTE_NAAM, doc_types=doc_types)
-        else:
-            _load_ow()
+        with load_run("ozon-regelingen", scope=f"poc:{cfg.POC_CBS_CODE}{doctype_scope}") as run:
+            console.print(f"[bold]Loading Ow regelingen[/bold] for {cfg.POC_GEMEENTE_NAAM}")
+            run.markeer_bronhouder(cfg.POC_CBS_CODE)
+            if doc_types:
+                console.print(f"  Filtering: {doc_types}")
+                load_ow_gemeente(cfg.POC_CBS_CODE, cfg.POC_GEMEENTE_NAAM, doc_types=doc_types)
+            else:
+                _load_ow()
 
 
 @cli.command("load-api")
@@ -490,23 +524,30 @@ def load_api(types, gemeente, overheid):
     from src.loaders.api_loader import load_via_api
 
     doc_types = [t.strip() for t in types.split(",")] if types else None
+    doctype_scope = f" [{','.join(doc_types)}]" if doc_types else ""
 
     if overheid:
         parts = overheid.split(",", 1)
         code = parts[0].strip()
         naam = parts[1].strip() if len(parts) > 1 else code
-        console.print(f"[bold]Loading via API[/bold] for {naam} ({code})")
-        load_via_api(code, naam, doc_types=doc_types)
+        with load_run("ozon-regelingen", scope=f"{code}{doctype_scope}") as run:
+            console.print(f"[bold]Loading via API[/bold] for {naam} ({code})")
+            run.markeer_bronhouder(code)
+            load_via_api(code, naam, doc_types=doc_types)
     elif gemeente:
         parts = gemeente.split(",", 1)
         cbs = parts[0].strip()
         naam = parts[1].strip() if len(parts) > 1 else cbs
-        console.print(f"[bold]Loading via API[/bold] for {naam} (gm{cbs})")
-        load_via_api(f"gm{cbs}", naam, bronhouder_code=cbs, doc_types=doc_types)
+        with load_run("ozon-regelingen", scope=f"gm{cbs}{doctype_scope}") as run:
+            console.print(f"[bold]Loading via API[/bold] for {naam} (gm{cbs})")
+            run.markeer_bronhouder(cbs)
+            load_via_api(f"gm{cbs}", naam, bronhouder_code=cbs, doc_types=doc_types)
     else:
-        console.print(f"[bold]Loading via API[/bold] for {cfg.POC_GEMEENTE_NAAM} (gm{cfg.POC_CBS_CODE})")
-        load_via_api(f"gm{cfg.POC_CBS_CODE}", cfg.POC_GEMEENTE_NAAM,
-                     bronhouder_code=cfg.POC_CBS_CODE, doc_types=doc_types)
+        with load_run("ozon-regelingen", scope=f"poc:{cfg.POC_CBS_CODE}{doctype_scope}") as run:
+            console.print(f"[bold]Loading via API[/bold] for {cfg.POC_GEMEENTE_NAAM} (gm{cfg.POC_CBS_CODE})")
+            run.markeer_bronhouder(cfg.POC_CBS_CODE)
+            load_via_api(f"gm{cfg.POC_CBS_CODE}", cfg.POC_GEMEENTE_NAAM,
+                         bronhouder_code=cfg.POC_CBS_CODE, doc_types=doc_types)
 
 
 @cli.command("refresh-subdiv")
@@ -612,7 +653,10 @@ def load_wro_teksten(gemeente):
     """Load Wro planteksten via IHR API."""
     from src.loaders.ihr_loader import load_wro_teksten as _load
     codes = [c.strip() for c in gemeente.split(",")] if gemeente else None
-    _load(codes)
+    with load_run("ihr-plannen", scope=(",".join(codes) if codes else "alle")) as run:
+        if codes:
+            run.markeer_bronhouder(*codes)
+        _load(codes)
 
 
 @cli.command("adres")
@@ -782,14 +826,16 @@ def wijziging():
 def wijziging_load_ontwerpen():
     """Laad alle relevante ontwerpregelingen via Presenteren v8."""
     from src.loaders.ontwerp_loader import load_alle_ontwerpen
-    load_alle_ontwerpen()
+    with load_run("ozon-ontwerpen"):
+        load_alle_ontwerpen()
 
 
 @wijziging.command("besluiten")
 def wijziging_load_besluiten():
     """Laad alle relevante besluitversies via Presenteren v8."""
     from src.loaders.ontwerp_loader import load_alle_besluitversies
-    load_alle_besluitversies()
+    with load_run("ozon-besluitversies"):
+        load_alle_besluitversies()
 
 
 @wijziging.command("status")
