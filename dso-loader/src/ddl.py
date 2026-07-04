@@ -149,6 +149,35 @@ CREATE TABLE IF NOT EXISTS core.bronhouder (
     geldig_tot      DATE NULL
 );
 
+-- Load-run-log: 1 rij per laad-stap (= 1 CLI-commando = 1 `bron`-waarde).
+-- Voedt het data-actualiteit-dashboard (OCDviewer/docs/plans/data-health-dashboard.md).
+-- Elke loader schrijft via src/run_log.py een 'running'-rij bij start en werkt
+-- die bij afloop bij naar 'ok'/'deels'/'gefaald'. Generalisatie van vth.etl_run
+-- (dat alleen KOOP dekt).
+--
+-- Canonieke `bron`-waarden (vrije tekst, bewust geen CHECK zodat een nieuwe bron
+-- geen migratie vraagt):
+--   ozon-regelingen · ozon-besluitversies · ozon-ontwerpen · ozon-afwijkvergunningen
+--   rtr-toepasbare-regels · koop-sru-vergunningen · obk-vergunningen-inhoud
+--   ihr-plannen · ihr-planvoorraad · pdok-bestemmingsplannen
+--   pdok-structuurvisies · pdok-gemeentegrenzen
+CREATE TABLE IF NOT EXISTS core.load_run (
+    run_id      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    bron        TEXT NOT NULL,
+    scope       TEXT NULL,                       -- 'alle' | overheidscode | gemeente | datumbereik
+    started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ NULL,
+    status      TEXT NOT NULL DEFAULT 'running', -- running | ok | deels | gefaald
+    n_verwerkt  INTEGER NULL,                    -- records/regelingen geladen
+    n_fout      INTEGER NOT NULL DEFAULT 0,
+    details     JSONB NULL,                      -- vrije per-loader metriek
+    error       TEXT NULL,
+    CONSTRAINT load_run_status_chk
+        CHECK (status IN ('running', 'ok', 'deels', 'gefaald'))
+);
+CREATE INDEX IF NOT EXISTS idx_load_run_bron_started
+    ON core.load_run (bron, started_at DESC);
+
 -- Gemeentegrenzen uit PDOK Bestuurlijke Gebieden. Levert de noemer
 -- voor "% geponst" en de provincie-toewijzing per gemeente. Geladen
 -- via src/loaders/gemeentegrens_pdok.py; eenmalig per jaar refreshen
