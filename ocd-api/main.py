@@ -271,6 +271,9 @@ def load_status():
         cur.execute("SELECT * FROM core.v_load_status ORDER BY bron")
         bronnen = cur.fetchall()
 
+        cur.execute("SELECT bron, totaal FROM core.v_bron_totalen")
+        totalen = {r["bron"]: r["totaal"] for r in cur.fetchall()}
+
         cur.execute(
             "SELECT bron, scope, started_at FROM core.load_run "
             "WHERE status = 'running' ORDER BY started_at")
@@ -289,6 +292,7 @@ def load_status():
 
     return {
         "bronnen": bronnen,
+        "totalen": totalen,
         "lopend": lopend,
         "laatst_bijgewerkt": laatst_bijgewerkt,
         "bronhouders": bronhouders,

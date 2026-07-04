@@ -60,6 +60,16 @@ class RunHandle:
                 self._bronhouder_codes.append(normalize_bronhouder_code(code))
 
 
+def _bron_totaal(conn, bron: str) -> int | None:
+    """Live totaal-telling van de doel-tabel via core.bron_totaal(). Best-effort:
+    NULL/None als de functie of tabel (nog) niet bestaat."""
+    try:
+        row = conn.execute("SELECT core.bron_totaal(%s) AS n", (bron,)).fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
 @contextmanager
 def load_run(bron: str, scope: str = "alle"):
     conn = psycopg.connect(cfg.db_url, autocommit=True)
@@ -69,6 +79,7 @@ def load_run(bron: str, scope: str = "alle"):
             "VALUES (%s, %s, 'running') RETURNING run_id",
             (bron, scope),
         ).fetchone()[0]
+        totaal_voor = _bron_totaal(conn, bron)
 
         handle = RunHandle()
         try:
@@ -83,11 +94,28 @@ def load_run(bron: str, scope: str = "alle"):
             raise
         else:
             status = "deels" if (handle.n_fout or 0) > 0 else "ok"
+            totaal_na = _bron_totaal(conn, bron)
+
+            # Details verrijken met de totaal-telling voor/na, altijd zichtbaar.
+            details = dict(handle.details) if handle.details else {}
+            if totaal_voor is not None:
+                details["totaal_voor"] = totaal_voor
+            if totaal_na is not None:
+                details["totaal_na"] = totaal_na
+
+            # n_verwerkt = 'bijgewerkt in deze run'. Loader-telling (bv. KOOP)
+            # heeft voorrang; anders best-effort de netto-aangroei (totaal_na -
+            # totaal_voor). Voor full-reload-bronnen (gemeentegrenzen, snapshot)
+            # is die delta ~0 — dan zegt totaal_na wat er staat.
+            n_verwerkt = handle.n_verwerkt
+            if n_verwerkt is None and totaal_voor is not None and totaal_na is not None:
+                n_verwerkt = totaal_na - totaal_voor
+
             conn.execute(
                 "UPDATE core.load_run SET status=%s, finished_at=now(), "
                 "n_verwerkt=%s, n_fout=%s, details=%s WHERE run_id=%s",
-                (status, handle.n_verwerkt, handle.n_fout,
-                 Json(handle.details) if handle.details is not None else None, run_id),
+                (status, n_verwerkt, handle.n_fout,
+                 Json(details) if details else None, run_id),
             )
             if handle._bronhouder_codes:
                 conn.execute(
