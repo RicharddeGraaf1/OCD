@@ -2860,7 +2860,7 @@ def regelingen_zoek(
         full_params = base_params + bestuurslaag_params
 
         ow_query = f"""
-            SELECT
+            SELECT DISTINCT ON (r.frbr_work)
                 r.frbr_expression                         AS expression,
                 r.opschrift                               AS titel,
                 r.documenttype,
@@ -2878,7 +2878,7 @@ def regelingen_zoek(
             FROM p2p.regeling r
             JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
             WHERE {' AND '.join(full_where)}
-            ORDER BY r.opschrift, r.frbr_expression DESC
+            ORDER BY r.frbr_work, r.frbr_expression DESC
         """
         # SELECT-clause heeft 2 extra params (q + pattern) voor de count
         select_params = [q, f"%{q}%" if q else ""]
@@ -2895,7 +2895,7 @@ def regelingen_zoek(
         # multi-bronhouder-regelingen.
         cur.execute(
             f"""
-            SELECT b.bestuurslaag, COUNT(*) AS n
+            SELECT b.bestuurslaag, COUNT(DISTINCT r.frbr_work) AS n
             FROM p2p.regeling r
             JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
             WHERE {' AND '.join(base_where)}
