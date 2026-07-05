@@ -382,7 +382,11 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
                            thema = COALESCE(EXCLUDED.thema, p2p.juridische_regel.thema),
                            instructieregel_instrument = COALESCE(EXCLUDED.instructieregel_instrument, p2p.juridische_regel.instructieregel_instrument),
                            instructieregel_taakuitoefening = COALESCE(EXCLUDED.instructieregel_taakuitoefening, p2p.juridische_regel.instructieregel_taakuitoefening),
-                           regeling_expression = COALESCE(EXCLUDED.regeling_expression, p2p.juridische_regel.regeling_expression)
+                           regeling_expression = COALESCE(EXCLUDED.regeling_expression, p2p.juridische_regel.regeling_expression),
+                           -- Volg de nieuwe versie: regel-ID's zijn stabiel over versies, maar het
+                           -- artikel-wId verandert. Zonder deze regel blijft de regel op het oude
+                           -- artikel-wId hangen → viewer-drilldown op de nieuwste expressie mist 'm.
+                           regeltekst_wid = EXCLUDED.regeltekst_wid
                        """,
                     (regel["identificatie"], regel_type, idealisatie, regeltekst_wid,
                      themas or None, instr_instr, instr_taak, expression_id),
