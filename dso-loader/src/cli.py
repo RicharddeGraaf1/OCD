@@ -579,6 +579,38 @@ def load_regelingen_diff_cmd():
                   f"over {len(codes)} bronhouder(s)[/green]")
 
 
+@cli.command("herlaad-annotaties")
+def herlaad_annotaties_cmd():
+    """Herlaad annotaties voor artikelstructuur-regelingen met structuur maar 0
+    juridische_regel (bv. overgeslagen door een eerdere laadfout)."""
+    from src.loaders.api_loader import herlaad_annotaties
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                WITH j AS (SELECT regeling_expression, count(*) n FROM p2p.juridische_regel GROUP BY 1),
+                     t AS (SELECT regeling_expression, count(*) n FROM p2p.tekst_element GROUP BY 1)
+                SELECT r.frbr_expression
+                FROM p2p.regeling r
+                JOIN t ON t.regeling_expression = r.frbr_expression
+                LEFT JOIN j ON j.regeling_expression = r.frbr_expression
+                WHERE r.documenttype IN ('Omgevingsplan', 'Waterschapsverordening', 'Omgevingsverordening')
+                  AND COALESCE(j.n, 0) = 0
+                ORDER BY r.frbr_expression
+            """)
+            exprs = [row["frbr_expression"] for row in cur.fetchall()]
+    finally:
+        conn.close()
+    console.print(f"[bold]{len(exprs)} regeling(en) met structuur maar 0 regels[/bold]")
+    if not exprs:
+        console.print("[green]niets te herannoteren[/green]")
+        return
+    with load_run("ozon-regelingen", scope=f"herlaad-annotaties ({len(exprs)})") as run:
+        n = herlaad_annotaties(exprs)
+        run.set(n_verwerkt=n)
+    console.print(f"[green]{n} regeling(en) opnieuw geannoteerd[/green]")
+
+
 @cli.command("refresh-subdiv")
 @click.option("--bronhouder", "-b", default=None,
               help="Beperk tot één bronhouder-code (bv. gm0344). Default: alle polygon-locaties (volledige rebuild).")

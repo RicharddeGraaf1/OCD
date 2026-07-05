@@ -466,6 +466,10 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
                                ON CONFLICT (identificatie) DO NOTHING""",
                             (nw_loc,),
                         )
+                        # `waardeInRegeltekst` is in de DSO-API een string-enum
+                        # ("waarde staat in regeltekst") die aangeeft dat de waarde
+                        # in de regeltekst zelf staat i.p.v. als los getal/kwalificatie.
+                        # De kolom is een boolean-vlag → aanwezig = True, anders None.
                         cur.execute(
                             """INSERT INTO p2p.normwaarde
                                (norm_id, locatie_id, kwalitatieve_waarde, kwantitatieve_waarde, waarde_in_regeltekst)
@@ -473,7 +477,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
                             (norm["identificatie"], nw_loc,
                              nw.get("kwalitatieveWaarde"),
                              nw.get("kwantitatieveWaarde"),
-                             nw.get("waardeInRegeltekst")),
+                             True if nw.get("waardeInRegeltekst") else None),
                         )
                         stats["normwaarden"] += 1
 
@@ -927,6 +931,44 @@ def load_regelingen_expressies(reg_infos: list[dict]) -> int:
                 n += 1
             refresh_locatie_subdiv(conn, code)
             console.print(f"  [green]{code}: {len(regs)} expressie(s) geladen[/green]")
+        return n
+    finally:
+        conn.close()
+
+
+def herlaad_annotaties(expr_ids: list[str]) -> int:
+    """Herlaad alleen de annotatie-stap voor een lijst regeling-expressies.
+
+    Voor regelingen die wel documentstructuur maar geen annotaties hebben (bv.
+    overgeslagen door een eerdere laadfout). Zoekt work/type/bronhouder op in
+    p2p.regeling en draait de juiste annotatie-loader. Returnt het aantal
+    succesvol geannoteerde regelingen.
+    """
+    conn = get_conn()
+    n = 0
+    try:
+        for expr in expr_ids:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT frbr_work, documenttype, bronhouder "
+                    "FROM p2p.regeling WHERE frbr_expression = %s", (expr,))
+                row = cur.fetchone()
+            if not row:
+                console.print(f"  [yellow]{expr}: niet in p2p.regeling[/yellow]")
+                continue
+            work, doc_type, bh = row["frbr_work"], row["documenttype"], row["bronhouder"]
+            console.print(f"  [bold]Herannoteren:[/bold] {expr.split('/')[-1]} "
+                          f"({doc_type}, {bh})")
+            try:
+                if doc_type in VRIJETEKST_TYPES:
+                    load_divisieannotaties(conn, work, bh)
+                else:
+                    load_regeltekstannotaties(conn, work, bh, expr)
+                conn.commit()
+                n += 1
+            except Exception as e:
+                conn.rollback()
+                console.print(f"    [red]mislukt: {e}[/red]")
         return n
     finally:
         conn.close()
