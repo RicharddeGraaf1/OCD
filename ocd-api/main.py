@@ -2108,12 +2108,14 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
     """Welke regelingen gelden op een RD-coördinaat? Retourneert een
     documentenlijst voor de viewer, gegroepeerd op bestuurslaag."""
     with get_conn() as conn, conn.cursor() as cur:
-        # Dedupliceer op opschrift: zelfde titel = zelfde regeling voor de
-        # gebruiker, zelfs als er 340 expressions zijn (bv. Voorbeschermings-
-        # regels hyperscale datacentra per gemeente). Pak de nieuwste expression.
+        # Dedupliceer op frbr_work: een document = één work. Pak de nieuwste
+        # expression per work. NB: dedup op opschrift is fout — een titelwijziging
+        # tussen versies splitst één document in twee, en verschillende works met
+        # dezelfde titel (bv. Voorbeschermingsregels datacentra per gemeente) zijn
+        # juist aparte documenten (per punt geldt sowieso maar de lokale).
         cur.execute(
             """
-            SELECT DISTINCT ON (r.opschrift)
+            SELECT DISTINCT ON (r.frbr_work)
                 r.frbr_expression   AS expression,
                 r.opschrift         AS titel,
                 r.documenttype      AS type,
@@ -2128,7 +2130,7 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
             JOIN p2p.regeling r       ON r.frbr_expression = te.regeling_expression
             JOIN core.bronhouder b    ON b.overheidscode = r.bronhouder
             WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
-            ORDER BY r.opschrift, r.frbr_expression DESC
+            ORDER BY r.frbr_work, r.frbr_expression DESC
             """,
             (x, y),
         )
@@ -3182,7 +3184,7 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
         cur.execute(
             """
             WITH per_expr AS (
-                SELECT r.frbr_expression, r.opschrift, r.documenttype, b.bestuurslaag,
+                SELECT r.frbr_work, r.frbr_expression, r.opschrift, r.documenttype, b.bestuurslaag,
                        count(DISTINCT te.wid) AS aantal
                 FROM p2p.activiteit_locatieaanduiding ala
                 JOIN p2p.locatie_subdiv ls   ON ls.identificatie = ala.locatie_id
@@ -3193,13 +3195,18 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
                 JOIN core.bronhouder b       ON b.overheidscode = r.bronhouder
                 WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
                   AND te.inhoud IS NOT NULL AND length(te.inhoud) > 20
-                GROUP BY r.frbr_expression, r.opschrift, r.documenttype, b.bestuurslaag
+                GROUP BY r.frbr_work, r.frbr_expression, r.opschrift, r.documenttype, b.bestuurslaag
             )
-            SELECT DISTINCT ON (opschrift)
-                frbr_expression AS bron_id, opschrift AS regeling,
-                documenttype, bestuurslaag, aantal
-            FROM per_expr
-            ORDER BY opschrift, frbr_expression DESC
+            -- Dedup op frbr_work (document = work), nieuwste expression per work.
+            SELECT bron_id, regeling, documenttype, bestuurslaag, aantal
+            FROM (
+                SELECT DISTINCT ON (frbr_work)
+                    frbr_expression AS bron_id, opschrift AS regeling,
+                    documenttype, bestuurslaag, aantal
+                FROM per_expr
+                ORDER BY frbr_work, frbr_expression DESC
+            ) s
+            ORDER BY regeling
             """,
             {"x": x, "y": y},
         )
