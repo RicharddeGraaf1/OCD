@@ -318,6 +318,20 @@ def load_planvoorraad_cmd(datum, page_size, max_pages):
         load_planvoorraad_snapshot(datum=datum, page_size=page_size, max_pages=max_pages)
 
 
+@cli.command("load-wro-imro2006")
+@click.option("--gemeente", "-g", default=None,
+              help="CBS-code(s), comma-separated. Default: alle bronhouders.")
+def load_wro_imro2006_cmd(gemeente):
+    """Laad missende IMRO2006/Artikel-10-plannen met indicatieve ambtsgebied-
+    geometrie (uit de planvoorraad-diff; metadata+teksten uit IHR)."""
+    from src.loaders.wro_imro2006 import load_imro2006_ambtsgebied
+    codes = [c.strip() for c in gemeente.split(",")] if gemeente else None
+    with load_run("pdok-bestemmingsplannen", scope=f"imro2006:{gemeente or 'alle'}") as run:
+        n = load_imro2006_ambtsgebied(codes)
+        run.set(n_verwerkt=n)
+    console.print(f"[green]{n} IMRO2006-plannen geladen (ambtsgebied-geometrie)[/green]")
+
+
 @cli.command("load-gemeentegrenzen")
 def load_gemeentegrenzen_cmd():
     """Laad gemeente- + provinciegrenzen uit PDOK Bestuurlijke Gebieden.

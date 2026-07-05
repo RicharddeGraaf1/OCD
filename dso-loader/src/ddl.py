@@ -468,6 +468,10 @@ CREATE TABLE IF NOT EXISTS wro.ruimtelijk_instrument (
     geometrie           GEOMETRY(Geometry, 28992) NOT NULL,
     gml_source          TEXT NULL,
     pons_status         TEXT NOT NULL DEFAULT 'actief',
+    -- Herkomst van de geometrie: NULL/'pdok-gml' = precieze plangebied-GML;
+    -- 'ambtsgebied-imro2006' = indicatief (heel ambtsgebied, oude IMRO2006-plannen
+    -- zonder machine-leesbare geometrie). Viewer/bot tonen die apart.
+    geometrie_herkomst  TEXT NULL,
     laatst_geladen      TIMESTAMP NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_wro_instrument_geom ON wro.ruimtelijk_instrument USING GIST(geometrie);
