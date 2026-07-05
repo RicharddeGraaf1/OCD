@@ -2148,6 +2148,7 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
                 ri.planstatus,
                 ri.datum,
                 ri.pons_status,
+                ri.geometrie_herkomst,
                 b.naam              AS bronhouder_naam,
                 b.bestuurslaag
             FROM wro.ruimtelijk_instrument ri
