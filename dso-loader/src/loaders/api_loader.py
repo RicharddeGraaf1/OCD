@@ -795,6 +795,140 @@ REGELINGMODEL_MAP = {
 
 # ── Main entry point ─────────────────────────────────────────────────
 
+def _load_one_regeling(conn, reg: dict, bronhouder_code: str) -> None:
+    """Laad één regeling: metadata + documentstructuur + expand + annotaties.
+
+    Gedeeld door load_via_api (per bronhouder) en load_regelingen_expressies
+    (gerichte expressie-lijst uit de diff). `reg` heeft de vorm van
+    find_regelingen: identificatie / titel / type / expressionId.
+    """
+    regeling_uri = reg["identificatie"]
+    expression_id = reg.get("expressionId", regeling_uri)
+    doc_type = reg["type"]
+    regelingmodel = REGELINGMODEL_MAP.get(doc_type, "RegelingCompact")
+
+    console.print(f"\n  [bold]Loading: {reg.get('titel', '')[:60]}[/bold] ({doc_type})")
+
+    # ── Regeling metadata ──
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO p2p.regeling
+               (frbr_expression, frbr_work, regelingmodel, opschrift, citeertitel, bronhouder, documenttype)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (frbr_expression) DO NOTHING""",
+            (expression_id, regeling_uri, regelingmodel,
+             reg.get("titel", ""), reg.get("titel", ""),
+             bronhouder_code, doc_type),
+        )
+    conn.commit()
+
+    # ── Documentstructuur ──
+    try:
+        n_tekst = load_documentstructuur(conn, regeling_uri, expression_id)
+        console.print(f"    Documentstructuur: {n_tekst} elementen")
+    except Exception as e:
+        console.print(f"    [red]Documentstructuur failed: {e}[/red]")
+
+    # ── Pons + Regelingsgebied ──
+    try:
+        expand_stats = load_regeling_expand(conn, regeling_uri, expression_id)
+        parts = []
+        if expand_stats["regelingsgebied"]:
+            parts.append("regelingsgebied")
+        if expand_stats["pons"]:
+            parts.append("pons")
+        if parts:
+            console.print(f"    Expand: {', '.join(parts)}")
+    except Exception as e:
+        console.print(f"    [dim]Expand failed: {e}[/dim]")
+
+    # ── Annotaties ──
+    try:
+        if doc_type in ARTIKELSTRUCTUUR_TYPES:
+            stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code, expression_id)
+            console.print(
+                f"    Annotaties: {stats['regels']} regels, "
+                f"{stats['activiteiten']} activiteiten, {stats['ala']} ALA's, "
+                f"{stats['ga']} GA's, {stats['normen']} normen "
+                f"({stats['normwaarden']} waarden), "
+                f"{stats['kaarten']} kaarten, "
+                f"{stats['locaties']} locaties "
+                f"({stats['geometrieen']} met geometrie)")
+        elif doc_type in VRIJETEKST_TYPES:
+            stats = load_divisieannotaties(conn, regeling_uri, bronhouder_code)
+            console.print(
+                f"    Annotaties: {stats['tekstdelen']} tekstdelen, "
+                f"{stats['ga']} GA's, {stats['kaarten']} kaarten, "
+                f"{stats['locaties']} locaties "
+                f"({stats['geometrieen']} met geometrie)")
+        else:
+            console.print(f"    [yellow]Unknown type {doc_type}, trying artikelstructuur[/yellow]")
+            stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code, expression_id)
+    except Exception as e:
+        console.print(f"    [red]Annotaties failed: {e}[/red]")
+
+
+def fetch_alle_dso_regelingen() -> list[dict]:
+    """Alle Ow-regelingen in DSO via de algemene /regelingen-call (geen
+    bevoegdGezag-filter). ~1930 regelingen in ~10 pagina's. Reg-vorm gelijk aan
+    find_regelingen, plus 'bronhouder'."""
+    results: list[dict] = []
+    for page in range(1, 500):
+        data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen",
+                    params={"page": page, "size": 200})
+        for reg in data.get("_embedded", {}).get("regelingen", []):
+            results.append({
+                "identificatie": reg["identificatie"],
+                "titel": reg.get("officieleTitel", ""),
+                "type": reg.get("type", {}).get("waarde", ""),
+                "expressionId": reg.get("expressionId", ""),
+                "bronhouder": reg.get("aangeleverdDoorEen", {}).get("code"),
+            })
+        if not data.get("_links", {}).get("next", {}).get("href"):
+            break
+    return results
+
+
+def bepaal_missende_expressies(conn) -> list[dict]:
+    """Expressie-diff: regelingen die in DSO staan maar niet lokaal (op
+    expressie-niveau, dus incl. nieuwe versies van bestaande omgevingsplannen)."""
+    dso = fetch_alle_dso_regelingen()
+    with conn.cursor() as cur:
+        cur.execute("SELECT frbr_expression FROM p2p.regeling")
+        lokaal = {r["frbr_expression"] for r in cur.fetchall()}
+    return [reg for reg in dso
+            if reg["expressionId"] and reg["expressionId"] not in lokaal]
+
+
+def load_regelingen_expressies(reg_infos: list[dict]) -> int:
+    """Laad een gerichte lijst regeling-expressies (bv. uit bepaal_missende_
+    expressies). Groepeert per bronhouder voor één subdiv-refresh per bronhouder.
+    Returnt het aantal geladen expressies."""
+    from src.db import normalize_bronhouder_code
+    from src.loaders.subdiv import refresh_locatie_subdiv
+
+    per_bh: dict[str, list[dict]] = {}
+    for reg in reg_infos:
+        code = normalize_bronhouder_code(reg.get("bronhouder") or "")
+        per_bh.setdefault(code, []).append(reg)
+
+    conn = get_conn()
+    n = 0
+    try:
+        for code, regs in per_bh.items():
+            with conn.cursor() as cur:
+                upsert_bronhouder(cur, code, code)
+            conn.commit()
+            for reg in regs:
+                _load_one_regeling(conn, reg, code)
+                n += 1
+            refresh_locatie_subdiv(conn, code)
+            console.print(f"  [green]{code}: {len(regs)} expressie(s) geladen[/green]")
+        return n
+    finally:
+        conn.close()
+
+
 def load_via_api(overheid_code: str, naam: str,
                  bronhouder_code: str | None = None,
                  doc_types: list[str] | None = None):
@@ -814,70 +948,7 @@ def load_via_api(overheid_code: str, naam: str,
         conn.commit()
 
         for reg in regelingen:
-            regeling_uri = reg["identificatie"]
-            expression_id = reg.get("expressionId", regeling_uri)
-            doc_type = reg["type"]
-            regelingmodel = REGELINGMODEL_MAP.get(doc_type, "RegelingCompact")
-
-            console.print(f"\n  [bold]Loading: {reg['titel'][:60]}[/bold] ({doc_type})")
-
-            # ── Regeling metadata ──
-            with conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO p2p.regeling
-                       (frbr_expression, frbr_work, regelingmodel, opschrift, citeertitel, bronhouder, documenttype)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (frbr_expression) DO NOTHING""",
-                    (expression_id, regeling_uri, regelingmodel,
-                     reg.get("titel", ""), reg.get("titel", ""),
-                     bronhouder_code, doc_type),
-                )
-            conn.commit()
-
-            # ── Documentstructuur ──
-            try:
-                n_tekst = load_documentstructuur(conn, regeling_uri, expression_id)
-                console.print(f"    Documentstructuur: {n_tekst} elementen")
-            except Exception as e:
-                console.print(f"    [red]Documentstructuur failed: {e}[/red]")
-
-            # ── Pons + Regelingsgebied ──
-            try:
-                expand_stats = load_regeling_expand(conn, regeling_uri, expression_id)
-                parts = []
-                if expand_stats["regelingsgebied"]:
-                    parts.append("regelingsgebied")
-                if expand_stats["pons"]:
-                    parts.append("pons")
-                if parts:
-                    console.print(f"    Expand: {', '.join(parts)}")
-            except Exception as e:
-                console.print(f"    [dim]Expand failed: {e}[/dim]")
-
-            # ── Annotaties ──
-            try:
-                if doc_type in ARTIKELSTRUCTUUR_TYPES:
-                    stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code, expression_id)
-                    console.print(
-                        f"    Annotaties: {stats['regels']} regels, "
-                        f"{stats['activiteiten']} activiteiten, {stats['ala']} ALA's, "
-                        f"{stats['ga']} GA's, {stats['normen']} normen "
-                        f"({stats['normwaarden']} waarden), "
-                        f"{stats['kaarten']} kaarten, "
-                        f"{stats['locaties']} locaties "
-                        f"({stats['geometrieen']} met geometrie)")
-                elif doc_type in VRIJETEKST_TYPES:
-                    stats = load_divisieannotaties(conn, regeling_uri, bronhouder_code)
-                    console.print(
-                        f"    Annotaties: {stats['tekstdelen']} tekstdelen, "
-                        f"{stats['ga']} GA's, {stats['kaarten']} kaarten, "
-                        f"{stats['locaties']} locaties "
-                        f"({stats['geometrieen']} met geometrie)")
-                else:
-                    console.print(f"    [yellow]Unknown type {doc_type}, trying artikelstructuur[/yellow]")
-                    stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code, expression_id)
-            except Exception as e:
-                console.print(f"    [red]Annotaties failed: {e}[/red]")
+            _load_one_regeling(conn, reg, bronhouder_code)
 
         # Afgeleide subdiv-tabel bijwerken voor de zojuist geladen bronhouder
         # (versnelt geo-queries in ocd-api; zie loaders/subdiv.py).

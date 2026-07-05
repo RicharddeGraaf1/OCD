@@ -550,6 +550,35 @@ def load_api(types, gemeente, overheid):
                          bronhouder_code=cfg.POC_CBS_CODE, doc_types=doc_types)
 
 
+@cli.command("load-regelingen-diff")
+def load_regelingen_diff_cmd():
+    """Expressie-diff → laad alleen missende/gewijzigde regelingen (gericht).
+
+    Haalt alle ~1930 DSO-regelingen op (algemene call), vergelijkt op expressie
+    met p2p.regeling, en laadt alleen wat mist — incl. nieuwe versies van
+    bestaande omgevingsplannen. Vervangt de per-bronhouder-herlaad.
+    """
+    from src.loaders.api_loader import (
+        bepaal_missende_expressies, load_regelingen_expressies,
+    )
+    conn = get_conn()
+    try:
+        missend = bepaal_missende_expressies(conn)
+    finally:
+        conn.close()
+    console.print(f"[bold]{len(missend)} missende/gewijzigde expressie(s)[/bold]")
+    if not missend:
+        console.print("[green]niets te laden — lokaal is bij[/green]")
+        return
+    codes = {reg["bronhouder"] for reg in missend if reg.get("bronhouder")}
+    with load_run("ozon-regelingen", scope=f"expressie-diff ({len(missend)})") as run:
+        run.markeer_bronhouder(*codes)
+        n = load_regelingen_expressies(missend)
+        run.set(n_verwerkt=n)
+    console.print(f"[green]{n} regeling-expressie(s) geladen "
+                  f"over {len(codes)} bronhouder(s)[/green]")
+
+
 @cli.command("refresh-subdiv")
 @click.option("--bronhouder", "-b", default=None,
               help="Beperk tot één bronhouder-code (bv. gm0344). Default: alle polygon-locaties (volledige rebuild).")
