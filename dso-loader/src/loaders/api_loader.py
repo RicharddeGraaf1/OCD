@@ -827,6 +827,7 @@ def _load_one_regeling(conn, reg: dict, bronhouder_code: str) -> None:
         n_tekst = load_documentstructuur(conn, regeling_uri, expression_id)
         console.print(f"    Documentstructuur: {n_tekst} elementen")
     except Exception as e:
+        conn.rollback()  # transactie schoon houden: fout hier mag de volgende stap/regeling niet meeslepen
         console.print(f"    [red]Documentstructuur failed: {e}[/red]")
 
     # ── Pons + Regelingsgebied ──
@@ -840,6 +841,7 @@ def _load_one_regeling(conn, reg: dict, bronhouder_code: str) -> None:
         if parts:
             console.print(f"    Expand: {', '.join(parts)}")
     except Exception as e:
+        conn.rollback()
         console.print(f"    [dim]Expand failed: {e}[/dim]")
 
     # ── Annotaties ──
@@ -865,6 +867,7 @@ def _load_one_regeling(conn, reg: dict, bronhouder_code: str) -> None:
             console.print(f"    [yellow]Unknown type {doc_type}, trying artikelstructuur[/yellow]")
             stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code, expression_id)
     except Exception as e:
+        conn.rollback()
         console.print(f"    [red]Annotaties failed: {e}[/red]")
 
 
