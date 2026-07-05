@@ -32,7 +32,8 @@ def _missende_idns(conn, cbs_codes: list[str] | None) -> list[dict]:
         params.append(gm_codes)
     with conn.cursor() as cur:
         cur.execute(f"""
-            SELECT o.identificatie, o.bronhouder_code, o.planstatus, o.plantype, o.titel
+            SELECT o.identificatie, o.bronhouder_code, o.bronhouder_naam,
+                   o.planstatus, o.plantype, o.titel
             FROM wro.wro_plan_observatie o
             WHERE o.snapshot_id = (SELECT snapshot_id FROM wro.wro_snapshot ORDER BY datum DESC LIMIT 1)
               AND o.verwijderd_op IS NULL
@@ -68,31 +69,40 @@ def load_imro2006_ambtsgebied(cbs_codes: list[str] | None = None) -> int:
             planstatus = row["planstatus"] or "onbekend"
             dossier = idn.rsplit("-", 1)[0] if "-" in idn else idn
 
-            with conn.cursor() as cur:
-                cur.execute("INSERT INTO core.planstatus (code) VALUES (%s) ON CONFLICT DO NOTHING",
-                            (planstatus,))
-                cur.execute("INSERT INTO wro.wro_dossier (dossiernummer, manifest_code, status) "
-                            "VALUES (%s, %s, NULL) ON CONFLICT DO NOTHING", (dossier, bron))
-                # Geometrie = ambtsgebied van de bronhouder. INSERT..SELECT: als er
-                # geen gemeentegrens is (opgeheven gemeente) wordt niets ingevoegd.
-                cur.execute("""
-                    INSERT INTO wro.ruimtelijk_instrument
-                        (idn, dossier, type_plan, naam, planstatus, datum, bronhouder,
-                         geometrie, gml_source, pons_status, geometrie_herkomst)
-                    SELECT %s, %s, %s, %s, %s, NULL, %s,
-                           g.geometrie, 'IHR-IMRO2006', 'actief', 'ambtsgebied-imro2006'
-                    FROM core.gemeentegrens g WHERE g.overheidscode = %s
-                    ON CONFLICT (idn) DO NOTHING
-                """, (idn, dossier, type_plan, naam, planstatus, bron, bron))
-                geladen = cur.rowcount
-            conn.commit()
+            naam_overheid = row["bronhouder_naam"] or bron
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("INSERT INTO core.planstatus (code) VALUES (%s) ON CONFLICT DO NOTHING",
+                                (planstatus,))
+                    # Manifest is nodig want wro_dossier.manifest_code -> wro_manifest (NOT NULL FK).
+                    cur.execute("INSERT INTO wro.wro_manifest (overheidscode, naam_overheid) "
+                                "VALUES (%s, %s) ON CONFLICT DO NOTHING", (bron, naam_overheid))
+                    cur.execute("INSERT INTO wro.wro_dossier (dossiernummer, manifest_code, status) "
+                                "VALUES (%s, %s, NULL) ON CONFLICT DO NOTHING", (dossier, bron))
+                    # Geometrie = ambtsgebied van de bronhouder. INSERT..SELECT: als er
+                    # geen gemeentegrens is (opgeheven gemeente) wordt niets ingevoegd.
+                    cur.execute("""
+                        INSERT INTO wro.ruimtelijk_instrument
+                            (idn, dossier, type_plan, naam, planstatus, datum, bronhouder,
+                             geometrie, gml_source, pons_status, geometrie_herkomst)
+                        SELECT %s, %s, %s, %s, %s, NULL, %s,
+                               g.geometrie, 'IHR-IMRO2006', 'actief', 'ambtsgebied-imro2006'
+                        FROM core.gemeentegrens g WHERE g.overheidscode = %s
+                        ON CONFLICT (idn) DO NOTHING
+                    """, (idn, dossier, type_plan, naam, planstatus, bron, bron))
+                    geladen = cur.rowcount
+                conn.commit()
 
-            if geladen == 0:
-                console.print(f"  [yellow]{idn}: geen ambtsgebied voor {bron} — overgeslagen[/yellow]")
+                if geladen == 0:
+                    console.print(f"  [yellow]{idn}: geen ambtsgebied voor {bron} — overgeslagen[/yellow]")
+                    continue
+                n_tekst = load_teksten_for_plan(conn, idn)
+                console.print(f"  [green]{idn}[/green] ({naam[:40]}) — ambtsgebied {bron}, {n_tekst} teksten")
+                n += 1
+            except Exception as e:
+                conn.rollback()  # één slecht plan mag de rest niet meeslepen
+                console.print(f"  [red]{idn}: {type(e).__name__} — overgeslagen[/red]")
                 continue
-            n_tekst = load_teksten_for_plan(conn, idn)
-            console.print(f"  [green]{idn}[/green] ({naam[:40]}) — ambtsgebied {bron}, {n_tekst} teksten")
-            n += 1
         return n
     finally:
         conn.close()
