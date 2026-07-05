@@ -28,14 +28,20 @@ Laatste geladen dag: `SELECT max(processed_date) FROM vth.etl_run WHERE status='
 python -m src.cli load-imtr --alle-ontbrekend
 ```
 
-### 3. Ozon regelingen — diff-gedreven per bronhouder
-Eerst detecteren wat afwijkt t.o.v. DSO, dan alléén die bronhouders herladen.
+### 3. Ozon regelingen — snelle expressie-diff, dan herladen
+DSO telt in totaal maar ~1930 regelingen. De **algemene** `/regelingen`-call
+(zonder bevoegdGezag) haalt ze in ~10 pagina's op; vergelijken op **expressie**
+(versie) vangt ook stil gewijzigde omgevingsplannen die de oude work-diff mist.
 ```
-python scripts/diff_dso_bronhouder_coverage.py --details --persist
-# herlaad per bronhouder met n_mist > 0:
-python -m src.cli load-api -o <code,naam>
+# snelle diff (seconden) + lijst geraakte bronhouders wegschrijven:
+python scripts/diff_regelingen_snel.py --codes-out drift.txt
+# herlaad alleen die bronhouders (upsert pakt de nieuwe expressie op):
+while IFS= read -r bh; do python -m src.cli load-api -o "$bh"; done < drift.txt
 ```
-Afgeweken bronhouders: `SELECT overheidscode, n_mist FROM core.bronhouder_dso_diff WHERE n_mist > 0 ORDER BY n_mist DESC;`
+NB: de oude `diff_dso_bronhouder_coverage.py` (seriële per-bronhouder-crawl, ~10
+min, vergelijkt op work-niveau) is hiermee vervangen voor het detecteren van
+missende/gewijzigde regelingen. `load-api` laat de superseded "over"-versies
+staan — losse opschoning later.
 
 ### 4. Besluitversies + ontwerpen — skippen zichzelf
 Volledige API-scan, maar interne poort laadt alleen nieuwe/toekomstige items.
