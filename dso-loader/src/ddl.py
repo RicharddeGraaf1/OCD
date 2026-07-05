@@ -193,6 +193,18 @@ CREATE TABLE IF NOT EXISTS core.gemeentegrens (
 CREATE INDEX IF NOT EXISTS idx_gemeentegrens_geom ON core.gemeentegrens USING GIST(geometrie);
 CREATE INDEX IF NOT EXISTS idx_gemeentegrens_provincie ON core.gemeentegrens(provincie);
 
+-- Grenzen van opgeheven gemeenten (PDOK CBS Gebiedsindelingen per jaar).
+-- Ambtsgebied-bron voor oude IMRO2006-plannen van niet-meer-bestaande
+-- bronhouders. Bewust apart van core.gemeentegrens (die voedt ponsenkaart-stats
+-- en mag geen overlappende opgeheven gemeenten bevatten).
+CREATE TABLE IF NOT EXISTS core.gemeentegrens_historisch (
+    overheidscode TEXT PRIMARY KEY,
+    naam          TEXT NULL,
+    jaar          INT  NULL,
+    geometrie     GEOMETRY(MultiPolygon, 28992) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gemeentegrens_hist_geom ON core.gemeentegrens_historisch USING GIST(geometrie);
+
 -- =============================================================
 -- p2p.* — STOP: Regelingen en Besluiten
 -- =============================================================

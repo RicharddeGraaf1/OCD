@@ -318,6 +318,22 @@ def load_planvoorraad_cmd(datum, page_size, max_pages):
         load_planvoorraad_snapshot(datum=datum, page_size=page_size, max_pages=max_pages)
 
 
+@cli.command("load-gemeentegrens-historisch")
+def load_gemeentegrens_historisch_cmd():
+    """Vul core.gemeentegrens_historisch met grenzen van opgeheven gemeenten
+    (PDOK CBS Gebiedsindelingen per jaar) — ambtsgebied-bron voor IMRO2006-plannen
+    van niet-meer-bestaande bronhouders."""
+    from src.loaders.wro_imro2006 import (
+        benodigde_opgeheven_codes, vul_gemeentegrens_historisch,
+    )
+    codes = benodigde_opgeheven_codes()
+    console.print(f"[bold]{len(codes)} opgeheven bronhouders zonder huidige grens[/bold]")
+    if not codes:
+        return
+    n = vul_gemeentegrens_historisch(codes)
+    console.print(f"[green]{n} historische gemeentegrenzen ingevoegd[/green]")
+
+
 @cli.command("load-wro-imro2006")
 @click.option("--gemeente", "-g", default=None,
               help="CBS-code(s), comma-separated. Default: alle bronhouders.")
