@@ -35,6 +35,7 @@ def norm_fast_path(cur, x: float, y: float, naam: str) -> dict | None:
         LEFT JOIN p2p.tekst_element         te  ON te.wid           = jr.regeltekst_wid
         LEFT JOIN p2p.regeling              r   ON r.frbr_expression = te.regeling_expression
         WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+          AND   r.inactief IS NOT TRUE
           AND   n.naam ILIKE %s
           AND   nw.kwantitatieve_waarde IS NOT NULL
         ORDER BY nw.kwantitatieve_waarde DESC

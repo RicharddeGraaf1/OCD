@@ -35,6 +35,7 @@ from regelteksten_bij_vraag import (
 )
 from semantisch import router as semantisch_router
 from vergunningen import router as vergunningen_router
+from leefomgeving import router as leefomgeving_router
 
 load_dotenv()
 
@@ -206,6 +207,7 @@ app.include_router(ponsenkaart_router, dependencies=[Depends(verify_key)])
 app.include_router(planvoorraad_router, dependencies=[Depends(verify_key)])
 app.include_router(expand_router, dependencies=[Depends(verify_key)])
 app.include_router(kennis_router, dependencies=[Depends(verify_key)])
+app.include_router(leefomgeving_router, dependencies=[Depends(verify_key)])
 
 
 @app.get("/health")
@@ -362,6 +364,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             LEFT JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
             WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+              AND NOT r.inactief
             {combined_filter}
             GROUP BY r.opschrift, r.documenttype, te.opschrift, te.wid, te.inhoud, r.frbr_expression
             """,
@@ -382,6 +385,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                     AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
                 JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
                 WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                  AND NOT r.inactief
                   AND r.documenttype IN ('Omgevingsplan', 'Waterschapsverordening', 'Omgevingsverordening')
                 """,
                 (x, y),
@@ -407,6 +411,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                         FROM p2p.tekst_element te
                         JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
                         WHERE r.frbr_work = %s
+                          AND NOT r.inactief
                           AND te.inhoud IS NOT NULL AND length(te.inhoud) > 30
                         {opschrift_filter}
                         ORDER BY length(te.inhoud) DESC
@@ -433,6 +438,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                         FROM p2p.tekst_element te
                         JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
                         WHERE r.frbr_work = %s
+                          AND NOT r.inactief
                           AND te.inhoud_plain IS NOT NULL AND length(te.inhoud_plain) > 30
                           AND to_tsvector('dutch', coalesce(te.inhoud_plain, ''))
                               @@ to_tsquery('dutch', %s)
@@ -490,6 +496,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
             FROM p2p.tekst_element te
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE r.documenttype IN ('Omgevingsvisie', 'Programma')
+              AND NOT r.inactief
               AND (
                 r.bronhouder IN (
                     SELECT DISTINCT r2.bronhouder
@@ -500,6 +507,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                         AND (te2.regeling_expression = jr2.regeling_expression OR jr2.regeling_expression IS NULL)
                     JOIN p2p.regeling r2 ON r2.frbr_expression = te2.regeling_expression
                     WHERE ST_Intersects(ls2.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                      AND NOT r2.inactief
                       AND r2.documenttype = 'Omgevingsplan'
                 )
                 OR r.regelingsgebied_id IN (
@@ -737,6 +745,7 @@ def zoek(q: str = Query(..., min_length=2), limit: int = Query(20, le=100)):
              FROM p2p.tekst_element te
              JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
              WHERE te.inhoud_plain ILIKE %s
+               AND NOT r.inactief
              LIMIT %s)
             UNION ALL
             (SELECT 'Wro',
@@ -847,6 +856,7 @@ def normwaarde(
                 LEFT JOIN p2p.tekst_element             te  ON te.wid           = jr.regeltekst_wid
                 LEFT JOIN p2p.regeling                  r   ON r.frbr_expression = te.regeling_expression
                 WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                  AND   r.inactief IS NOT TRUE
             ),
             bucketed AS (
                 SELECT *,
@@ -1167,6 +1177,7 @@ def activiteit(
                 LEFT JOIN p2p.tekst_element             te   ON te.wid           = jr.regeltekst_wid
                 LEFT JOIN p2p.regeling                  r    ON r.frbr_expression = te.regeling_expression
                 WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                  AND   r.inactief IS NOT TRUE
             ),
             bucketed AS (
                 SELECT *,
@@ -1451,6 +1462,7 @@ def regeltekst(
                     r.bronhouder
             FROM    best_per_jr                        b
             LEFT JOIN p2p.regeling                     r  ON r.frbr_expression = b.regeling_expression
+            WHERE   r.inactief IS NOT TRUE
             ORDER BY b.match_score DESC
             LIMIT %s
             """,
@@ -1648,6 +1660,7 @@ def _fetch_objecten_normwaarde(cur, x: float, y: float) -> list[dict]:
             AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
         LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
         WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+          AND   r.inactief IS NOT TRUE
         LIMIT %s
         """,
         (x, y, _OBJ_FETCH_LIMIT_PER_TYPE),
@@ -1682,6 +1695,7 @@ def _fetch_objecten_activiteit(cur, x: float, y: float) -> list[dict]:
             AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
         LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
         WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+          AND   r.inactief IS NOT TRUE
         LIMIT %s
         """,
         (x, y, _OBJ_FETCH_LIMIT_PER_TYPE),
@@ -1747,6 +1761,7 @@ def _fetch_objecten_gebiedsaanwijzing(cur, x: float, y: float) -> list[dict]:
             AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
         LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
         WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+          AND   r.inactief IS NOT TRUE
         LIMIT %s
         """,
         (x, y, _OBJ_FETCH_LIMIT_PER_TYPE),
@@ -1786,6 +1801,7 @@ def _fetch_objecten_gio(cur, x: float, y: float) -> list[dict]:
         JOIN    p2p.geo_informatieobject gio ON gio.frbr_expression = gl.gio_frbr
         LEFT JOIN p2p.regeling r ON r.frbr_expression = gio.regeling_expression
         WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+          AND   r.inactief IS NOT TRUE
         LIMIT %s
         """,
         (x, y, _OBJ_FETCH_LIMIT_PER_TYPE),
@@ -1999,6 +2015,7 @@ def regels(
                     r.bronhouder
             FROM    best_per_jr                        b
             LEFT JOIN p2p.regeling                     r  ON r.frbr_expression = b.regeling_expression
+            WHERE   r.inactief IS NOT TRUE
             ORDER BY b.ts_rank_score DESC
             LIMIT %s
             """,
@@ -2130,6 +2147,7 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
             JOIN p2p.regeling r       ON r.frbr_expression = te.regeling_expression
             JOIN core.bronhouder b    ON b.overheidscode = r.bronhouder
             WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+              AND NOT r.inactief
             ORDER BY r.frbr_work, r.frbr_expression DESC
             """,
             (x, y),
@@ -2741,7 +2759,7 @@ def regelingen_zoek(
         # Filter-clauses dynamisch opbouwen — alleen meegeven wat actief is.
         # Bestuurslaag-clause wordt apart bijgehouden zodat we 'm kunnen
         # weglaten bij de facet-count (per-chip preview semantiek).
-        base_where: list[str] = ["1=1"]
+        base_where: list[str] = ["1=1", "NOT r.inactief"]
         base_params: list = []
 
         bestuurslaag_clause: str | None = None
@@ -3195,6 +3213,7 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
                 JOIN p2p.regeling r          ON r.frbr_expression = te.regeling_expression
                 JOIN core.bronhouder b       ON b.overheidscode = r.bronhouder
                 WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+                  AND NOT r.inactief
                   AND te.inhoud IS NOT NULL AND length(te.inhoud) > 20
                 GROUP BY r.frbr_work, r.frbr_expression, r.opschrift, r.documenttype, b.bestuurslaag
             )
@@ -3432,6 +3451,7 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
                 AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE ST_Intersects(ls.geometrie, {point})
+              AND NOT r.inactief
             GROUP BY ga.type, ga.naam, ga.groep, r.opschrift, r.documenttype
             ORDER BY ga.type, ga.naam
             """,
@@ -3468,6 +3488,7 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
                 AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE ST_Intersects(ls.geometrie, {point})
+              AND NOT r.inactief
               AND a.identificatie NOT IN (SELECT id FROM scaffolding)
             GROUP BY a.naam, a.groep, ala.kwalificatie
             ORDER BY a.groep, ala.kwalificatie, a.naam
@@ -3493,6 +3514,7 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
                 AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE ST_Intersects(ls.geometrie, {point})
+              AND NOT r.inactief
             GROUP BY n.identificatie, n.naam, n.type_norm, n.eenheid, n.groep
             ORDER BY n.naam
             """,
@@ -3516,6 +3538,7 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
                 AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE ST_Intersects(ls.geometrie, {point})
+              AND NOT r.inactief
             GROUP BY n.naam, n.type_norm, n.eenheid,
                      nw.kwantitatieve_waarde, nw.kwalitatieve_waarde, r.opschrift
             ORDER BY n.naam
@@ -3607,6 +3630,7 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
                    ) AS gekoppeld
             FROM gio_loc gl
             LEFT JOIN p2p.regeling r ON r.frbr_expression = gl.regeling_expression
+            WHERE r.inactief IS NOT TRUE
             GROUP BY gl.frbr_expression, gl.frbr_work, gl.naam, r.opschrift, r.documenttype
             ORDER BY gl.naam NULLS LAST, gl.frbr_work
             """,

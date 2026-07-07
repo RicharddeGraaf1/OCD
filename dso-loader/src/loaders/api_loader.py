@@ -22,6 +22,7 @@ from src.canonieke_bronhouders import upsert_bronhouder
 from src.config import cfg
 from src.db import get_conn
 from src.rate_limiter import limiter
+from src.versie_status import markeer_siblings_inactief
 
 console = Console()
 
@@ -828,6 +829,9 @@ def _load_one_regeling(conn, reg: dict, bronhouder_code: str) -> None:
              reg.get("titel", ""), reg.get("titel", ""),
              bronhouder_code, doc_type),
         )
+        # Zojuist geladen = vigerende versie → oudere expressies van hetzelfde
+        # work standaard verbergen (verouderde-versie).
+        markeer_siblings_inactief(cur, regeling_uri, expression_id)
     conn.commit()
 
     # ── Documentstructuur ──
