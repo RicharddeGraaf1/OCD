@@ -182,7 +182,8 @@ CREATE TABLE IF NOT EXISTS p2p.regeling (
     documenttype        TEXT NULL REFERENCES core.documenttype(code),
     regelingsgebied_id  TEXT NULL,
     inactief            BOOLEAN     NOT NULL DEFAULT FALSE,
-    datum_inactief      TIMESTAMPTZ NULL
+    datum_inactief      TIMESTAMPTZ NULL,
+    reden_inactief      TEXT        NULL   -- 'ingetrokken' | 'verouderde-versie'
 );
 CREATE INDEX IF NOT EXISTS idx_regeling_work ON p2p.regeling(frbr_work);
 CREATE INDEX IF NOT EXISTS idx_regeling_bronhouder ON p2p.regeling(bronhouder);
