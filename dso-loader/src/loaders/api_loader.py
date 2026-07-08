@@ -352,20 +352,25 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
                         if tail:
                             themas.append(tail)
 
-                # Instructieregel-specifiek
+                # Instructieregel-specifiek. LET OP: de DSO Presenteren-API levert deze
+                # velden MEERVOUDIG (arrays): instructieregelInstrumenten /
+                # instructieregelTaakuitoefeningen (IMOW 0..*). We nemen de concept-tail
+                # van `code` (Title-case, consistent met het XML-pad in ow_xml.py).
+                def _concept_tails(items):
+                    tails = []
+                    for it in items or []:
+                        uri = it.get("code") or it.get("waarde") if isinstance(it, dict) else it
+                        if uri:
+                            tail = uri.rstrip("/").split("/")[-1]
+                            if tail:
+                                tails.append(tail)
+                    return tails or None
+
                 instr_instr = None
                 instr_taak = None
                 if regel_type == "Instructieregel":
-                    ii = regel.get("instructieregelInstrument")
-                    if ii:
-                        val = ii.get("waarde") if isinstance(ii, dict) else ii
-                        if val:
-                            instr_instr = val.rstrip("/").split("/")[-1] or None
-                    it = regel.get("instructieregelTaakuitoefening")
-                    if it:
-                        val = it.get("waarde") if isinstance(it, dict) else it
-                        if val:
-                            instr_taak = val.rstrip("/").split("/")[-1] or None
+                    instr_instr = _concept_tails(regel.get("instructieregelInstrumenten"))
+                    instr_taak = _concept_tails(regel.get("instructieregelTaakuitoefeningen"))
 
                 cur.execute(
                     """INSERT INTO p2p.juridische_regel

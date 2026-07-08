@@ -293,8 +293,9 @@ CREATE TABLE IF NOT EXISTS p2p.juridische_regel (
     idealisatie         TEXT NULL REFERENCES core.idealisatie(code),
     thema               TEXT[] NULL,
     omschrijving        TEXT NULL,
-    instructieregel_instrument      TEXT NULL,
-    instructieregel_taakuitoefening TEXT NULL,
+    -- IMOW 0..* → arrays. DSO-JSON: instructieregelInstrumenten / -Taakuitoefeningen.
+    instructieregel_instrument      TEXT[] NULL,
+    instructieregel_taakuitoefening TEXT[] NULL,
     regeltekst_wid      TEXT NOT NULL,
     -- Tot welke regeling hoort deze regel. Nodig om jr->tekst_element
     -- eenduidig te koppelen: regeltekst_wid (STOP wId) is NIET globaal uniek

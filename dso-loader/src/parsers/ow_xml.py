@@ -106,16 +106,20 @@ def parse_juridische_regels(xml_bytes: bytes) -> list[dict]:
                     if tail:
                         themas.append(tail)
 
-            # Instructieregel-specifiek: instrument + taakuitoefening concept-URIs.
+            # Instructieregel-specifiek: instrument + taakuitoefening zijn IMOW 0..*
+            # (repeatable elementen) → verzamel ALLE waardes, niet alleen de eerste.
             instructieregel_instrument = None
             instructieregel_taakuitoefening = None
             if regel_type == "Instructieregel":
-                instructieregel_instrument = _uri_tail(
-                    _text(regel, "regels:instructieregelInstrument")
-                )
-                instructieregel_taakuitoefening = _uri_tail(
-                    _text(regel, "regels:instructieregelTaakuitoefening")
-                )
+                def _tails(path):
+                    out = []
+                    for el in regel.findall(path, NS):
+                        tail = _uri_tail(el.text.strip()) if el.text else None
+                        if tail:
+                            out.append(tail)
+                    return out or None
+                instructieregel_instrument = _tails("regels:instructieregelInstrument")
+                instructieregel_taakuitoefening = _tails("regels:instructieregelTaakuitoefening")
 
             # Get activiteit locatie aanduidingen
             # Structure: regels:activiteitaanduiding > rol:ActiviteitRef + regels:ActiviteitLocatieaanduiding
