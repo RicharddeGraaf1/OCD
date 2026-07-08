@@ -37,7 +37,7 @@ def fetch_instructieregels(work):
 
 
 def main():
-    conn = psycopg.connect(cfg.db_url)
+    conn = psycopg.connect(os.environ.get("OCD_DB_URL") or cfg.db_url)
     with conn.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT r.frbr_work
