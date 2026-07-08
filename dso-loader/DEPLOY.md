@@ -424,3 +424,12 @@ De OCD-database is een snapshot. Opties om actueel te blijven:
 3. **Op verzoek**: een `/admin/refresh/{gemeente}` endpoint dat de loader triggert
 
 Voor de meeste use cases is een maandelijkse refresh voldoende — regelgeving verandert niet dagelijks.
+
+### Vergunningdata (`vth`-schema)
+
+De KOOP-vergunningkennisgevingen leven in het losstaande `vth`-schema en
+hebben een eigen ingest + onderhoudsstappen. Ná elke (bulk-)ingest hoort de
+**geometrie-backfill** te draaien die records met meerdere/tegenstrijdige
+gebiedsmarkeringen corrigeert (zie vault `gaps.md` G-87). Volledige procedure
+— inclusief hoe je gericht tegen de Railway-DB draait — staat in
+[scripts/koop-poc/README.md § Productiedata bijwerken](scripts/koop-poc/README.md#productiedata-bijwerken-railway).

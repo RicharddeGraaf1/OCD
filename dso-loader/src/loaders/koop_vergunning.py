@@ -452,7 +452,7 @@ def parse_record(record_elem: ET.Element) -> Optional[Record]:
         original.find(".//cup:datumTijdstipWijzigingWork", NS)
     )
 
-    geom = parse_gebiedsmarkering(original.find(".//ow:gebiedsmarkering", NS))
+    geom = parse_gebiedsmarkering(original.findall(".//ow:gebiedsmarkering", NS))
     beschrijving = text_of(original.find(".//dcterms:abstract", NS))
 
     enriched = record_elem.find(".//gzd:enrichedData", NS)
@@ -516,66 +516,202 @@ def parse_record(record_elem: ET.Element) -> Optional[Record]:
     )
 
 
-def parse_gebiedsmarkering(gebied: Optional[ET.Element]) -> dict[str, object]:
-    out: dict[str, object] = {
+# ---------- Geometrie-selectie ----------------------------------------------
+#
+# KOOP levert regelmatig MEERDERE <ow:gebiedsmarkering>-blokken per record.
+# In een minderheid daarvan wijken ze onderling >5 km af: het bevoegd gezag
+# publiceert een fout punt (bv. in Woerden) náást de juiste (bv. Amsterdam),
+# terwijl álle blokken hetzelfde <ligtInGemeente> dragen. Blind het eerste
+# blok nemen (het oude .find()-gedrag) plaatste de pin dan verkeerd — zie
+# vault gaps.md G-87. We verzamelen daarom alle kandidaten en kiezen de beste.
+#
+# De gemeente-centroïde-map is optioneel en wordt door de loader/backfill
+# gevuld uit de betrouwbare corpus-helft (records met precies één geometrie).
+# Zonder map degradeert de selectie naar medoïde/Vlak/eerste.
+
+_GEMEENTE_CENTROIDS: dict[str, tuple[float, float]] = {}
+
+# Onder deze onderlinge afstand (m) beschouwen we de gebiedsmarkeringen als
+# "dezelfde plek" (bv. een punt + zijn eigen omhullende vlak) en behouden we
+# het oude gedrag (eerste blok). Alleen bij échte divergentie grijpen we in.
+_DIVERGENCE_M = 1000.0
+
+
+def set_gemeente_centroids(mapping: Optional[dict[str, tuple[float, float]]]) -> None:
+    """Registreer een gemeente→RD-centroïde-map voor geometrie-selectie."""
+    global _GEMEENTE_CENTROIDS
+    _GEMEENTE_CENTROIDS = mapping or {}
+
+
+def _rd_dist(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Euclidische afstand in meters (RD/EPSG:28992)."""
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def _empty_geom() -> dict[str, object]:
+    return {
         "geometrie_type": None, "rd_x": None, "rd_y": None, "lat": None, "lon": None,
         "rd_wkt": None, "wgs_wkt": None,
         "geometrielabel": None, "postcode": None, "huisnummer": None,
         "huisletter": None, "huisnummertoevoeging": None,
         "straatnaam": None, "woonplaats": None, "ligt_in_gemeente": None,
     }
-    if gebied is None:
-        return out
 
-    for child in gebied:
-        tag = child.tag.split("}", 1)[-1]
-        if tag not in ("Adres", "Punt", "Vlak", "Postcodegebied", "PostcodeHuisnummer"):
-            continue
-        out["geometrie_type"] = tag
 
-        # Geometry
-        rd_text = text_of(child.find("ow:geometrie", NS))
-        wgs_text = text_of(child.find("ow:locatiegebied", NS))
-        out["rd_wkt"] = rd_text
-        out["wgs_wkt"] = wgs_text
+def _extract_candidate(child: ET.Element) -> Optional[dict[str, object]]:
+    """Extract één geometrie-kandidaat uit een Adres/Punt/Vlak-kind."""
+    tag = child.tag.split("}", 1)[-1]
+    if tag not in ("Adres", "Punt", "Vlak", "Postcodegebied", "PostcodeHuisnummer"):
+        return None
+    out = _empty_geom()
+    out["geometrie_type"] = tag
 
-        if rd_text and rd_text.upper().startswith("POINT"):
-            pt = parse_point(rd_text)
-            if pt:
-                out["rd_x"], out["rd_y"] = pt
-        elif rd_text and rd_text.upper().startswith("POLYGON"):
-            c = polygon_centroid(rd_text)
-            if c:
-                out["rd_x"], out["rd_y"] = c
+    # Geometry
+    rd_text = text_of(child.find("ow:geometrie", NS))
+    wgs_text = text_of(child.find("ow:locatiegebied", NS))
+    out["rd_wkt"] = rd_text
+    out["wgs_wkt"] = wgs_text
 
-        # WGS84 — locatiepunt is preferred (clean lat lon); fall back to polygon centroid
-        ll = parse_latlon(text_of(child.find("ow:locatiepunt", NS)) or "")
-        if ll:
-            out["lat"], out["lon"] = ll
-        elif wgs_text and wgs_text.upper().startswith("POLYGON"):
-            c = polygon_centroid(wgs_text)
-            if c:
-                out["lon"], out["lat"] = c  # locatiegebied is lon lat
+    if rd_text and rd_text.upper().startswith("POINT"):
+        pt = parse_point(rd_text)
+        if pt:
+            out["rd_x"], out["rd_y"] = pt
+    elif rd_text and rd_text.upper().startswith("POLYGON"):
+        c = polygon_centroid(rd_text)
+        if c:
+            out["rd_x"], out["rd_y"] = c
 
-        # Structured address fields (Adres has them; Punt/Vlak usually don't)
-        out["geometrielabel"] = text_of(child.find("ow:geometrielabel", NS))
-        out["postcode"] = text_of(child.find("ow:postcode", NS))
-        out["huisnummer"] = text_of(child.find("ow:huisnummer", NS))
-        out["huisletter"] = text_of(child.find("ow:huisletter", NS))
-        out["huisnummertoevoeging"] = text_of(child.find("ow:huisnummertoevoeging", NS))
-        out["straatnaam"] = text_of(child.find("ow:straatnaam", NS))
-        out["woonplaats"] = text_of(child.find("ow:woonplaats", NS))
-        out["ligt_in_gemeente"] = text_of(child.find("ow:ligtInGemeente", NS))
+    # WGS84 — locatiepunt is preferred (clean lat lon); fall back to polygon centroid
+    ll = parse_latlon(text_of(child.find("ow:locatiepunt", NS)) or "")
+    if ll:
+        out["lat"], out["lon"] = ll
+    elif wgs_text and wgs_text.upper().startswith("POLYGON"):
+        c = polygon_centroid(wgs_text)
+        if c:
+            out["lon"], out["lat"] = c  # locatiegebied is lon lat
 
-        # Fallback: parse geometrielabel for address-shaped Vlak/Punt records
-        if out["geometrielabel"] and not out["straatnaam"]:
-            parsed = parse_geometrielabel(out["geometrielabel"])
-            for k, v in parsed.items():
-                if v and not out.get(k):
-                    out[k] = v
-        break
+    # Structured address fields (Adres has them; Punt/Vlak usually don't)
+    out["geometrielabel"] = text_of(child.find("ow:geometrielabel", NS))
+    out["postcode"] = text_of(child.find("ow:postcode", NS))
+    out["huisnummer"] = text_of(child.find("ow:huisnummer", NS))
+    out["huisletter"] = text_of(child.find("ow:huisletter", NS))
+    out["huisnummertoevoeging"] = text_of(child.find("ow:huisnummertoevoeging", NS))
+    out["straatnaam"] = text_of(child.find("ow:straatnaam", NS))
+    out["woonplaats"] = text_of(child.find("ow:woonplaats", NS))
+    out["ligt_in_gemeente"] = text_of(child.find("ow:ligtInGemeente", NS))
 
+    # Fallback: parse geometrielabel for address-shaped Vlak/Punt records
+    if out["geometrielabel"] and not out["straatnaam"]:
+        parsed = parse_geometrielabel(out["geometrielabel"])
+        for k, v in parsed.items():
+            if v and not out.get(k):
+                out[k] = v
     return out
+
+
+def _dominant_gemeente(cands: list[dict[str, object]]) -> Optional[str]:
+    """Meest voorkomende niet-lege ligt_in_gemeente over de kandidaten."""
+    counts: dict[str, int] = {}
+    for c in cands:
+        g = c.get("ligt_in_gemeente")
+        if g:
+            counts[g] = counts.get(g, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=counts.get)
+
+
+def select_geometry_candidate(
+    cands: list[dict[str, object]],
+) -> Optional[dict[str, object]]:
+    """Kies de betrouwbaarste geometrie uit meerdere gebiedsmarkeringen.
+
+    Prioriteit:
+      1. Adres — een gestructureerd adres is een expliciete geocode.
+      2. Dichtst bij de gemeente-centroïde van de geclaimde gemeente. Lost
+         ook het 2-kandidaten-geval op dat clustering niet kan (een stray
+         punt in een andere regio verliest). Tie-break: Vlak boven Punt.
+      3. Medoïde bij >=3 kandidaten — de kandidaat het dichtst bij alle
+         andere; een enkele uitschieter valt af.
+      4. Vlak boven kale Punt.
+      5. Eerste kandidaat (oud gedrag).
+    """
+    cands = [c for c in cands if c]
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+
+    geo = [c for c in cands if c["rd_x"] is not None and c["rd_y"] is not None]
+
+    # Alleen ingrijpen bij ECHTE divergentie. Liggen alle kandidaten dicht
+    # bijeen (<1 km), dan is het eerste blok net zo goed — behoud het oude
+    # gedrag en voorkom onnodige churn/type-flips op de ~163k onschuldige
+    # records (punt + eigen omhullend vlak).
+    if len(geo) >= 2:
+        maxpair = max(
+            _rd_dist((a["rd_x"], a["rd_y"]), (b["rd_x"], b["rd_y"]))
+            for i, a in enumerate(geo) for b in geo[i + 1:]
+        )
+        if maxpair < _DIVERGENCE_M:
+            return cands[0]
+    elif len(geo) <= 1:
+        # <=1 kandidaat met coords: niets te disambigueren.
+        return cands[0]
+
+    adres = [c for c in cands if c["geometrie_type"] == "Adres"]
+    if adres:
+        return adres[0]
+
+    gem = _dominant_gemeente(cands)
+    if gem and gem in _GEMEENTE_CENTROIDS and len(geo) >= 2:
+        cx, cy = _GEMEENTE_CENTROIDS[gem]
+        geo.sort(key=lambda c: (
+            _rd_dist((c["rd_x"], c["rd_y"]), (cx, cy)),
+            0 if c["geometrie_type"] == "Vlak" else 1,
+        ))
+        return geo[0]
+
+    if len(geo) >= 3:
+        def total_dist(c: dict[str, object]) -> float:
+            return sum(
+                _rd_dist((c["rd_x"], c["rd_y"]), (o["rd_x"], o["rd_y"]))
+                for o in geo if o is not c
+            )
+        return min(geo, key=total_dist)
+
+    vlak = [c for c in cands if c["geometrie_type"] == "Vlak"]
+    if vlak:
+        return vlak[0]
+    return cands[0]
+
+
+def parse_gebiedsmarkering(
+    gebieden: "Optional[ET.Element] | list[ET.Element]",
+) -> dict[str, object]:
+    """Parse alle gebiedsmarkeringen en selecteer de betrouwbaarste geometrie.
+
+    Accepteert één element (legacy), None, of een lijst van
+    <ow:gebiedsmarkering>-elementen. Elk gebiedsmarkering-blok kan één of
+    meer Adres/Punt/Vlak-kinderen bevatten.
+    """
+    if gebieden is None:
+        return _empty_geom()
+    if isinstance(gebieden, list):
+        elems = gebieden
+    else:
+        elems = [gebieden]
+
+    cands: list[dict[str, object]] = []
+    for gebied in elems:
+        if gebied is None:
+            continue
+        for child in gebied:
+            c = _extract_candidate(child)
+            if c:
+                cands.append(c)
+
+    return select_geometry_candidate(cands) or _empty_geom()
 
 
 # ---------- HTTP fetching ----------------------------------------------------
