@@ -543,6 +543,37 @@ def set_gemeente_centroids(mapping: Optional[dict[str, tuple[float, float]]]) ->
     _GEMEENTE_CENTROIDS = mapping or {}
 
 
+def build_gemeente_centroids(conn) -> dict[str, tuple[float, float]]:
+    """Bouw een gemeente → mediane RD-centroïde-map uit de betrouwbare
+    single-geometrie-corpus (records met precies één geometrie).
+
+    Gebruikt door zowel de live ingest (cmd_run) als de backfill om de
+    geometrie-selectie te voeden. Alleen Postgres/PostGIS. Op een lege DB
+    komt er een lege map terug → de selectie valt netjes terug op
+    medoïde/Vlak/eerste.
+    """
+    with conn.cursor() as cur:
+        cur.execute(r"""
+            SELECT ligt_in_gemeente AS gem,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY ST_X(geometrie_rd_pt)) AS mx,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY ST_Y(geometrie_rd_pt)) AS my
+            FROM vth.vergunningkennisgeving
+            WHERE ligt_in_gemeente IS NOT NULL
+              AND geometrie_rd_pt IS NOT NULL
+              AND regexp_count(raw_xml, '<([A-Za-z0-9]+:)?geometrie>') = 1
+            GROUP BY 1
+        """)
+        rows = cur.fetchall()
+    out: dict[str, tuple[float, float]] = {}
+    for r in rows:
+        gem = r["gem"] if isinstance(r, dict) else r[0]
+        mx = r["mx"] if isinstance(r, dict) else r[1]
+        my = r["my"] if isinstance(r, dict) else r[2]
+        if mx is not None and my is not None:
+            out[gem] = (float(mx), float(my))
+    return out
+
+
 def _rd_dist(a: tuple[float, float], b: tuple[float, float]) -> float:
     """Euclidische afstand in meters (RD/EPSG:28992)."""
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
