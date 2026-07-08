@@ -2,6 +2,7 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
+from time import time as _time
 
 import httpx
 from dotenv import load_dotenv
@@ -584,6 +585,37 @@ def _rank_geldt(geldt: dict, vraag: str, top_k: int = 20) -> list[dict]:
     return out
 
 
+# TTL-cache op /v1/adres en /v1/locatie (2026-07-08 fix na batch-eval 500-rate):
+# batch-workflows (eval-runner, viewer-A/B, retrieval-eval) doen herhaalde
+# calls op dezelfde locatie binnen enkele minuten. Zonder cache load elk als
+# een verse DB-query (Query 1 activiteit-based kan >10s zijn onder load →
+# statement_timeout). TTL=300s, MAX=500 entries per endpoint. Insertion-order
+# eviction (Python 3.7+ dict is geordend), geen expliciete LRU nodig.
+_ADRES_CACHE_TTL = int(os.environ.get("OCD_ADRES_CACHE_TTL_S", "300"))
+_ADRES_CACHE_MAX = int(os.environ.get("OCD_ADRES_CACHE_MAX", "500"))
+_adres_cache: dict[tuple, tuple[float, dict]] = {}
+_locatie_cache: dict[tuple, tuple[float, dict]] = {}
+
+
+def _cache_get(cache: dict, key: tuple) -> dict | None:
+    entry = cache.get(key)
+    if entry is None:
+        return None
+    ts, value = entry
+    if _time() - ts > _ADRES_CACHE_TTL:
+        cache.pop(key, None)
+        return None
+    return value
+
+
+def _cache_put(cache: dict, key: tuple, value: dict) -> None:
+    if len(cache) >= _ADRES_CACHE_MAX:
+        # Insertion-order oudste weggooien; geen LRU nodig, TTL is de echte grens.
+        oldest_key = next(iter(cache))
+        cache.pop(oldest_key, None)
+    cache[key] = (_time(), value)
+
+
 @app.get("/v1/adres", dependencies=[Depends(verify_key)])
 def adres(
     q: str = Query(..., description="Adres (bijv. 'Prinsengracht 263, Amsterdam')"),
@@ -595,6 +627,11 @@ def adres(
     Wanneer zoektermen meegegeven worden, filtert de API server-side op
     relevante regelteksten. Zonder zoektermen worden alle regels geretourneerd.
     """
+    cache_key = (q.strip().lower(), zoektermen, vraag)
+    hit = _cache_get(_adres_cache, cache_key)
+    if hit is not None:
+        return hit
+
     resp = httpx.get(
         LOCATIESERVER,
         params={"q": q, "rows": 1, "fq": "type:adres"},
@@ -610,11 +647,13 @@ def adres(
     geldt = _wat_geldt_hier(x, y, zoektermen=kw_list)
     if vraag:
         geldt["ranked"] = _rank_geldt(geldt, vraag)
-    return {
+    result = {
         "adres": doc.get("weergavenaam", q),
         "rd": {"x": x, "y": y},
         **geldt,
     }
+    _cache_put(_adres_cache, cache_key, result)
+    return result
 
 
 @app.get("/v1/locatie", dependencies=[Depends(verify_key)])
@@ -625,10 +664,18 @@ def locatie(
     vraag: str = Query("", description="Optioneel: vraag waarop server-side gerankt wordt; voegt `ranked` (top-K) toe"),
 ):
     """Wat geldt op RD-coordinaten?"""
+    # Rond af op meter-precisie voor cache-key; sub-meter drift van hetzelfde
+    # perceel moet dezelfde cache-hit geven.
+    cache_key = (round(x), round(y), zoektermen, vraag)
+    hit = _cache_get(_locatie_cache, cache_key)
+    if hit is not None:
+        return hit
+
     kw_list = [kw.strip() for kw in zoektermen.split(",") if kw.strip()] if zoektermen else None
     geldt = _wat_geldt_hier(x, y, zoektermen=kw_list)
     if vraag:
         geldt["ranked"] = _rank_geldt(geldt, vraag)
+    _cache_put(_locatie_cache, cache_key, geldt)
     return geldt
 
 
