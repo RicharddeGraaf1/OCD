@@ -20,6 +20,7 @@ from rich.console import Console
 
 from src.config import cfg
 from src.db import get_conn
+from src.versie_status import markeer_siblings_inactief
 from src.parsers.stop_xml import parse_tekst_xml
 from src.parsers.ow_xml import (
     parse_activiteiten,
@@ -271,6 +272,9 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
              meta_extra.get("soort_regeling"),
              meta_extra.get("conditie")),
         )
+        # Zojuist geladen = vigerende versie → oudere expressies van hetzelfde
+        # work standaard verbergen (verouderde-versie).
+        markeer_siblings_inactief(cur, regeling_id, expression_id)
 
         # --- STOP tekst ---
         tekst_files = [n for n in z.namelist() if n == "Regeling/Tekst.xml"]

@@ -377,6 +377,7 @@ def killer_query(cur, matched_concept_rows: list[dict],
             AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
         JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
         WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+          AND NOT r.inactief
           AND te.inhoud IS NOT NULL
           AND length(te.inhoud) > 20
         ORDER BY a.naam, te.opschrift NULLS LAST
@@ -469,6 +470,7 @@ def tekst_fallback_query(cur, keywords: list[str], x: float, y: float,
             AND (te.regeling_expression = lw.rexpr OR lw.rexpr IS NULL)
         JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
         WHERE te.inhoud IS NOT NULL
+          AND NOT r.inactief
           AND length(te.inhoud) > 20
           AND (te.inhoud ~* %(rx)s OR COALESCE(te.opschrift, '') ~* %(rx)s)
         ORDER BY te.wid
