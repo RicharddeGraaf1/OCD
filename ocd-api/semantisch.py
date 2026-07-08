@@ -36,8 +36,9 @@ EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 # OR-variant van de tsquery: één ontbrekend woord mag de match niet torpederen.
 _TSQ = "nullif(replace(plainto_tsquery('dutch', %(q)s)::text, '&', '|'), '')::tsquery"
 
-_HYBRID_SQL = f"""
-WITH scope AS (
+# Regeling-scope: elke chunk van een regeling die op het punt geldt (regelingsgebied).
+_SCOPE_CTE = """
+scope AS (
     -- Scope op regelingsgebied i.p.v. activiteit_locatieaanduiding-junction.
     -- Regelingsgebied is per TPOD verplicht op elke regeling en is in OCD 100%
     -- gevuld (1863/1863 regelingen). De activiteit-junction-route mist
@@ -50,12 +51,39 @@ WITH scope AS (
     JOIN p2p.locatie_subdiv ls ON ls.identificatie = r.regelingsgebied_id
     WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
       AND NOT r.inactief
-),
+)"""
+
+# Kandidaten — variant A (default): hele regeling-scope, grof.
+_CAND_REGELING = """
 cand AS (
     SELECT id, regeling_expression, bron_soort, kop_pad, inhoud_plain, embedding, fts
     FROM v2a.tekst_embedding
     WHERE regeling_expression IN (SELECT expr FROM scope)
+)"""
+
+# Kandidaten — variant B (werkingsgebied_filter): alleen chunks wiens EIGEN
+# werkingsgebied het punt dekt (via v2a.chunk_annotatie, Fase 1). Chunks met
+# alleen een regelingsgebied-fallback matchen via het ambtsgebied → degraderen
+# naar regeling-scope; fijn-geannoteerde chunks doen alléén mee als hun
+# specifieke locatie het punt dekt. Begrippen (geen gebied) blijven regeling-breed.
+_CAND_WG = """
+loc AS (
+    SELECT DISTINCT ls.identificatie AS locatie_id
+    FROM p2p.locatie_subdiv ls
+    WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
 ),
+cand AS (
+    SELECT v.id, v.regeling_expression, v.bron_soort, v.kop_pad, v.inhoud_plain,
+           v.embedding, v.fts
+    FROM v2a.tekst_embedding v
+    WHERE v.regeling_expression IN (SELECT expr FROM scope)
+      AND (v.bron_soort = 'Begrip'
+           OR EXISTS (SELECT 1 FROM v2a.chunk_annotatie ca
+                      JOIN loc ON loc.locatie_id = ca.locatie_id
+                      WHERE ca.chunk_id = v.id))
+)"""
+
+_TAIL = f"""
 dense AS (
     SELECT id, row_number() OVER (ORDER BY embedding <=> %(qv)s::vector) AS rnk
     FROM cand ORDER BY embedding <=> %(qv)s::vector LIMIT 30
@@ -83,12 +111,27 @@ LIMIT %(k)s
 """
 
 
+def _build_sql(werkingsgebied_filter: bool) -> str:
+    cand = _CAND_WG if werkingsgebied_filter else _CAND_REGELING
+    return "WITH " + _SCOPE_CTE + ",\n" + cand + ",\n" + _TAIL
+
+
+def _build_count_sql(werkingsgebied_filter: bool) -> str:
+    """Aantal kandidaat-chunks in de scope — voor de A/B-trace (scope-versmalling)."""
+    cand = _CAND_WG if werkingsgebied_filter else _CAND_REGELING
+    return "WITH " + _SCOPE_CTE + ",\n" + cand + "\nSELECT count(*) AS n FROM cand"
+
+
 class SemantischRequest(BaseModel):
     question: str = Field(..., min_length=2, max_length=500)
     location: str | None = Field(None, description="Adres. Of geef x/y.")
     x: float | None = Field(None, description="RD x-coördinaat")
     y: float | None = Field(None, description="RD y-coördinaat")
     k: int = Field(6, ge=1, le=30, description="Aantal regelteksten")
+    werkingsgebied_filter: bool = Field(
+        False,
+        description="Fase 2: filter chunks op hun EIGEN werkingsgebied "
+                    "(v2a.chunk_annotatie) i.p.v. op de grove regeling-scope.")
 
     @model_validator(mode="after")
     def _loc_or_xy(self):
@@ -116,6 +159,8 @@ class SemantischResponse(BaseModel):
     rd_y: float
     weergavenaam: str | None = None
     scope_regelingen: int
+    cand_chunks: int | None = None
+    werkingsgebied_filter: bool = False
     sql_ms: float
 
 
@@ -140,11 +185,13 @@ def semantisch(req: SemantischRequest) -> SemantischResponse:
 
     qv = _embed(req.question)
 
+    wg = req.werkingsgebied_filter
+    params = {"x": x, "y": y, "qv": qv, "q": req.question, "k": req.k}
     t0 = time.time()
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(_HYBRID_SQL, {"x": x, "y": y, "qv": qv, "q": req.question, "k": req.k})
+        cur.execute(_build_sql(wg), params)
         rows = cur.fetchall()
-        # aantal scope-regelingen (los, voor de trace) — zelfde scope-definitie als _HYBRID_SQL
+        # aantal scope-regelingen (los, voor de trace)
         cur.execute(
             """SELECT count(DISTINCT r.frbr_expression) AS n
                FROM p2p.regeling r
@@ -153,6 +200,9 @@ def semantisch(req: SemantischRequest) -> SemantischResponse:
                  AND NOT r.inactief""",
             (x, y))
         scope_n = cur.fetchone()["n"]
+        # aantal kandidaat-chunks (toont de scope-versmalling van de WG-filter)
+        cur.execute(_build_count_sql(wg), {"x": x, "y": y})
+        cand_n = cur.fetchone()["n"]
     sql_ms = (time.time() - t0) * 1000
 
     hits = [SemantischHit(
@@ -163,4 +213,5 @@ def semantisch(req: SemantischRequest) -> SemantischResponse:
         rrf=r["rrf"]) for r in rows]
 
     return SemantischResponse(hits=hits, rd_x=x, rd_y=y, weergavenaam=naam,
-                              scope_regelingen=scope_n, sql_ms=round(sql_ms, 1))
+                              scope_regelingen=scope_n, cand_chunks=cand_n,
+                              werkingsgebied_filter=wg, sql_ms=round(sql_ms, 1))
