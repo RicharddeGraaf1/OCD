@@ -114,6 +114,56 @@ Geen classifier is 100% — handhaving en bijzondere gevallen kunnen op
 `overig` landen. Verbeter door extra patterns toe te voegen in
 `TYPE_BESLUIT_RULES`.
 
+## Productiedata bijwerken (Railway)
+
+De publieke viewer [omgevingsvergunningenregister.nl](https://omgevingsvergunningenregister.nl)
+leest via de OCD-API (`/v1/vergunningen/*`) uit `vth.vergunningkennisgeving`
+in de **Railway OCD-DB**. Lokaal draait alles tegen `localhost:5434/dso`.
+Wijzigingen aan de vth-data bereiken productie op twee manieren:
+
+1. **Direct tegen Railway** (gericht, snel): zet `DATABASE_URL` in de
+   dso-loader `.env` tijdelijk naar de Railway-connectie (Public Networking /
+   TCP-proxy aan), draai de betreffende stap, zet `.env` daarna terug naar
+   `localhost:5434`. Zelfde patroon als de ponsenkaart-bootstrap in
+   [../../DEPLOY.md](../../DEPLOY.md) stap 2b.
+2. **Via volledige dump + restore**: lokale wijzigingen rijden mee in de
+   eerstvolgende `pg_dump` → `pg_restore` naar Railway (DEPLOY.md stap 2).
+
+### Vaste onderhoudsstappen ná een (bulk-)ingest
+
+Draai deze **in deze volgorde** na een `run`/`enrich`-pass die nieuwe of
+herladen records oplevert, zowel lokaal als (via optie 1) op Railway:
+
+```bash
+cd scripts/koop-poc
+
+# 1. Geometrie-selectie corrigeren bij records met meerdere gebiedsmarkeringen.
+#    KOOP levert soms een fout punt náást de juiste (bv. Woerden-pin op een
+#    Amsterdams adres); de loader kiest sinds 2026-07-07 de betrouwbaarste,
+#    maar historische/herladen data moet her-geselecteerd worden uit raw_xml.
+#    Zie vault gaps.md G-87.
+python backfill_geometrie.py           # dry-run: toont hoeveel pins verschuiven
+python backfill_geometrie.py --apply   # voert de UPDATEs uit (idempotent, herhaalbaar)
+```
+
+- **Geen her-fetch bij KOOP nodig** — de backfill her-selecteert uit de al
+  opgeslagen `raw_xml`. Volledig idempotent: nogmaals draaien is een no-op als
+  er niets divergeert.
+- **Alleen bij échte divergentie** (>1 km tussen gebiedsmarkeringen) grijpt de
+  selectie in; onschuldige punt+vlak-paren blijven ongemoeid (geen churn).
+- **Cadans**: draai na elke bulk-ingest en na een volledige backfill. Zodra de
+  loader-fix (in `src/loaders/koop_vergunning.py`) via het productie-ingest-pad
+  loopt, produceert `run` correcte geometrie en is de backfill alleen nog nodig
+  om historische data bij te trekken.
+
+> **Stand 2026-07-07**: backfill toegepast op `localhost:5434/dso` —
+> 7.562 records bijgewerkt: 928 met een misplaatsing >5 km gecorrigeerd
+> (280 daarvan >20 km, o.a. `gmb-2026-173404` Fahrenheitstraat: Woerden →
+> Amsterdam), 1.938 op 1–5 km, 754 sub-1 km, en 3.942 records die eerder
+> géén pin hadden gevuld uit een alternatieve gebiedsmarkering.
+> **Nog te doen op Railway-productie** via optie 1 of de eerstvolgende
+> dump+restore, plus de loader-fix committen.
+
 ## Bekende beperkingen
 
 - Vlak-centroid is een rekenkundig gemiddelde van vertices, geen echte

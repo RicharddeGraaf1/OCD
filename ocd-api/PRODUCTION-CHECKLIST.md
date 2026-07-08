@@ -75,6 +75,8 @@ Vink af bij voltooiing. Items met "(door agent gefikst)" zitten in deze commit.
   - `v2a.ponsenkaart_gemeente_stats` matview wekelijks via GitHub Actions
     cron (zie `ponsenkaart.nl/DEPLOY.md` stap 6)
   - `core.gemeentegrens` jaarlijks (gemeente-herindelingen)
+  - `vth`-vergunningdata: KOOP-ingest + **geometrie-backfill** (G-87) ná elke
+    bulk-ingest — zie [../dso-loader/scripts/koop-poc/README.md § Productiedata bijwerken](../dso-loader/scripts/koop-poc/README.md#productiedata-bijwerken-railway)
 - [ ] **Backup-schedule**: Railway maakt automatisch snapshots; check
   retentie in dashboard. Voor extra zekerheid: `pg_dump` naar S3/R2
   wekelijks.
