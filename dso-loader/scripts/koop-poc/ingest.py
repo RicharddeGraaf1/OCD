@@ -80,6 +80,7 @@ from src.loaders.koop_vergunning import (  # noqa: E402
     Record,
     _PG_SKIP_COLS,
     _enrich_one_batch,
+    build_gemeente_centroids,
     classify_type_besluit,
     daterange,
     extract_adres_uit_titel,
@@ -101,6 +102,7 @@ from src.loaders.koop_vergunning import (  # noqa: E402
     pg_upsert,
     polygon_centroid,
     process_day as _pg_process_day,
+    set_gemeente_centroids,
     text_of,
 )
 from src.loaders.koop_deeplinks import (  # noqa: E402
@@ -417,6 +419,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     end = dt.date.fromisoformat(args.to_date)
     backend = Backend(args.db)
     log.info("Backend: %s", backend.kind)
+    # Laad gemeente-centroïden zodat parse_gebiedsmarkering bij meerdere/
+    # tegenstrijdige gebiedsmarkeringen de juiste kan kiezen (zie G-87).
+    # Alleen Postgres/PostGIS; op een lege DB → lege map → medoïde-fallback.
+    if backend.kind == "postgres":
+        try:
+            _cconn = pg_get_conn()
+            try:
+                _centroids = build_gemeente_centroids(_cconn)
+            finally:
+                _cconn.close()
+            set_gemeente_centroids(_centroids)
+            log.info("Gemeente-centroïden geladen voor geometrie-selectie: %d gemeenten",
+                     len(_centroids))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Kon gemeente-centroïden niet laden (%s) — "
+                        "geometrie-selectie valt terug op medoïde/eerste", e)
     try:
         total = 0
         for day in daterange(start, end):

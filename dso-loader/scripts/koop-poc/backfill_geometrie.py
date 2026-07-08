@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.db import get_conn  # noqa: E402
 from src.loaders.koop_vergunning import (  # noqa: E402
-    NS, parse_gebiedsmarkering, set_gemeente_centroids,
+    NS, build_gemeente_centroids, parse_gebiedsmarkering, set_gemeente_centroids,
 )
 
 APPLY = "--apply" in sys.argv
@@ -34,26 +34,16 @@ CHANGE_THRESHOLD_M = 1.0  # alleen bijwerken als het gekozen punt >1 m verschuif
 
 
 def build_centroids() -> dict[str, tuple[float, float]]:
-    """Gemeente -> mediane RD-centroïde uit de betrouwbare single-geometrie-corpus."""
+    """Gemeente -> mediane RD-centroïde uit de betrouwbare single-geometrie-corpus.
+
+    Deelt de bron met de live ingest (build_gemeente_centroids in de loader),
+    zodat backfill en ingest exact dezelfde selectie voeden.
+    """
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(r"""
-        SELECT ligt_in_gemeente AS gem,
-               percentile_cont(0.5) WITHIN GROUP (ORDER BY ST_X(geometrie_rd_pt)) AS mx,
-               percentile_cont(0.5) WITHIN GROUP (ORDER BY ST_Y(geometrie_rd_pt)) AS my,
-               count(*) AS n
-        FROM vth.vergunningkennisgeving
-        WHERE ligt_in_gemeente IS NOT NULL
-          AND geometrie_rd_pt IS NOT NULL
-          AND regexp_count(raw_xml, '<([A-Za-z0-9]+:)?geometrie>') = 1
-        GROUP BY 1
-    """)
-    out: dict[str, tuple[float, float]] = {}
-    for r in cur.fetchall():
-        if r["mx"] is not None and r["my"] is not None:
-            out[r["gem"]] = (float(r["mx"]), float(r["my"]))
-    conn.close()
-    return out
+    try:
+        return build_gemeente_centroids(conn)
+    finally:
+        conn.close()
 
 
 def collect_changes(centroids: dict) -> tuple[list[dict], dict]:

@@ -129,40 +129,45 @@ Wijzigingen aan de vth-data bereiken productie op twee manieren:
 2. **Via volledige dump + restore**: lokale wijzigingen rijden mee in de
    eerstvolgende `pg_dump` → `pg_restore` naar Railway (DEPLOY.md stap 2).
 
-### Vaste onderhoudsstappen ná een (bulk-)ingest
+### Geometrie-selectie zit in de ingest zelf (G-87)
 
-Draai deze **in deze volgorde** na een `run`/`enrich`-pass die nieuwe of
-herladen records oplevert, zowel lokaal als (via optie 1) op Railway:
+KOOP levert soms meerdere `<ow:gebiedsmarkering>`-blokken per record, waarvan
+er af en toe één fout is (bv. een Woerden-pin op een Amsterdams adres). `run`
+**laadt bij de start de gemeente-centroïden** (`build_gemeente_centroids` →
+`set_gemeente_centroids`) en `parse_gebiedsmarkering` kiest daarmee de
+betrouwbaarste kandidaat — Adres → gemeente-centroïde → medoïde → Vlak →
+eerste. **Nieuwe records krijgen dus meteen de juiste locatie**; geen aparte
+stap nodig na een incrementele `run`.
+
+De centroïden komen uit de betrouwbare single-geometrie-corpus in de DB. Op een
+lege DB is die map leeg → selectie valt terug op medoïde/eerste (nog steeds
+correct voor de ≥3-blokken-gevallen). Bij een **volledige rebuild vanaf leeg**
+is de 2-blokken-disambiguatie dus pas compleet ná de eerste vulling — draai
+daarom éénmalig de backfill aan het eind (zie hieronder).
+
+### Backfill — historische correctie / vangnet
 
 ```bash
 cd scripts/koop-poc
-
-# 1. Geometrie-selectie corrigeren bij records met meerdere gebiedsmarkeringen.
-#    KOOP levert soms een fout punt náást de juiste (bv. Woerden-pin op een
-#    Amsterdams adres); de loader kiest sinds 2026-07-07 de betrouwbaarste,
-#    maar historische/herladen data moet her-geselecteerd worden uit raw_xml.
-#    Zie vault gaps.md G-87.
 python backfill_geometrie.py           # dry-run: toont hoeveel pins verschuiven
-python backfill_geometrie.py --apply   # voert de UPDATEs uit (idempotent, herhaalbaar)
+python backfill_geometrie.py --apply   # voert de UPDATEs uit (idempotent)
 ```
 
-- **Geen her-fetch bij KOOP nodig** — de backfill her-selecteert uit de al
-  opgeslagen `raw_xml`. Volledig idempotent: nogmaals draaien is een no-op als
-  er niets divergeert.
-- **Alleen bij échte divergentie** (>1 km tussen gebiedsmarkeringen) grijpt de
-  selectie in; onschuldige punt+vlak-paren blijven ongemoeid (geen churn).
-- **Cadans**: draai na elke bulk-ingest en na een volledige backfill. Zodra de
-  loader-fix (in `src/loaders/koop_vergunning.py`) via het productie-ingest-pad
-  loopt, produceert `run` correcte geometrie en is de backfill alleen nog nodig
-  om historische data bij te trekken.
+Wanneer draaien:
+- **Eenmalig** om data te corrigeren die met de oude loader (vóór G-87) is
+  ingeladen.
+- **Na een volledige rebuild vanaf leeg** (zie hierboven).
+- Als **vangnet** — volledig idempotent, her-selecteert uit bestaande `raw_xml`
+  (geen her-fetch bij KOOP), en is een no-op als er niets divergeert. Na een
+  gewone incrementele `run` verwacht je 0 wijzigingen.
 
-> **Stand 2026-07-07**: backfill toegepast op `localhost:5434/dso` —
-> 7.562 records bijgewerkt: 928 met een misplaatsing >5 km gecorrigeerd
-> (280 daarvan >20 km, o.a. `gmb-2026-173404` Fahrenheitstraat: Woerden →
-> Amsterdam), 1.938 op 1–5 km, 754 sub-1 km, en 3.942 records die eerder
-> géén pin hadden gevuld uit een alternatieve gebiedsmarkering.
-> **Nog te doen op Railway-productie** via optie 1 of de eerstvolgende
-> dump+restore, plus de loader-fix committen.
+Beide draaien zowel lokaal als (via optie 1) tegen Railway.
+
+> **Stand 2026-07-08**: loader-fix zit in `run` (centroïden auto-geladen) én in
+> de backfill. Backfill toegepast op `localhost:5434/dso` (7.562 records) én op
+> Railway-productie via de TCP-proxy (6.973 records op de 804k-snapshot);
+> `gmb-2026-173404` (Fahrenheitstraat) geverifieerd Woerden → Amsterdam.
+> Loader-fix staat op `main` (OCD `e8fe42f`).
 
 ## Bekende beperkingen
 
