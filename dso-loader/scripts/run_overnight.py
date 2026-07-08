@@ -165,24 +165,24 @@ def extend_categorie():
         C /= np.linalg.norm(C, axis=1, keepdims=True) + 1e-9
         cur.execute("truncate v2a.chunk_categorie")
     ins = 0
-    with psycopg.connect(DB) as c2:
-        with c2.cursor(name="cat") as cc:
-            cc.itersize = 5000
-            cc.execute("""select id, embedding::text from v2a.tekst_embedding
-                          where bron_soort in ('Lid','Divisietekst')""")
-            buf = []
-            wc = c2.cursor()
-            for rid, emb in cc:
-                v = np.fromstring(emb.strip("[]"), sep=",", dtype=np.float32); v /= np.linalg.norm(v) + 1e-9
-                sims = C @ v; j = int(sims.argmax()); s = float(sims[j])
-                if s >= 0.50:
-                    buf.append((rid, Cid[j], float(1 - s), "v1-2026-07-07"))
-                if len(buf) >= 5000:
-                    wc.executemany("insert into v2a.chunk_categorie(chunk_id,categorie_id,afstand,taxonomie_versie) values(%s,%s,%s,%s)", buf)
-                    c2.commit(); ins += len(buf); buf = []
-            if buf:
-                wc.executemany("insert into v2a.chunk_categorie(chunk_id,categorie_id,afstand,taxonomie_versie) values(%s,%s,%s,%s)", buf)
-                c2.commit(); ins += len(buf)
+    # TWEE aparte connecties: een commit op de write-conn mag de server-side
+    # named cursor op de read-conn niet ongeldig maken (dat was de bug).
+    read = psycopg.connect(DB); write = psycopg.connect(DB)
+    rc = read.cursor(name="catread"); rc.itersize = 10000
+    rc.execute("select id, embedding::text from v2a.tekst_embedding where bron_soort in ('Lid','Divisietekst')")
+    wc = write.cursor(); buf = []
+    for rid, emb in rc:
+        v = np.fromstring(emb.strip("[]"), sep=",", dtype=np.float32); v /= np.linalg.norm(v) + 1e-9
+        sims = C @ v; j = int(sims.argmax()); s = float(sims[j])
+        if s >= 0.50:
+            buf.append((rid, Cid[j], float(1 - s), "v1-2026-07-07"))
+        if len(buf) >= 10000:
+            wc.executemany("insert into v2a.chunk_categorie(chunk_id,categorie_id,afstand,taxonomie_versie) values(%s,%s,%s,%s)", buf)
+            write.commit(); ins += len(buf); buf = []
+    if buf:
+        wc.executemany("insert into v2a.chunk_categorie(chunk_id,categorie_id,afstand,taxonomie_versie) values(%s,%s,%s,%s)", buf)
+        write.commit(); ins += len(buf)
+    read.close(); write.close()
     log(f"  chunk_categorie: {ins} toewijzingen over het volle corpus")
     rep(f"## chunk_categorie uitgebreid\n{ins} toewijzingen (nearest bevestigde centroide) over alle Lid/Divisietekst-chunks. Taxonomie ongewijzigd (v1).\n")
 
