@@ -83,7 +83,12 @@ def _huidige_versie_datum(conn: psycopg.Connection, regeling_work: str) -> date 
     """Datum van onze huidige geconsolideerde versie van deze regeling-work."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT frbr_expression FROM p2p.regeling WHERE frbr_work = %s LIMIT 1",
+            # NOT inactief: op multi-expressie-works is er precies één vigerende
+            # expressie (invariant van markeer_siblings_inactief). Zonder dit filter
+            # pakt LIMIT 1 een willekeurige — mogelijk verouderde — versie en ijkt
+            # het wijziging-filter tegen de verkeerde expression/datum.
+            "SELECT frbr_expression FROM p2p.regeling "
+            "WHERE frbr_work = %s AND NOT inactief LIMIT 1",
             (regeling_work,)
         )
         row = cur.fetchone()
@@ -109,7 +114,12 @@ def _is_relevant(conn: psycopg.Connection, regeling_work: str | None,
     # 1. Kennen we deze regeling?
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT frbr_expression FROM p2p.regeling WHERE frbr_work = %s LIMIT 1",
+            # NOT inactief: op multi-expressie-works is er precies één vigerende
+            # expressie (invariant van markeer_siblings_inactief). Zonder dit filter
+            # pakt LIMIT 1 een willekeurige — mogelijk verouderde — versie en ijkt
+            # het wijziging-filter tegen de verkeerde expression/datum.
+            "SELECT frbr_expression FROM p2p.regeling "
+            "WHERE frbr_work = %s AND NOT inactief LIMIT 1",
             (regeling_work,)
         )
         row = cur.fetchone()
