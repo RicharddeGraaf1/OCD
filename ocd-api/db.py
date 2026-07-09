@@ -21,6 +21,14 @@ def _configure_connection(conn):
     """Per-connection setup: timeout afdwingen zodra een conn uit de pool komt."""
     with conn.cursor() as cur:
         cur.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
+        # Parallelle query-workers uit: onder eval-load (veel gelijktijdige
+        # spatiale/FTS-queries) putten de dynamic-shared-memory-segmenten de
+        # kleine Docker-/dev/shm (64MB) uit -> psycopg DiskFull "could not
+        # resize shared memory segment ... No space left on device" -> 500.
+        # Non-parallel plannen vermijden dsm volledig en zijn deterministischer
+        # (stabielere eval-meting); de subdiv-spatiale index maakt de queries
+        # ook non-parallel snel genoeg.
+        cur.execute("SET max_parallel_workers_per_gather = 0")
     conn.commit()
 
 
@@ -28,7 +36,7 @@ pool = ConnectionPool(
     DATABASE_URL,
     kwargs={"row_factory": dict_row},
     min_size=2,
-    max_size=10,
+    max_size=20,
     open=False,
     configure=_configure_connection,
 )

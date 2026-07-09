@@ -653,7 +653,7 @@ def normwaarde(
                 LEFT JOIN p2p.juridische_regel          jr  ON jr.identificatie = jrn.juridische_regel_id
                 LEFT JOIN p2p.tekst_element             te  ON te.wid           = jr.regeltekst_wid
                 LEFT JOIN p2p.regeling                  r   ON r.frbr_expression = te.regeling_expression
-                WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                WHERE   l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
                   AND   r.inactief IS NOT TRUE
             ),
             bucketed AS (
@@ -974,7 +974,7 @@ def activiteit(
                 JOIN    p2p.juridische_regel            jr   ON jr.identificatie = ala.juridische_regel_id
                 LEFT JOIN p2p.tekst_element             te   ON te.wid           = jr.regeltekst_wid
                 LEFT JOIN p2p.regeling                  r    ON r.frbr_expression = te.regeling_expression
-                WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                WHERE   l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
                   AND   r.inactief IS NOT TRUE
             ),
             bucketed AS (
@@ -1070,7 +1070,7 @@ def coverage(
             LEFT JOIN p2p.gebiedsaanwijzing ga ON ga.identificatie = jrg.gebiedsaanwijzing_id
             JOIN p2p.locatie l
                 ON l.identificatie IN (ala.locatie_id, n.identificatie, ga.locatie_id)
-            WHERE ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+            WHERE l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
               AND (%s::text IS NULL
                    OR a.naam ILIKE %s OR n.naam ILIKE %s OR ga.naam ILIKE %s)
             """,
@@ -1148,7 +1148,7 @@ def onderwerp(
             FROM    p2p.gebiedsaanwijzing            g
             JOIN    p2p.locatie                      l   ON l.identificatie = g.locatie_id
             LEFT JOIN p2p.juridische_regel_gebiedsaanwijzing jrg ON jrg.gebiedsaanwijzing_id = g.identificatie
-            WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+            WHERE   l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
               AND   (g.naam ILIKE ANY(%s) OR g.groep ILIKE ANY(%s) OR g.type ILIKE ANY(%s))
             GROUP BY g.identificatie, g.naam, g.type, g.groep
             ORDER BY
@@ -1241,7 +1241,7 @@ def regeltekst(
                 LEFT JOIN p2p.gebiedsaanwijzing            ga  ON ga.identificatie = jrg.gebiedsaanwijzing_id
                 JOIN    p2p.locatie                        l
                         ON l.identificatie IN (ala.locatie_id, n.identificatie, ga.locatie_id)
-                WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                WHERE   l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
                   AND   to_tsvector('dutch'::regconfig, COALESCE(te.inhoud_plain, '')) @@ to_tsquery('dutch'::regconfig, %s)
             ),
             best_per_jr AS (
@@ -1457,7 +1457,7 @@ def _fetch_objecten_normwaarde(cur, x: float, y: float) -> list[dict]:
         LEFT JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
             AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
         LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
-        WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+        WHERE   l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
           AND   r.inactief IS NOT TRUE
         LIMIT %s
         """,
@@ -1492,7 +1492,7 @@ def _fetch_objecten_activiteit(cur, x: float, y: float) -> list[dict]:
         LEFT JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
             AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
         LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
-        WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+        WHERE   l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
           AND   r.inactief IS NOT TRUE
         LIMIT %s
         """,
@@ -1558,7 +1558,7 @@ def _fetch_objecten_gebiedsaanwijzing(cur, x: float, y: float) -> list[dict]:
         LEFT JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
             AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
         LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
-        WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+        WHERE   l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
           AND   r.inactief IS NOT TRUE
         LIMIT %s
         """,
@@ -1598,7 +1598,7 @@ def _fetch_objecten_gio(cur, x: float, y: float) -> list[dict]:
         JOIN    p2p.gio_locatie gl ON gl.locatie_id = l.identificatie
         JOIN    p2p.geo_informatieobject gio ON gio.frbr_expression = gl.gio_frbr
         LEFT JOIN p2p.regeling r ON r.frbr_expression = gio.regeling_expression
-        WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+        WHERE   l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
           AND   r.inactief IS NOT TRUE
         LIMIT %s
         """,
@@ -1794,7 +1794,7 @@ def regels(
                 LEFT JOIN p2p.gebiedsaanwijzing            ga  ON ga.identificatie = jrg.gebiedsaanwijzing_id
                 JOIN    p2p.locatie                        l
                         ON l.identificatie IN (ala.locatie_id, n.identificatie, ga.locatie_id)
-                WHERE   ST_Intersects(l.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                WHERE   l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
                   AND   to_tsvector('dutch'::regconfig, COALESCE(te.inhoud_plain, '')) @@ to_tsquery('dutch'::regconfig, %s)
             ),
             best_per_jr AS (
