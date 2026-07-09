@@ -53,26 +53,33 @@ scope AS (
       AND NOT r.inactief
 )"""
 
-# Kandidaten — variant A (default): hele regeling-scope, grof.
-_CAND_REGELING = """
-cand AS (
-    SELECT id, regeling_expression, bron_soort, kop_pad, inhoud_plain, embedding, fts
-    FROM v2a.tekst_embedding
-    WHERE regeling_expression IN (SELECT expr FROM scope)
+# wro-scope (Fase 6a): oude bestemmingsplannen op het punt. wro-chunks dragen
+# regeling_expression = instrument_idn en source_type='wro'; geo-anker is de
+# plangebied-geometrie op wro.ruimtelijk_instrument (GiST-index, ~90 ms/punt).
+_WRO_SCOPE_CTE = """
+wro_scope AS (
+    SELECT idn FROM wro.ruimtelijk_instrument
+    WHERE geometrie IS NOT NULL
+      AND ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
 )"""
 
-# Kandidaten — variant B (werkingsgebied_filter): alleen chunks wiens EIGEN
-# werkingsgebied het punt dekt (via v2a.chunk_annotatie, Fase 1). Chunks met
-# alleen een regelingsgebied-fallback matchen via het ambtsgebied → degraderen
-# naar regeling-scope; fijn-geannoteerde chunks doen alléén mee als hun
-# specifieke locatie het punt dekt. Begrippen (geen gebied) blijven regeling-breed.
-_CAND_WG = """
+# de p2p-kandidaat-selects (inner, zonder cand-wrapper) — regeling-scope excludeert
+# wro vanzelf (wro's instrument_idn zit niet in p2p.regeling).
+_P2P_INNER_REGELING = """
+    SELECT id, regeling_expression, bron_soort, kop_pad, inhoud_plain, embedding, fts
+    FROM v2a.tekst_embedding
+    WHERE regeling_expression IN (SELECT expr FROM scope)"""
+
+# werkingsgebied_filter-variant: alleen chunks wiens EIGEN werkingsgebied het punt
+# dekt (v2a.chunk_annotatie, Fase 1); grove chunks degraderen via het ambtsgebied,
+# begrippen blijven regeling-breed. Vereist de _LOC_CTE.
+_LOC_CTE = """
 loc AS (
     SELECT DISTINCT ls.identificatie AS locatie_id
     FROM p2p.locatie_subdiv ls
     WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
-),
-cand AS (
+)"""
+_P2P_INNER_WG = """
     SELECT v.id, v.regeling_expression, v.bron_soort, v.kop_pad, v.inhoud_plain,
            v.embedding, v.fts
     FROM v2a.tekst_embedding v
@@ -80,8 +87,28 @@ cand AS (
       AND (v.bron_soort = 'Begrip'
            OR EXISTS (SELECT 1 FROM v2a.chunk_annotatie ca
                       JOIN loc ON loc.locatie_id = ca.locatie_id
-                      WHERE ca.chunk_id = v.id))
+                      WHERE ca.chunk_id = v.id))"""
+
+# wro-chunks op het punt (alleen bij include_wro).
+_WRO_INNER = """
+    SELECT id, regeling_expression, bron_soort, kop_pad, inhoud_plain, embedding, fts
+    FROM v2a.tekst_embedding
+    WHERE source_type = 'wro' AND regeling_expression IN (SELECT idn FROM wro_scope)"""
+
+# ontwerp-scope (Fase 6b): de frbr_works van de regelingen op het punt. Ontwerp-chunks
+# dragen source_type='ontwerp' en regeling_expression=regeling_work (de gewijzigde
+# regeling). NIET-vigerend — alleen mee bij expliciete include_ontwerp.
+_ONTWERP_SCOPE_CTE = """
+ontwerp_scope AS (
+    SELECT DISTINCT r.frbr_work AS work
+    FROM p2p.regeling r
+    JOIN p2p.locatie_subdiv ls ON ls.identificatie = r.regelingsgebied_id
+    WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
 )"""
+_ONTWERP_INNER = """
+    SELECT id, regeling_expression, bron_soort, kop_pad, inhoud_plain, embedding, fts
+    FROM v2a.tekst_embedding
+    WHERE source_type = 'ontwerp' AND regeling_expression IN (SELECT work FROM ontwerp_scope)"""
 
 _TAIL = f"""
 dense AS (
@@ -92,7 +119,10 @@ sparse AS (
     SELECT id, row_number() OVER (ORDER BY ts_rank(fts, {_TSQ}) DESC) AS rnk
     FROM cand WHERE fts @@ {_TSQ} LIMIT 30
 )
-SELECT c.regeling_expression, r.opschrift AS regeling_titel, r.documenttype,
+SELECT c.regeling_expression,
+       COALESCE(r.opschrift, wi.naam, ow.opschrift) AS regeling_titel,
+       COALESCE(r.documenttype, wi.type_plan,
+                CASE WHEN ow.opschrift IS NOT NULL THEN 'Ontwerp: ' || ow.documenttype END) AS documenttype,
        b.bestuurslaag,
        c.bron_soort, c.kop_pad, c.inhoud_plain,
        d.rnk AS dense_rnk, s.rnk AS sparse_rnk,
@@ -105,21 +135,43 @@ LEFT JOIN dense d USING (id)
 LEFT JOIN sparse s USING (id)
 LEFT JOIN p2p.regeling r ON r.frbr_expression = c.regeling_expression
 LEFT JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
+LEFT JOIN wro.ruimtelijk_instrument wi ON wi.idn = c.regeling_expression
+-- ontwerp-titel: keyt op frbr_work (alleen ontwerp-chunks dragen een work als
+-- regeling_expression), dus deze LATERAL vuurt vanzelf alleen voor die rijen.
+LEFT JOIN LATERAL (SELECT opschrift, documenttype FROM p2p.regeling
+                   WHERE frbr_work = c.regeling_expression LIMIT 1) ow ON true
 WHERE d.id IS NOT NULL OR s.id IS NOT NULL
 ORDER BY rrf DESC
 LIMIT %(k)s
 """
 
 
-def _build_sql(werkingsgebied_filter: bool) -> str:
-    cand = _CAND_WG if werkingsgebied_filter else _CAND_REGELING
-    return "WITH " + _SCOPE_CTE + ",\n" + cand + ",\n" + _TAIL
+def _build_ctes(werkingsgebied_filter: bool, include_wro: bool, include_ontwerp: bool) -> str:
+    ctes = [_SCOPE_CTE]
+    if include_wro:
+        ctes.append(_WRO_SCOPE_CTE)
+    if include_ontwerp:
+        ctes.append(_ONTWERP_SCOPE_CTE)
+    if werkingsgebied_filter:
+        ctes.append(_LOC_CTE)
+    inner = _P2P_INNER_WG if werkingsgebied_filter else _P2P_INNER_REGELING
+    if include_wro:
+        inner += "\n    UNION ALL" + _WRO_INNER
+    if include_ontwerp:
+        inner += "\n    UNION ALL" + _ONTWERP_INNER
+    ctes.append("cand AS (" + inner + "\n)")
+    return "WITH " + ",\n".join(ctes)
 
 
-def _build_count_sql(werkingsgebied_filter: bool) -> str:
+def _build_sql(werkingsgebied_filter: bool, include_wro: bool = False,
+               include_ontwerp: bool = False) -> str:
+    return _build_ctes(werkingsgebied_filter, include_wro, include_ontwerp) + ",\n" + _TAIL
+
+
+def _build_count_sql(werkingsgebied_filter: bool, include_wro: bool = False,
+                     include_ontwerp: bool = False) -> str:
     """Aantal kandidaat-chunks in de scope — voor de A/B-trace (scope-versmalling)."""
-    cand = _CAND_WG if werkingsgebied_filter else _CAND_REGELING
-    return "WITH " + _SCOPE_CTE + ",\n" + cand + "\nSELECT count(*) AS n FROM cand"
+    return _build_ctes(werkingsgebied_filter, include_wro, include_ontwerp) + "\nSELECT count(*) AS n FROM cand"
 
 
 class SemantischRequest(BaseModel):
@@ -132,6 +184,14 @@ class SemantischRequest(BaseModel):
         False,
         description="Fase 2: filter chunks op hun EIGEN werkingsgebied "
                     "(v2a.chunk_annotatie) i.p.v. op de grove regeling-scope.")
+    include_wro: bool = Field(
+        False,
+        description="Fase 6a: neem ook oude bestemmingsplannen (wro) op het punt mee "
+                    "(source_type='wro', scope via wro.ruimtelijk_instrument-geometrie).")
+    include_ontwerp: bool = Field(
+        False,
+        description="Fase 6b: neem ook ONTWERP/toekomstige regels (p2pwijziging) mee "
+                    "(source_type='ontwerp', niet-vigerend — 'wat gaat hier veranderen').")
 
     @model_validator(mode="after")
     def _loc_or_xy(self):
@@ -161,6 +221,8 @@ class SemantischResponse(BaseModel):
     scope_regelingen: int
     cand_chunks: int | None = None
     werkingsgebied_filter: bool = False
+    include_wro: bool = False
+    include_ontwerp: bool = False
     sql_ms: float
 
 
@@ -186,10 +248,12 @@ def semantisch(req: SemantischRequest) -> SemantischResponse:
     qv = _embed(req.question)
 
     wg = req.werkingsgebied_filter
+    wro = req.include_wro
+    ontw = req.include_ontwerp
     params = {"x": x, "y": y, "qv": qv, "q": req.question, "k": req.k}
     t0 = time.time()
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(_build_sql(wg), params)
+        cur.execute(_build_sql(wg, wro, ontw), params)
         rows = cur.fetchall()
         # aantal scope-regelingen (los, voor de trace)
         cur.execute(
@@ -201,7 +265,7 @@ def semantisch(req: SemantischRequest) -> SemantischResponse:
             (x, y))
         scope_n = cur.fetchone()["n"]
         # aantal kandidaat-chunks (toont de scope-versmalling van de WG-filter)
-        cur.execute(_build_count_sql(wg), {"x": x, "y": y})
+        cur.execute(_build_count_sql(wg, wro, ontw), {"x": x, "y": y})
         cand_n = cur.fetchone()["n"]
     sql_ms = (time.time() - t0) * 1000
 
@@ -214,4 +278,5 @@ def semantisch(req: SemantischRequest) -> SemantischResponse:
 
     return SemantischResponse(hits=hits, rd_x=x, rd_y=y, weergavenaam=naam,
                               scope_regelingen=scope_n, cand_chunks=cand_n,
-                              werkingsgebied_filter=wg, sql_ms=round(sql_ms, 1))
+                              werkingsgebied_filter=wg, include_wro=wro,
+                              include_ontwerp=ontw, sql_ms=round(sql_ms, 1))

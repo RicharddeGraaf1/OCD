@@ -123,9 +123,10 @@ def fijne_link():
                  AND p.artikelnummer = t.nummer AND p.geometrie IS NOT NULL
             WHERE t.nummer IS NOT NULL AND t.nummer <> ''""")
         cur.execute("select count(*) n, count(distinct chunk_id) c from v2a.chunk_wro_object")
-        r = cur.fetchone()
-    log(f"  chunk_wro_object: {r['n']} rijen, {r['c']} chunks met bestemmingsvlak-geometrie")
-    report.append(f"## Fijne link (bestemmingsvlak)\n{r['n']} rijen, {r['c']} chunks. Rest leunt op de plan-geometrie (coarse, 100%).\n")
+        r = cur.fetchone()  # autocommit-conn = tuple-cursor, dus positioneel indexeren
+        n_rijen, n_chunks = r[0], r[1]
+    log(f"  chunk_wro_object: {n_rijen} rijen, {n_chunks} chunks met bestemmingsvlak-geometrie")
+    report.append(f"## Fijne link (bestemmingsvlak)\n{n_rijen} rijen, {n_chunks} chunks. Rest leunt op de plan-geometrie (coarse, 100%).\n")
 
 
 def report_out():
