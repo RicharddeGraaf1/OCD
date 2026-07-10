@@ -408,9 +408,20 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
                 "AND to_tsvector('dutch', coalesce(te.inhoud_plain, '')) "
                 "@@ to_tsquery('dutch', %s)"
             )
-            visie_text_params = [visie_fts]
+            # Relevantie-ordening VÓÓR de LIMIT 50: zonder deze ORDER BY kapt de
+            # LIMIT willekeurig op DB-volgorde af, waardoor de relevantste
+            # visie/programma-elementen (bv. Programma Integraal Riviermanagement
+            # bij een hoogwaterbescherming-vraag) uit de top-50 vallen terwijl
+            # minder relevante visies (bv. Mariene Strategie) de slots vullen.
+            # ts_rank op dezelfde FTS-match; identieke index (idx_tekst_element_inhoud_fts).
+            visie_order = (
+                "ORDER BY ts_rank(to_tsvector('dutch', coalesce(te.inhoud_plain, '')), "
+                "to_tsquery('dutch', %s)) DESC"
+            )
+            visie_text_params = [visie_fts, visie_fts]
         else:
             visie_text_filter = ""
+            visie_order = ""
             visie_text_params = []
 
         # Twee paden naar relevantie:
@@ -457,6 +468,7 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
               )
               AND te.inhoud IS NOT NULL AND length(te.inhoud) > 50
             {visie_text_filter}
+            {visie_order}
             LIMIT 50
             """,
             (x, y, x, y, *visie_text_params),
