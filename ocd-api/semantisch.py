@@ -85,6 +85,14 @@ _P2P_INNER_WG = """
     FROM v2a.tekst_embedding v
     WHERE v.regeling_expression IN (SELECT expr FROM scope)
       AND (v.bron_soort = 'Begrip'
+           -- NB (audit 2026-07-10): dit filter dropt ook alle chunks ZONDER
+           -- enige annotatie — o.a. alle toelichting-chunks (292/292
+           -- bij OV Zeeland). Regeling-breed meenemen van annotatie-loze
+           -- chunks is geprobeerd (won r24-damherten) maar vergrootte de
+           -- kandidaat-pool zodanig dat borderline-cases op randvariantie
+           -- gingen wisselen (evalreeks 33-33-33 → 33-29-31); teruggedraaid.
+           -- Structurele oplossing = toelichting-chunks alsnog annoteren of
+           -- een aparte toelichting-tier met eigen cap.
            OR EXISTS (SELECT 1 FROM v2a.chunk_annotatie ca
                       JOIN loc ON loc.locatie_id = ca.locatie_id
                       WHERE ca.chunk_id = v.id))"""
@@ -113,35 +121,60 @@ _ONTWERP_INNER = """
 _TAIL = f"""
 dense AS (
     SELECT id, row_number() OVER (ORDER BY embedding <=> %(qv)s::vector) AS rnk
-    FROM cand ORDER BY embedding <=> %(qv)s::vector LIMIT 30
+    FROM cand ORDER BY embedding <=> %(qv)s::vector LIMIT %(cand_limit)s
 ),
 sparse AS (
     SELECT id, row_number() OVER (ORDER BY ts_rank(fts, {_TSQ}) DESC) AS rnk
-    FROM cand WHERE fts @@ {_TSQ} LIMIT 30
+    FROM cand WHERE fts @@ {_TSQ} LIMIT %(cand_limit)s
+),
+scored AS (
+    SELECT c.regeling_expression,
+           COALESCE(r.opschrift, wi.naam, ow.opschrift) AS regeling_titel,
+           COALESCE(r.documenttype, wi.type_plan,
+                    CASE WHEN ow.opschrift IS NOT NULL THEN 'Ontwerp: ' || ow.documenttype END) AS documenttype,
+           b.bestuurslaag,
+           c.bron_soort, c.kop_pad, c.inhoud_plain,
+           d.rnk AS dense_rnk, s.rnk AS sparse_rnk,
+           -- rrf_raw: ongewogen fusie-score, gebruikt in de round-robin-fase
+           -- zodat rijks-documenten (bv. Programma IRM) daar eerlijk
+           -- concurreren; de tiering geldt alleen voor de globale top-k/2.
+           (COALESCE(1.0/(60+d.rnk), 0) + COALESCE(1.0/(60+s.rnk), 0))::float AS rrf_raw,
+           ((COALESCE(1.0/(60+d.rnk), 0) + COALESCE(1.0/(60+s.rnk), 0))
+             -- scope-tiering: landelijke AMvB's (rijk) downwegen zodat ze de
+             -- specifieke decentrale regels niet uit de top-k verdringen.
+             * CASE WHEN b.bestuurslaag = 'rijk' THEN 0.55 ELSE 1.0 END)::float AS rrf
+    FROM cand c
+    LEFT JOIN dense d USING (id)
+    LEFT JOIN sparse s USING (id)
+    LEFT JOIN p2p.regeling r ON r.frbr_expression = c.regeling_expression
+    LEFT JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
+    LEFT JOIN wro.ruimtelijk_instrument wi ON wi.idn = c.regeling_expression
+    -- ontwerp-titel: keyt op frbr_work (alleen ontwerp-chunks dragen een work als
+    -- regeling_expression), dus deze LATERAL vuurt vanzelf alleen voor die rijen.
+    LEFT JOIN LATERAL (SELECT opschrift, documenttype FROM p2p.regeling
+                       WHERE frbr_work = c.regeling_expression LIMIT 1) ow ON true
+    WHERE d.id IS NOT NULL OR s.id IS NOT NULL
 )
-SELECT c.regeling_expression,
-       COALESCE(r.opschrift, wi.naam, ow.opschrift) AS regeling_titel,
-       COALESCE(r.documenttype, wi.type_plan,
-                CASE WHEN ow.opschrift IS NOT NULL THEN 'Ontwerp: ' || ow.documenttype END) AS documenttype,
-       b.bestuurslaag,
-       c.bron_soort, c.kop_pad, c.inhoud_plain,
-       d.rnk AS dense_rnk, s.rnk AS sparse_rnk,
-       ((COALESCE(1.0/(60+d.rnk), 0) + COALESCE(1.0/(60+s.rnk), 0))
-         -- scope-tiering: landelijke AMvB's (rijk) downwegen zodat ze de
-         -- specifieke decentrale regels niet uit de top-k verdringen.
-         * CASE WHEN b.bestuurslaag = 'rijk' THEN 0.55 ELSE 1.0 END)::float AS rrf
-FROM cand c
-LEFT JOIN dense d USING (id)
-LEFT JOIN sparse s USING (id)
-LEFT JOIN p2p.regeling r ON r.frbr_expression = c.regeling_expression
-LEFT JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
-LEFT JOIN wro.ruimtelijk_instrument wi ON wi.idn = c.regeling_expression
--- ontwerp-titel: keyt op frbr_work (alleen ontwerp-chunks dragen een work als
--- regeling_expression), dus deze LATERAL vuurt vanzelf alleen voor die rijen.
-LEFT JOIN LATERAL (SELECT opschrift, documenttype FROM p2p.regeling
-                   WHERE frbr_work = c.regeling_expression LIMIT 1) ow ON true
-WHERE d.id IS NOT NULL OR s.id IS NOT NULL
-ORDER BY rrf DESC
+-- Diversiteits-cap (retrieval-v2): max %(per_regeling_cap)s chunks per regeling,
+-- met HYBRIDE selectie: de globale rrf-top-(k/2) blijft onaangetast (diepte
+-- van de best-scorende regeling behouden — pure round-robin kostte r31/r33
+-- hun norm-chunk), de resterende slots worden round-robin gevuld (beste chunk
+-- van élke regeling eerst), zodat doelgerichte chunks van kleine regelingen
+-- (bv. Aanwijzingsbesluit N2000, r26) de kandidaat-set halen en de cross-
+-- encoder-reranker downstream ze kan herwegen. NULL = geen cap én pure
+-- rrf-orde (oud gedrag).
+SELECT * FROM (
+    SELECT sc.*,
+           row_number() OVER (
+               PARTITION BY sc.regeling_expression ORDER BY sc.rrf DESC) AS reg_rnk,
+           row_number() OVER (ORDER BY sc.rrf DESC) AS glob_rnk
+    FROM scored sc
+) t
+WHERE %(per_regeling_cap)s::int IS NULL OR t.reg_rnk <= %(per_regeling_cap)s::int
+ORDER BY (CASE WHEN %(per_regeling_cap)s::int IS NULL THEN 0
+               WHEN t.glob_rnk <= GREATEST(%(k)s / 2, 1) THEN 0
+               ELSE t.reg_rnk END),
+         (CASE WHEN %(per_regeling_cap)s::int IS NULL THEN t.rrf ELSE t.rrf_raw END) DESC
 LIMIT %(k)s
 """
 
@@ -179,7 +212,7 @@ class SemantischRequest(BaseModel):
     location: str | None = Field(None, description="Adres. Of geef x/y.")
     x: float | None = Field(None, description="RD x-coördinaat")
     y: float | None = Field(None, description="RD y-coördinaat")
-    k: int = Field(6, ge=1, le=30, description="Aantal regelteksten")
+    k: int = Field(6, ge=1, le=60, description="Aantal regelteksten")
     werkingsgebied_filter: bool = Field(
         False,
         description="Fase 2: filter chunks op hun EIGEN werkingsgebied "
@@ -192,6 +225,14 @@ class SemantischRequest(BaseModel):
         False,
         description="Fase 6b: neem ook ONTWERP/toekomstige regels (p2pwijziging) mee "
                     "(source_type='ontwerp', niet-vigerend — 'wat gaat hier veranderen').")
+    cand_limit: int = Field(
+        30, ge=10, le=200,
+        description="Retrieval-v2: grootte van de dense- en sparse-kandidaatpool "
+                    "vóór RRF-fusie. Default 30 = oud gedrag.")
+    per_regeling_cap: int | None = Field(
+        None, ge=1, le=30,
+        description="Retrieval-v2: max chunks per regeling in de top-k, zodat één "
+                    "chunk-rijke regeling de rest niet verdringt. NULL = geen cap.")
 
     @model_validator(mode="after")
     def _loc_or_xy(self):
@@ -250,7 +291,8 @@ def semantisch(req: SemantischRequest) -> SemantischResponse:
     wg = req.werkingsgebied_filter
     wro = req.include_wro
     ontw = req.include_ontwerp
-    params = {"x": x, "y": y, "qv": qv, "q": req.question, "k": req.k}
+    params = {"x": x, "y": y, "qv": qv, "q": req.question, "k": req.k,
+              "cand_limit": req.cand_limit, "per_regeling_cap": req.per_regeling_cap}
     t0 = time.time()
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(_build_sql(wg, wro, ontw), params)
