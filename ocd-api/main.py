@@ -657,7 +657,16 @@ def normwaarde(
                         -- dso-loader/scripts/2026-05-add-ocd-artikel-label-fn.sql.
                         ocd_artikel_label(te.opschrift, te.wid)                                   AS artikel,
                         te.wid                              AS artikel_wid,
-                        LEFT(te.inhoud_plain, 800)          AS regeltekst_excerpt
+                        LEFT(te.inhoud_plain, 800)          AS regeltekst_excerpt,
+                        -- 2026-07-10: IntRef-volg-stap. Bij waardeInRegeltekst
+                        -- staat de waarde vaak niet in het geannoteerde artikel
+                        -- zelf maar in een artikel waarnaar het verwijst
+                        -- (OV Fryslan art. 3.7 -> art. 3.9 met de
+                        -- omgevingswaarden). Volg de IntRefs binnen dezelfde
+                        -- expressie en lever de doeltekst mee, zodat de
+                        -- consument de norm-categorie aan de waarde kan
+                        -- koppelen zonder aparte retrieval-stap.
+                        verw.verwijzing_excerpt
                 FROM    p2p.normwaarde                  nw
                 JOIN    p2p.norm                        n   ON n.identificatie  = nw.norm_id
                 JOIN    p2p.locatie                     l   ON l.identificatie  = nw.locatie_id
@@ -665,6 +674,16 @@ def normwaarde(
                 LEFT JOIN p2p.juridische_regel          jr  ON jr.identificatie = jrn.juridische_regel_id
                 LEFT JOIN p2p.tekst_element             te  ON te.wid           = jr.regeltekst_wid
                 LEFT JOIN p2p.regeling                  r   ON r.frbr_expression = te.regeling_expression
+                LEFT JOIN LATERAL (
+                    SELECT string_agg(DISTINCT LEFT(te2.inhoud_plain, 800), E'\n\n') AS verwijzing_excerpt
+                    FROM p2p.tekst_inline_referentie tir
+                    JOIN p2p.tekst_element te2
+                      ON te2.regeling_expression = te.regeling_expression
+                     AND te2.eid = tir.target_ref
+                    WHERE tir.tekst_element_id = te.id
+                      AND tir.soort = 'IntRef'
+                      AND COALESCE(te2.inhoud_plain, '') <> ''
+                ) verw ON TRUE
                 WHERE   l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
                   AND   r.inactief IS NOT TRUE
             ),
@@ -705,6 +724,68 @@ def normwaarde(
              limit_detector, limit_keyword),
         )
         rows = cur.fetchall()
+
+        # 2026-07-11: Omgevingswaarderegel-fallback. Sommige bronhouders
+        # (pv23 Overijssel) leveren omgevingswaarden ALLEEN als
+        # Omgevingswaarderegel + regeltekst, zonder Omgevingsnorm/
+        # normwaarde-objecten (geen omgevingsnormen.xml in de aanlevering
+        # geverifieerd 2026-07-11). Dan is de normwaarde-tabel leeg
+        # maar bestaat er wel een geo-gekoppelde regel met de waarde in de
+        # tekst (OV Overijssel art. 2.6/2.7: 1/100 per jaar). Alleen bij
+        # 0 reguliere hits én alleen op het detector-pad (naam): de brede
+        # keyword-bucket zou hier valse hits geven ('maximale' matcht
+        # elke waterkering-regel), de detector-naam is norm-specifiek.
+        if not rows and naam_pattern:
+            _pats = [naam_pattern]
+            cur.execute(
+                """
+                SELECT DISTINCT
+                        NULL::text                          AS norm_id,
+                        ocd_artikel_label(te.opschrift, te.wid)             AS norm_naam,
+                        NULL::text                          AS type_norm,
+                        NULL::text                          AS eenheid,
+                        'omgevingswaarderegel'::text        AS norm_groep,
+                        NULL::numeric                       AS kwantitatieve_waarde,
+                        'waardeInRegeltekst'::text          AS kwalitatieve_waarde,
+                        NULL::text                          AS locatie_id,
+                        NULL::text                          AS locatie_naam,
+                        NULL::text                          AS locatie_type,
+                        r.opschrift                         AS regeling,
+                        r.frbr_expression,
+                        ocd_artikel_label(te.opschrift, te.wid)             AS artikel,
+                        te.wid                              AS artikel_wid,
+                        LEFT(te.inhoud_plain, 800)          AS regeltekst_excerpt,
+                        verw.verwijzing_excerpt,
+                        'omgevingswaarderegel'::text        AS match_bucket
+                FROM    p2p.activiteit_locatieaanduiding ala
+                JOIN    p2p.juridische_regel jr
+                          ON jr.identificatie = ala.juridische_regel_id
+                         AND jr.regel_type IN ('Omgevingswaardegel', 'Omgevingswaarderegel')
+                JOIN    p2p.tekst_element te
+                          ON te.wid = jr.regeltekst_wid
+                         AND (jr.regeling_expression IS NULL
+                              OR te.regeling_expression = jr.regeling_expression)
+                JOIN    p2p.regeling r ON r.frbr_expression = te.regeling_expression
+                LEFT JOIN LATERAL (
+                    SELECT string_agg(DISTINCT LEFT(te2.inhoud_plain, 800), E'\n\n') AS verwijzing_excerpt
+                    FROM p2p.tekst_inline_referentie tir
+                    JOIN p2p.tekst_element te2
+                      ON te2.regeling_expression = te.regeling_expression
+                     AND te2.eid = tir.target_ref
+                    WHERE tir.tekst_element_id = te.id
+                      AND tir.soort = 'IntRef'
+                      AND COALESCE(te2.inhoud_plain, '') <> ''
+                ) verw ON TRUE
+                WHERE   ala.locatie_id IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
+                  AND   r.inactief IS NOT TRUE
+                  AND   (te.inhoud_plain ILIKE ANY(%s::text[])
+                         OR COALESCE(te.opschrift, '') ILIKE ANY(%s::text[]))
+                LIMIT 8
+                """,
+                (x, y, _pats, _pats),
+            )
+            rows = cur.fetchall()
+
     for r in rows:
         r.pop("rn", None)
     count_detector = sum(1 for r in rows if r.get("match_bucket") == "detector")
@@ -1002,6 +1083,19 @@ def activiteit(
                        END AS match_bucket
                 FROM activiteiten_op_locatie
             ),
+            -- 2026-07-10: dedup vóór de ranking. De ala-joins geven een
+            -- fan-out van duizenden rijen (locatieaanduidingen x regels)
+            -- per activiteit; zonder dedup vullen near-duplicates van één
+            -- activiteit de bucket-limieten en blijven andere regelingen
+            -- op hetzelfde punt onzichtbaar (Wetterskip 'Oppervlaktewater
+            -- onttrekken' achter 5x OV-'Grondwater onttrekken').
+            dedup AS (
+                SELECT DISTINCT ON (match_bucket, activiteit_naam, LOWER(COALESCE(kwalificatie, '')), regeling)
+                       *
+                FROM   bucketed
+                WHERE  match_bucket IS NOT NULL
+                ORDER BY match_bucket, activiteit_naam, LOWER(COALESCE(kwalificatie, '')), regeling
+            ),
             ranked AS (
                 SELECT *,
                        ROW_NUMBER() OVER (
@@ -1016,8 +1110,7 @@ def activiteit(
                                END,
                                activiteit_naam
                        ) AS rn
-                FROM   bucketed
-                WHERE  match_bucket IS NOT NULL
+                FROM   dedup
             )
             SELECT *
             FROM   ranked
