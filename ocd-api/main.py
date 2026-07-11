@@ -276,17 +276,24 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
     kw = zoektermen or []
 
     with get_conn() as conn, conn.cursor() as cur:
-        # ── Query 1: activiteit-based (existing, proven) ──
+        # ── Query 1: activiteit-based ──
         # Provinciale Omgevingsverordeningen en N2000-aanwijzingsbesluiten
         # ontsnappen aan het keyword-filter: hun activiteit-namen + artikel-
         # teksten matchen zelden de leek-zoektermen ("damherten", "wateroverlast"),
         # waardoor relevante regels ten onrechte werden uitgesloten.
+        #
+        # 2026-07-11: leest uit p2p.mv_regel_op_locatie (voorberekende
+        # ala→jr→te→r-keten, zie dso-loader/scripts/2026-07-add-mv-regel-op-
+        # locatie.sql). De live join kostte 16-37s per call op prod (fan-out
+        # van 31k+ rijen, ~550k buffer-pages); de mv-variant is
+        # resultaat-identiek geverifieerd (EXCEPT-diff = 0 op meerdere
+        # punten) en raakt alleen de rijen op het punt.
         kw_filter, kw_params = _build_keyword_filter(kw, "te.inhoud")
-        act_filter, act_params = _build_keyword_filter(kw, "a.naam")
+        act_filter, act_params = _build_keyword_filter(kw, "m.a_naam")
         if kw_filter and act_filter:
             combined_filter = (
                 f"AND (({kw_filter[4:]}) OR ({act_filter[4:]}) "
-                f"OR r.documenttype IN ('Omgevingsverordening', 'Aanwijzingsbesluit N2000'))"
+                f"OR m.documenttype IN ('Omgevingsverordening', 'Aanwijzingsbesluit N2000'))"
             )
             combined_params = kw_params + act_params
         else:
@@ -295,21 +302,14 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
 
         cur.execute(
             f"""
-            SELECT r.opschrift AS regeling, r.documenttype,
-                   ocd_artikel_label(te.opschrift, te.wid) AS artikel, te.inhoud,
-                   string_agg(DISTINCT a.naam, ' | ') AS activiteit,
-                   string_agg(DISTINCT ala.kwalificatie, ' | ') AS kwalificatie
-            FROM p2p.activiteit_locatieaanduiding ala
-            JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
-            JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-                AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
-            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
-            LEFT JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
-            WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
-              AND NOT r.inactief
+            SELECT m.regeling, m.documenttype, m.artikel, te.inhoud,
+                   string_agg(DISTINCT m.a_naam, ' | ') AS activiteit,
+                   string_agg(DISTINCT m.kwalificatie, ' | ') AS kwalificatie
+            FROM p2p.mv_regel_op_locatie m
+            JOIN p2p.tekst_element te ON te.id = m.te_id
+            WHERE m.locatie_id IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
             {combined_filter}
-            GROUP BY r.opschrift, r.documenttype, te.opschrift, te.wid, te.inhoud
+            GROUP BY m.regeling, m.documenttype, m.artikel, te.id, te.inhoud
             """,
             (x, y, *combined_params),
         )
@@ -318,18 +318,13 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
         # ── Query 2: enrichment per local regeling (opschrift search) ──
         # Find which regelingen are at this location
         if kw:
+            # 2026-07-11: idem — uit de mv i.p.v. de live fan-out-join.
             cur.execute(
                 """
-                SELECT DISTINCT r.frbr_work, r.opschrift, r.documenttype, r.bronhouder
-                FROM p2p.activiteit_locatieaanduiding ala
-                JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
-                JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-                JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-                    AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
-                JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
-                WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
-                  AND NOT r.inactief
-                  AND r.documenttype IN ('Omgevingsplan', 'Waterschapsverordening', 'Omgevingsverordening')
+                SELECT DISTINCT m.frbr_work, m.regeling AS opschrift, m.documenttype, m.bronhouder
+                FROM p2p.mv_regel_op_locatie m
+                WHERE m.locatie_id IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
+                  AND m.documenttype IN ('Omgevingsplan', 'Waterschapsverordening', 'Omgevingsverordening')
                 """,
                 (x, y),
             )
