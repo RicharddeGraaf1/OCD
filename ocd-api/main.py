@@ -658,15 +658,7 @@ def normwaarde(
                         ocd_artikel_label(te.opschrift, te.wid)                                   AS artikel,
                         te.wid                              AS artikel_wid,
                         LEFT(te.inhoud_plain, 800)          AS regeltekst_excerpt,
-                        -- 2026-07-10: IntRef-volg-stap. Bij waardeInRegeltekst
-                        -- staat de waarde vaak niet in het geannoteerde artikel
-                        -- zelf maar in een artikel waarnaar het verwijst
-                        -- (OV Fryslan art. 3.7 -> art. 3.9 met de
-                        -- omgevingswaarden). Volg de IntRefs binnen dezelfde
-                        -- expressie en lever de doeltekst mee, zodat de
-                        -- consument de norm-categorie aan de waarde kan
-                        -- koppelen zonder aparte retrieval-stap.
-                        verw.verwijzing_excerpt
+                        te.id                               AS te_element_id
                 FROM    p2p.normwaarde                  nw
                 JOIN    p2p.norm                        n   ON n.identificatie  = nw.norm_id
                 JOIN    p2p.locatie                     l   ON l.identificatie  = nw.locatie_id
@@ -674,16 +666,6 @@ def normwaarde(
                 LEFT JOIN p2p.juridische_regel          jr  ON jr.identificatie = jrn.juridische_regel_id
                 LEFT JOIN p2p.tekst_element             te  ON te.wid           = jr.regeltekst_wid
                 LEFT JOIN p2p.regeling                  r   ON r.frbr_expression = te.regeling_expression
-                LEFT JOIN LATERAL (
-                    SELECT string_agg(DISTINCT LEFT(te2.inhoud_plain, 800), E'\n\n') AS verwijzing_excerpt
-                    FROM p2p.tekst_inline_referentie tir
-                    JOIN p2p.tekst_element te2
-                      ON te2.regeling_expression = te.regeling_expression
-                     AND te2.eid = tir.target_ref
-                    WHERE tir.tekst_element_id = te.id
-                      AND tir.soort = 'IntRef'
-                      AND COALESCE(te2.inhoud_plain, '') <> ''
-                ) verw ON TRUE
                 WHERE   l.identificatie IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
                   AND   r.inactief IS NOT TRUE
             ),
@@ -709,11 +691,31 @@ def normwaarde(
                        ) AS rn
                 FROM   bucketed
                 WHERE  match_bucket IS NOT NULL
+            ),
+            eind AS (
+                SELECT *
+                FROM   ranked
+                WHERE  (match_bucket = 'detector' AND rn <= %s)
+                   OR  (match_bucket = 'keyword'  AND rn <= %s)
             )
-            SELECT *
-            FROM   ranked
-            WHERE  (match_bucket = 'detector' AND rn <= %s)
-               OR  (match_bucket = 'keyword'  AND rn <= %s)
+            -- 2026-07-10/11: IntRef-volg-stap. Bij waardeInRegeltekst staat de
+            -- waarde vaak niet in het geannoteerde artikel zelf maar in een
+            -- artikel waarnaar het verwijst (OV Fryslan art. 3.7 -> art. 3.9).
+            -- De LATERAL staat bewust ACHTER de bucket-limieten: in de brede
+            -- CTE liet de planner hem over de volledige join lopen
+            -- (prod: 17,8s -> statement timeout); hier raakt hij max ~20 rijen.
+            SELECT eind.*, verw.verwijzing_excerpt
+            FROM   eind
+            LEFT JOIN LATERAL (
+                SELECT string_agg(DISTINCT LEFT(te2.inhoud_plain, 800), E'\n\n') AS verwijzing_excerpt
+                FROM p2p.tekst_inline_referentie tir
+                JOIN p2p.tekst_element te2
+                  ON te2.regeling_expression = eind.frbr_expression
+                 AND te2.eid = tir.target_ref
+                WHERE tir.tekst_element_id = eind.te_element_id
+                  AND tir.soort = 'IntRef'
+                  AND COALESCE(te2.inhoud_plain, '') <> ''
+            ) verw ON TRUE
             ORDER BY CASE match_bucket WHEN 'detector' THEN 0 ELSE 1 END,
                      kwantitatieve_waarde DESC NULLS LAST,
                      norm_naam, locatie_id
@@ -739,48 +741,53 @@ def normwaarde(
             _pats = [naam_pattern]
             cur.execute(
                 """
-                SELECT DISTINCT
-                        NULL::text                          AS norm_id,
-                        ocd_artikel_label(te.opschrift, te.wid)             AS norm_naam,
-                        NULL::text                          AS type_norm,
-                        NULL::text                          AS eenheid,
-                        'omgevingswaarderegel'::text        AS norm_groep,
-                        NULL::numeric                       AS kwantitatieve_waarde,
-                        'waardeInRegeltekst'::text          AS kwalitatieve_waarde,
-                        NULL::text                          AS locatie_id,
-                        NULL::text                          AS locatie_naam,
-                        NULL::text                          AS locatie_type,
-                        r.opschrift                         AS regeling,
-                        r.frbr_expression,
-                        ocd_artikel_label(te.opschrift, te.wid)             AS artikel,
-                        te.wid                              AS artikel_wid,
-                        LEFT(te.inhoud_plain, 800)          AS regeltekst_excerpt,
-                        verw.verwijzing_excerpt,
-                        'omgevingswaarderegel'::text        AS match_bucket
-                FROM    p2p.activiteit_locatieaanduiding ala
-                JOIN    p2p.juridische_regel jr
-                          ON jr.identificatie = ala.juridische_regel_id
-                         AND jr.regel_type IN ('Omgevingswaardegel', 'Omgevingswaarderegel')
-                JOIN    p2p.tekst_element te
-                          ON te.wid = jr.regeltekst_wid
-                         AND (jr.regeling_expression IS NULL
-                              OR te.regeling_expression = jr.regeling_expression)
-                JOIN    p2p.regeling r ON r.frbr_expression = te.regeling_expression
+                WITH kandidaten AS (
+                    SELECT DISTINCT
+                            NULL::text                          AS norm_id,
+                            ocd_artikel_label(te.opschrift, te.wid)             AS norm_naam,
+                            NULL::text                          AS type_norm,
+                            NULL::text                          AS eenheid,
+                            'omgevingswaarderegel'::text        AS norm_groep,
+                            NULL::numeric                       AS kwantitatieve_waarde,
+                            'waardeInRegeltekst'::text          AS kwalitatieve_waarde,
+                            NULL::text                          AS locatie_id,
+                            NULL::text                          AS locatie_naam,
+                            NULL::text                          AS locatie_type,
+                            r.opschrift                         AS regeling,
+                            r.frbr_expression,
+                            ocd_artikel_label(te.opschrift, te.wid)             AS artikel,
+                            te.wid                              AS artikel_wid,
+                            LEFT(te.inhoud_plain, 800)          AS regeltekst_excerpt,
+                            te.id                               AS te_element_id,
+                            'omgevingswaarderegel'::text        AS match_bucket
+                    FROM    p2p.activiteit_locatieaanduiding ala
+                    JOIN    p2p.juridische_regel jr
+                              ON jr.identificatie = ala.juridische_regel_id
+                             AND jr.regel_type IN ('Omgevingswaardegel', 'Omgevingswaarderegel')
+                    JOIN    p2p.tekst_element te
+                              ON te.wid = jr.regeltekst_wid
+                             AND (jr.regeling_expression IS NULL
+                                  OR te.regeling_expression = jr.regeling_expression)
+                    JOIN    p2p.regeling r ON r.frbr_expression = te.regeling_expression
+                    WHERE   ala.locatie_id IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
+                      AND   r.inactief IS NOT TRUE
+                      AND   (te.inhoud_plain ILIKE ANY(%s::text[])
+                             OR COALESCE(te.opschrift, '') ILIKE ANY(%s::text[]))
+                    LIMIT 8
+                )
+                -- LATERAL achter de LIMIT (zie hoofdquery): max 8 rijen.
+                SELECT k.*, verw.verwijzing_excerpt
+                FROM   kandidaten k
                 LEFT JOIN LATERAL (
                     SELECT string_agg(DISTINCT LEFT(te2.inhoud_plain, 800), E'\n\n') AS verwijzing_excerpt
                     FROM p2p.tekst_inline_referentie tir
                     JOIN p2p.tekst_element te2
-                      ON te2.regeling_expression = te.regeling_expression
+                      ON te2.regeling_expression = k.frbr_expression
                      AND te2.eid = tir.target_ref
-                    WHERE tir.tekst_element_id = te.id
+                    WHERE tir.tekst_element_id = k.te_element_id
                       AND tir.soort = 'IntRef'
                       AND COALESCE(te2.inhoud_plain, '') <> ''
                 ) verw ON TRUE
-                WHERE   ala.locatie_id IN (SELECT identificatie FROM p2p.locatie_subdiv WHERE ST_Intersects(geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992)))
-                  AND   r.inactief IS NOT TRUE
-                  AND   (te.inhoud_plain ILIKE ANY(%s::text[])
-                         OR COALESCE(te.opschrift, '') ILIKE ANY(%s::text[]))
-                LIMIT 8
                 """,
                 (x, y, _pats, _pats),
             )
@@ -788,6 +795,7 @@ def normwaarde(
 
     for r in rows:
         r.pop("rn", None)
+        r.pop("te_element_id", None)
     count_detector = sum(1 for r in rows if r.get("match_bucket") == "detector")
     count_keyword  = sum(1 for r in rows if r.get("match_bucket") == "keyword")
     return {
@@ -1134,6 +1142,7 @@ def activiteit(
         rows = cur.fetchall()
     for r in rows:
         r.pop("rn", None)
+        r.pop("te_element_id", None)
     count_detector = sum(1 for r in rows if r.get("match_bucket") == "detector")
     count_keyword  = sum(1 for r in rows if r.get("match_bucket") == "keyword")
     return {
