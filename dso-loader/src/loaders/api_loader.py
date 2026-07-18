@@ -806,6 +806,44 @@ REGELINGMODEL_MAP = {
 }
 
 
+def herlaad_annotaties(expr_ids: list[str]) -> int:
+    """Herlaad alleen de annotatie-stap voor een lijst regeling-expressies.
+
+    Gebruikt voor remediatie: her-annoteren corrigeert o.a. stale
+    regeltekst_wid (het annotatie-endpoint geeft de nieuwe wIds, de ON CONFLICT
+    volgt nu mee). Zoekt work/type/bronhouder op in p2p.regeling en draait de
+    juiste annotatie-loader. Returnt het aantal succesvol geannoteerde regelingen.
+    """
+    conn = get_conn()
+    n = 0
+    try:
+        for expr in expr_ids:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT frbr_work, documenttype, bronhouder "
+                    "FROM p2p.regeling WHERE frbr_expression = %s", (expr,))
+                row = cur.fetchone()
+            if not row:
+                console.print(f"  [yellow]{expr}: niet in p2p.regeling[/yellow]")
+                continue
+            work, doc_type, bh = row["frbr_work"], row["documenttype"], row["bronhouder"]
+            console.print(f"  [bold]Herannoteren:[/bold] {expr.split('/')[-1]} "
+                          f"({doc_type}, {bh})")
+            try:
+                if doc_type in VRIJETEKST_TYPES:
+                    load_divisieannotaties(conn, work, bh)
+                else:
+                    load_regeltekstannotaties(conn, work, bh, expr)
+                conn.commit()
+                n += 1
+            except Exception as e:
+                conn.rollback()
+                console.print(f"    [red]mislukt: {e}[/red]")
+        return n
+    finally:
+        conn.close()
+
+
 # ── Main entry point ─────────────────────────────────────────────────
 
 def load_via_api(overheid_code: str, naam: str,

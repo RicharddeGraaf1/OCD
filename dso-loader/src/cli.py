@@ -58,6 +58,42 @@ def setup_koop():
         conn.close()
 
 
+@cli.command("herlaad-annotaties-stale")
+@click.option("--limit", type=int, default=None, help="Max aantal expressies (default: alle).")
+def herlaad_annotaties_stale_cmd(limit):
+    """Remedieer stale regeltekst_wid: her-annoteer actieve regelingen waarvan
+    juridische_regel.regeltekst_wid niet (meer) naar een tekst_element in dezelfde
+    expressie wijst (ontstaan vóór de regeltekst_wid-ON-CONFLICT-fix)."""
+    from src.loaders.api_loader import herlaad_annotaties
+    from src.run_log import load_run
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT jr.regeling_expression
+                FROM p2p.juridische_regel jr
+                JOIN p2p.regeling r ON r.frbr_expression = jr.regeling_expression AND NOT r.inactief
+                WHERE jr.regeltekst_wid IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM p2p.tekst_element te
+                                  WHERE te.regeling_expression = jr.regeling_expression
+                                    AND te.wid = jr.regeltekst_wid)
+                ORDER BY jr.regeling_expression
+            """)
+            exprs = [row["regeling_expression"] for row in cur.fetchall()]
+    finally:
+        conn.close()
+    if limit:
+        exprs = exprs[:limit]
+    console.print(f"[bold]{len(exprs)} regeling(en) met stale regeltekst_wid[/bold]")
+    if not exprs:
+        console.print("[green]niets te remediëren[/green]")
+        return
+    with load_run("ozon-regelingen", scope=f"herlaad-stale-wid ({len(exprs)})") as run:
+        n = herlaad_annotaties(exprs)
+        run.set(n_verwerkt=n)
+    console.print(f"[green]{n} regeling(en) opnieuw geannoteerd[/green]")
+
+
 @cli.command("setup-mer")
 def setup_mer_cmd():
     """Apply het mer-schema (MER milieueffectrapportage). Idempotent."""
