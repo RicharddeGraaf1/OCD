@@ -365,6 +365,37 @@ def load_wro():
     load_wro_plans()
 
 
+@cli.command("load-gemeentegrens-historisch")
+def load_gemeentegrens_historisch_cmd():
+    """Vul core.gemeentegrens_historisch met grenzen van opgeheven gemeenten
+    (PDOK CBS Gebiedsindelingen per jaar) — ambtsgebied-bron voor IMRO2006-plannen
+    van niet-meer-bestaande bronhouders."""
+    from src.loaders.wro_imro2006 import (
+        benodigde_opgeheven_codes, vul_gemeentegrens_historisch,
+    )
+    codes = benodigde_opgeheven_codes()
+    console.print(f"[bold]{len(codes)} opgeheven bronhouders zonder huidige grens[/bold]")
+    if not codes:
+        return
+    n = vul_gemeentegrens_historisch(codes)
+    console.print(f"[green]{n} historische gemeentegrenzen ingevoegd[/green]")
+
+
+@cli.command("load-wro-imro2006")
+@click.option("--gemeente", "-g", default=None,
+              help="CBS-code(s), comma-separated. Default: alle bronhouders.")
+def load_wro_imro2006_cmd(gemeente):
+    """Laad missende IMRO2006/Artikel-10-plannen met indicatieve ambtsgebied-
+    geometrie (uit de planvoorraad-diff; metadata+teksten uit IHR)."""
+    from src.loaders.wro_imro2006 import load_imro2006_ambtsgebied
+    from src.run_log import load_run
+    codes = [c.strip() for c in gemeente.split(",")] if gemeente else None
+    with load_run("pdok-bestemmingsplannen", scope=f"imro2006:{gemeente or 'alle'}") as run:
+        n = load_imro2006_ambtsgebied(codes)
+        run.set(n_verwerkt=n)
+    console.print(f"[green]{n} IMRO2006-plannen geladen (ambtsgebied-geometrie)[/green]")
+
+
 @cli.command("load-gemeentegrenzen")
 def load_gemeentegrenzen_cmd():
     """Laad gemeente- + provinciegrenzen uit PDOK Bestuurlijke Gebieden.
