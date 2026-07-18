@@ -1046,7 +1046,12 @@ ALTER TABLE vth.vergunningkennisgeving
     ADD COLUMN IF NOT EXISTS pdf_url             TEXT,
     ADD COLUMN IF NOT EXISTS datum_ontvangst     DATE,
     ADD COLUMN IF NOT EXISTS datum_publicatie_ts TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS subject_taxonomie   TEXT;
+    ADD COLUMN IF NOT EXISTS subject_taxonomie   TEXT,
+    -- Afwijkvergunning (BOPA)-classificatie op het KOOP-register (classify-script).
+    ADD COLUMN IF NOT EXISTS afwijk_status       TEXT,
+    ADD COLUMN IF NOT EXISTS procedure           TEXT,
+    ADD COLUMN IF NOT EXISTS afwijk_bron         TEXT,
+    ADD COLUMN IF NOT EXISTS afwijk_evidence     TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_vk_bg_datum
     ON vth.vergunningkennisgeving (bg_naam, datum_publicatie DESC);

@@ -26,6 +26,9 @@ Filter-conventie (gedeeld door list / pins / facets):
     zaak    ILIKE op zaaknummer_bg
     bbox    "west,south,east,north" in WGS84 — alleen records waarvan
             geometrie_wgs_pt binnen de envelope valt
+    afwijk  "bopa"     → alleen afwijkvergunningen (buitenplanse omgevingsplan-
+                         activiteit, afwijk_status='buitenplans_expliciet')
+            "regulier" → alles behalve bevestigde BOPA
 """
 
 from __future__ import annotations
@@ -70,6 +73,14 @@ class VergunningSummary(BaseModel):
     zaaknummer_bg: str | None
     preferred_url: str | None
     pdf_url: str | None
+    afwijk_status: str | None = Field(
+        None,
+        description=(
+            "Afwijkvergunning-classificatie: 'buitenplans_expliciet' (BOPA), "
+            "'binnenplans_expliciet', 'opa_onbepaald', of NULL (geen omgevingsplan-"
+            "activiteit). Tekst-afgeleid — signaal, geen juridisch oordeel (gaps#G-84)."
+        ),
+    )
 
 
 class VergunningDetail(VergunningSummary):
@@ -148,6 +159,114 @@ class StatsResponse(BaseModel):
     took_ms: int
 
 
+# ── Doorlooptijd (leest uit matview vth.dossier_doorlooptijd) ──────────
+
+
+class DoorlooptijdKpi(BaseModel):
+    n_dossiers: int
+    n_bevoegd_gezag: int
+    mediaan_dagen: int | None
+    gemiddelde_dagen: float | None
+    p25_dagen: int | None
+    p75_dagen: int | None
+    pct_binnen_8wk: float | None = Field(
+        None, description="Aandeel dossiers met doorlooptijd <= 56 dagen (reguliere termijn)"
+    )
+    pct_boven_half_jaar: float | None = Field(
+        None, description="Aandeel dossiers met doorlooptijd > 182 dagen"
+    )
+
+
+class DoorlooptijdBin(BaseModel):
+    ondergrens_dagen: int
+    bovengrens_dagen: int | None = Field(
+        None, description="None = open bovengrens (>= ondergrens)"
+    )
+    count: int
+
+
+class DoorlooptijdGroep(BaseModel):
+    """Aggregaat per activiteit of per bevoegd gezag."""
+
+    waarde: str
+    n: int
+    mediaan_dagen: int | None
+    gemiddelde_dagen: float | None
+    pct_binnen_8wk: float | None
+    organisatietype: str | None = None
+
+
+class DoorlooptijdKwartaal(BaseModel):
+    kwartaal: date
+    n: int
+    mediaan_dagen: int | None
+
+
+class DoorlooptijdMethode(BaseModel):
+    """Aantal + mediaan per koppelmethode (altijd over de volledige matview)."""
+
+    methode: str = Field(..., description="'zaaknummer' (exact) of 'adres' (benadering)")
+    n: int
+    mediaan_dagen: int | None
+
+
+class DoorlooptijdUitkomst(BaseModel):
+    """Aantal + mediaan per uitkomst (altijd over de volledige matview)."""
+
+    uitkomst: str = Field(
+        ..., description="verleend | geweigerd | van_rechtswege | ingetrokken"
+    )
+    n: int
+    mediaan_dagen: int | None
+
+
+class DoorlooptijdType(BaseModel):
+    """Aantal + mediaan per planafwijking-type (sluit het afwijk-filter uit)."""
+
+    type: str = Field(..., description="'bopa' (afwijkvergunning) of 'regulier'")
+    n: int
+    mediaan_dagen: int | None
+
+
+# Uitkomsten die standaard meetellen (een 'besluit'); ingetrokken is opt-in.
+_DLT_UITKOMSTEN = ("verleend", "geweigerd", "van_rechtswege", "ingetrokken")
+
+
+class DoorlooptijdResponse(BaseModel):
+    kpi: DoorlooptijdKpi
+    verdeling: list[DoorlooptijdBin]
+    per_activiteit: list[DoorlooptijdGroep]
+    per_kwartaal: list[DoorlooptijdKwartaal]
+    per_bevoegd_gezag: list[DoorlooptijdGroep] = Field(
+        ..., description="Alleen BG met >= min_bg dossiers, gesorteerd op aantal"
+    )
+    per_methode: list[DoorlooptijdMethode] = Field(
+        ..., description="Verdeling over koppelmethodes — altijd ongefilterd"
+    )
+    per_uitkomst: list[DoorlooptijdUitkomst] = Field(
+        ..., description="Verdeling over uitkomsten — altijd ongefilterd"
+    )
+    per_type: list[DoorlooptijdType] = Field(
+        ..., description="Verdeling over planafwijking-type (bopa/regulier) — sluit afwijk-filter uit"
+    )
+    methode: str | None = Field(
+        None, description="Actief methode-filter (None = beide trappen samen)"
+    )
+    uitkomst: list[str] = Field(
+        ..., description="Actief uitkomst-filter (leeg = alle uitkomsten)"
+    )
+    afwijk: str | None = Field(
+        None, description="Actief type-filter: 'bopa' | 'regulier' | None (beide)"
+    )
+    min_bg: int = Field(
+        ..., description="Effectieve BG-drempel (kan automatisch verlaagd zijn)"
+    )
+    min_bg_verlaagd: bool = Field(
+        ..., description="True als de drempel automatisch is verlaagd t.o.v. de gevraagde"
+    )
+    took_ms: int
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Filter-builder
 # ─────────────────────────────────────────────────────────────────────
@@ -190,6 +309,7 @@ def _build_filters(
     ontv: bool,
     zaak: str | None,
     bbox: str | None,
+    afwijk: str | None = None,
 ) -> tuple[list[str], list[Any]]:
     """Return (where-clauses, params) to be combined with AND."""
     clauses: list[str] = []
@@ -234,6 +354,10 @@ def _build_filters(
     if zaak:
         clauses.append("zaaknummer_bg ILIKE %s")
         params.append(f"%{zaak}%")
+    if afwijk == "bopa":
+        clauses.append("afwijk_status = 'buitenplans_expliciet'")
+    elif afwijk == "regulier":
+        clauses.append("afwijk_status IS DISTINCT FROM 'buitenplans_expliciet'")
 
     parsed_bbox = _parse_bbox(bbox)
     if parsed_bbox:
@@ -269,7 +393,7 @@ _LIST_COLS = """
     activiteit_code, type_besluit, subject_taxonomie, geometrie_type,
     ST_X(geometrie_wgs_pt) AS lon, ST_Y(geometrie_wgs_pt) AS lat,
     straatnaam, huisnummer, postcode, woonplaats,
-    zaaknummer_bg, preferred_url, pdf_url
+    zaaknummer_bg, preferred_url, pdf_url, afwijk_status
 """
 
 
@@ -287,12 +411,15 @@ def list_vergunningen(
     ontv: bool = Query(False, description="Alleen records met datum_ontvangst"),
     zaak: str | None = Query(None, description="ILIKE op zaaknummer_bg"),
     bbox: str | None = Query(None, description="west,south,east,north in WGS84"),
+    afwijk: Literal["bopa", "regulier"] | None = Query(
+        None, description="bopa = afwijkvergunning (BOPA); regulier = niet-bevestigde BOPA"
+    ),
     sort: Literal["datum", "datum_asc", "ontvangst", "bg"] = Query("datum"),
     limit: int = Query(50, ge=1, le=LIST_MAX_LIMIT),
     offset: int = Query(0, ge=0),
 ):
     t0 = time.perf_counter()
-    clauses, params = _build_filters(q, tb, ac, bg, org, th, vanaf, totd, geom, ontv, zaak, bbox)
+    clauses, params = _build_filters(q, tb, ac, bg, org, th, vanaf, totd, geom, ontv, zaak, bbox, afwijk)
     where = _where_sql(clauses)
     order = _SORT_SQL[sort]
 
@@ -330,12 +457,13 @@ def list_pins(
     ontv: bool = Query(False),
     zaak: str | None = Query(None),
     bbox: str | None = Query(None),
+    afwijk: Literal["bopa", "regulier"] | None = Query(None),
     cap: int = Query(PINS_CAP, ge=100, le=50_000),
 ):
     t0 = time.perf_counter()
     # Pins-endpoint heeft 'geom' default-true: forceer NOT NULL ongeacht user-input.
     clauses, params = _build_filters(
-        q, tb, ac, bg, org, th, vanaf, totd, True, ontv, zaak, bbox
+        q, tb, ac, bg, org, th, vanaf, totd, True, ontv, zaak, bbox, afwijk
     )
     where = _where_sql(clauses)
     count_sql = f"SELECT count(*) AS n FROM vth.vergunningkennisgeving {where}"
@@ -379,6 +507,7 @@ def list_facets(
     ontv: bool = Query(False),
     zaak: str | None = Query(None),
     bbox: str | None = Query(None),
+    afwijk: Literal["bopa", "regulier"] | None = Query(None),
 ):
     """Geeft counts per filter-waarde **met alle filters toegepast**.
 
@@ -388,7 +517,7 @@ def list_facets(
     eerste viewer-iteratie.
     """
     t0 = time.perf_counter()
-    clauses, params = _build_filters(q, tb, ac, bg, org, th, vanaf, totd, geom, ontv, zaak, bbox)
+    clauses, params = _build_filters(q, tb, ac, bg, org, th, vanaf, totd, geom, ontv, zaak, bbox, afwijk)
     where = _where_sql(clauses)
 
     def _bucket_sql(col: str, top: int | None = None) -> str:
@@ -454,6 +583,281 @@ def stats():
         enriched=enriched,
         enriched_pct=round(enriched / total * 100, 2) if total else 0.0,
         per_type_besluit=per_tb,
+        took_ms=took,
+    )
+
+
+_DLT_BIN_DAGEN = 14  # binbreedte histogram
+_DLT_MAX_BIN = 26    # 26 * 14 = 364; bin 26 = open bovengrens (>= 364 dagen)
+_DLT_REGULIER = 56   # 8 weken reguliere termijn
+_DLT_HALF_JAAR = 182
+
+
+def _dlt_stat_select(src: str, group_col: str | None = None) -> str:
+    """SELECT-fragment met de standaard doorlooptijd-statistieken.
+
+    src = de FROM-bron (tabel of gefilterde subquery met alias).
+    group_col=None → één globale rij; anders één rij per groepswaarde.
+    """
+    prefix = f"{group_col} AS waarde, " if group_col else ""
+    return (
+        f"SELECT {prefix}"
+        "  count(*) AS n, "
+        "  percentile_disc(0.5) WITHIN GROUP (ORDER BY doorlooptijd_dagen) AS mediaan, "
+        "  round(avg(doorlooptijd_dagen), 1) AS gemiddelde, "
+        f"  round(100.0 * count(*) FILTER (WHERE doorlooptijd_dagen <= {_DLT_REGULIER}) "
+        "        / count(*), 1) AS pct_binnen_8wk "
+        f"FROM {src} "
+    )
+
+
+@router.get(
+    "/doorlooptijd",
+    response_model=DoorlooptijdResponse,
+    summary="Geaggregeerde doorlooptijd-statistiek (matview vth.dossier_doorlooptijd)",
+)
+def doorlooptijd(
+    min_bg: int = Query(
+        30,
+        ge=1,
+        le=1000,
+        description="Minimum aantal dossiers per BG om in per_bevoegd_gezag te verschijnen",
+    ),
+    methode: Literal["zaaknummer", "adres"] | None = Query(
+        None,
+        description=(
+            "Filter op koppelmethode: 'zaaknummer' (exact) of 'adres' (benadering). "
+            "Leeg = beide trappen samen. per_methode blijft altijd ongefilterd."
+        ),
+    ),
+    uitkomst: list[str] = Query(
+        default=[],
+        description=(
+            "Filter op uitkomst (repeatable): verleend | geweigerd | van_rechtswege | "
+            "ingetrokken. Leeg = alle uitkomsten. per_uitkomst blijft altijd ongefilterd."
+        ),
+    ),
+    afwijk: Literal["bopa", "regulier"] | None = Query(
+        None,
+        description=(
+            "Filter op planafwijking-type: 'bopa' (afwijkvergunning / buitenplanse "
+            "omgevingsplanactiviteit) of 'regulier'. Leeg = beide. per_type blijft "
+            "altijd ongefilterd. NB tekst-signaal (G-84): bopa is een ondergrens."
+        ),
+    ),
+):
+    """Voedt het doorlooptijd-dashboard.
+
+    Leest uit de matview ``vth.dossier_doorlooptijd``. Een dossier koppelt een
+    aanvraag- aan een verlening-kennisgeving via twee trappen (kolom
+    ``match_methode``): ``zaaknummer`` (exact) of ``adres`` (benadering op
+    gelijk bg+adres+activiteit, verlening ≤365d na aanvraag). Eén call levert
+    KPI's, histogram, per-activiteit, kwartaal-trend, BG-benchmark én de
+    verdeling over de koppelmethodes. Geschikt voor een nightly JSON-export.
+
+    Let op: kennisgevings-doorlooptijd, geen officiele beslistermijn; en
+    selectiebias richting consistent publicerende BG — zie de matview-comment
+    en de methodologie-noot in de vault-analyse.
+    """
+    t0 = time.perf_counter()
+    # Valideer uitkomst-waarden (onbekende negeren we niet stil — 400).
+    bad = [u for u in uitkomst if u not in _DLT_UITKOMSTEN]
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Onbekende uitkomst(en): {bad}. Toegestaan: {list(_DLT_UITKOMSTEN)}.",
+        )
+
+    # Basisbron-helper: bouwt een (FROM-bron, params) uit actieve filters.
+    m_filt = ("match_methode = %s", [methode]) if methode else None
+    u_filt = ("uitkomst = ANY(%s)", [uitkomst]) if uitkomst else None
+    a_filt = ("is_afwijk = %s", [afwijk == "bopa"]) if afwijk else None
+
+    def _src(*filters: tuple[str, list[Any]] | None) -> tuple[str, list[Any]]:
+        active = [f for f in filters if f]
+        if not active:
+            return "vth.dossier_doorlooptijd", []
+        where = " AND ".join(c for c, _ in active)
+        params = [p for _, plist in active for p in plist]
+        return f"(SELECT * FROM vth.dossier_doorlooptijd WHERE {where}) d", params
+
+    # Hoofdbron = alle filters. Facetten sluiten hun eigen dimensie uit zodat
+    # per_methode/per_uitkomst/per_type optellen tot het totaal van de huidige selectie.
+    src, pre = _src(m_filt, u_filt, a_filt)
+    meth_src, meth_pre = _src(u_filt, a_filt)  # per_methode: geen methode-filter
+    uitk_src, uitk_pre = _src(m_filt, a_filt)  # per_uitkomst: geen uitkomst-filter
+    type_src, type_pre = _src(m_filt, u_filt)  # per_type: geen afwijk-filter
+
+    with get_conn() as conn, conn.cursor() as cur:
+        # KPI's
+        cur.execute(
+            "SELECT count(*) AS n, "
+            "  count(DISTINCT (bg_naam, organisatietype)) AS n_bg, "
+            "  percentile_disc(0.5)  WITHIN GROUP (ORDER BY doorlooptijd_dagen) AS mediaan, "
+            "  round(avg(doorlooptijd_dagen), 1) AS gemiddelde, "
+            "  percentile_disc(0.25) WITHIN GROUP (ORDER BY doorlooptijd_dagen) AS p25, "
+            "  percentile_disc(0.75) WITHIN GROUP (ORDER BY doorlooptijd_dagen) AS p75, "
+            f"  round(100.0 * count(*) FILTER (WHERE doorlooptijd_dagen <= {_DLT_REGULIER}) "
+            "        / nullif(count(*), 0), 1) AS pct_binnen_8wk, "
+            f"  round(100.0 * count(*) FILTER (WHERE doorlooptijd_dagen > {_DLT_HALF_JAAR}) "
+            "        / nullif(count(*), 0), 1) AS pct_half_jaar "
+            f"FROM {src}",
+            pre,
+        )
+        k = cur.fetchone()
+        kpi = DoorlooptijdKpi(
+            n_dossiers=k["n"],
+            n_bevoegd_gezag=k["n_bg"],
+            mediaan_dagen=k["mediaan"],
+            gemiddelde_dagen=float(k["gemiddelde"]) if k["gemiddelde"] is not None else None,
+            p25_dagen=k["p25"],
+            p75_dagen=k["p75"],
+            pct_binnen_8wk=float(k["pct_binnen_8wk"]) if k["pct_binnen_8wk"] is not None else None,
+            pct_boven_half_jaar=float(k["pct_half_jaar"]) if k["pct_half_jaar"] is not None else None,
+        )
+
+        # Verdeling-histogram (vul ontbrekende bins met 0 → continue x-as)
+        cur.execute(
+            f"SELECT least(doorlooptijd_dagen / {_DLT_BIN_DAGEN}, {_DLT_MAX_BIN}) AS bin, "
+            "       count(*) AS c "
+            f"FROM {src} GROUP BY 1 ORDER BY 1",
+            pre,
+        )
+        counts = {r["bin"]: r["c"] for r in cur.fetchall()}
+        verdeling = [
+            DoorlooptijdBin(
+                ondergrens_dagen=b * _DLT_BIN_DAGEN,
+                bovengrens_dagen=None if b == _DLT_MAX_BIN else (b + 1) * _DLT_BIN_DAGEN - 1,
+                count=counts.get(b, 0),
+            )
+            for b in range(_DLT_MAX_BIN + 1)
+        ]
+
+        # Per activiteit
+        cur.execute(
+            _dlt_stat_select(src, "activiteit_code")
+            + "WHERE activiteit_code IS NOT NULL GROUP BY 1 ORDER BY 2 DESC",
+            pre,
+        )
+        per_activiteit = [
+            DoorlooptijdGroep(
+                waarde=r["waarde"],
+                n=r["n"],
+                mediaan_dagen=r["mediaan"],
+                gemiddelde_dagen=float(r["gemiddelde"]) if r["gemiddelde"] is not None else None,
+                pct_binnen_8wk=float(r["pct_binnen_8wk"]) if r["pct_binnen_8wk"] is not None else None,
+            )
+            for r in cur.fetchall()
+        ]
+
+        # Kwartaal-trend
+        cur.execute(
+            "SELECT kwartaal, count(*) AS n, "
+            "  percentile_disc(0.5) WITHIN GROUP (ORDER BY doorlooptijd_dagen) AS mediaan "
+            f"FROM {src} GROUP BY 1 ORDER BY 1",
+            pre,
+        )
+        per_kwartaal = [
+            DoorlooptijdKwartaal(kwartaal=r["kwartaal"], n=r["n"], mediaan_dagen=r["mediaan"])
+            for r in cur.fetchall()
+        ]
+
+        # Per bevoegd gezag. Groep op (bg_naam, organisatietype) zodat
+        # gelijknamige gemeente/provincie (Utrecht, Groningen) niet
+        # samenklonteren. De drempel wordt AUTOMATISCH verlaagd wanneer hij bij
+        # een kleine selectie niets oplevert (30 → 10 → 5 → 1), zodat de tabel
+        # niet leeg valt en bij een kleine selectie élk BG (tot n=1) zichtbaar
+        # is. Alleen omlaag, nooit omhoog t.o.v. de gevraagde min_bg.
+        bg_sql = (
+            "SELECT bg_naam AS waarde, "
+            "  organisatietype, "
+            "  count(*) AS n, "
+            "  percentile_disc(0.5) WITHIN GROUP (ORDER BY doorlooptijd_dagen) AS mediaan, "
+            "  round(avg(doorlooptijd_dagen), 1) AS gemiddelde, "
+            f"  round(100.0 * count(*) FILTER (WHERE doorlooptijd_dagen <= {_DLT_REGULIER}) "
+            "        / count(*), 1) AS pct_binnen_8wk "
+            f"FROM {src} "
+            "GROUP BY bg_naam, organisatietype HAVING count(*) >= %s ORDER BY n DESC"
+        )
+        ladder = sorted({min_bg, 10, 5, 1} & set(range(0, min_bg + 1)), reverse=True)
+        bg_rows: list[dict[str, Any]] = []
+        min_bg_eff = ladder[-1] if ladder else min_bg
+        for drempel in ladder:
+            cur.execute(bg_sql, pre + [drempel])
+            bg_rows = cur.fetchall()
+            min_bg_eff = drempel
+            if bg_rows:
+                break
+        per_bg = [
+            DoorlooptijdGroep(
+                waarde=r["waarde"],
+                n=r["n"],
+                mediaan_dagen=r["mediaan"],
+                gemiddelde_dagen=float(r["gemiddelde"]) if r["gemiddelde"] is not None else None,
+                pct_binnen_8wk=float(r["pct_binnen_8wk"]) if r["pct_binnen_8wk"] is not None else None,
+                organisatietype=r["organisatietype"],
+            )
+            for r in bg_rows
+        ]
+
+        # Verdeling over koppelmethodes (sluit het methode-filter uit, respecteert
+        # wel het uitkomst-filter → telt op tot het totaal van de selectie).
+        cur.execute(
+            "SELECT match_methode AS methode, count(*) AS n, "
+            "  percentile_disc(0.5) WITHIN GROUP (ORDER BY doorlooptijd_dagen) AS mediaan "
+            f"FROM {meth_src} GROUP BY 1 ORDER BY 2 DESC",
+            meth_pre,
+        )
+        per_methode = [
+            DoorlooptijdMethode(methode=r["methode"], n=r["n"], mediaan_dagen=r["mediaan"])
+            for r in cur.fetchall()
+        ]
+
+        # Verdeling over uitkomsten (sluit het uitkomst-filter uit → stabiele
+        # chip-totalen; respecteert wel een eventueel methode-filter).
+        cur.execute(
+            "SELECT uitkomst, count(*) AS n, "
+            "  percentile_disc(0.5) WITHIN GROUP (ORDER BY doorlooptijd_dagen) AS mediaan "
+            f"FROM {uitk_src} GROUP BY 1 ORDER BY 2 DESC",
+            uitk_pre,
+        )
+        per_uitkomst = [
+            DoorlooptijdUitkomst(uitkomst=r["uitkomst"], n=r["n"], mediaan_dagen=r["mediaan"])
+            for r in cur.fetchall()
+        ]
+
+        # Verdeling over planafwijking-type (sluit het afwijk-filter uit → stabiele
+        # bopa/regulier-totalen; respecteert wel methode- en uitkomst-filter).
+        cur.execute(
+            "SELECT is_afwijk, count(*) AS n, "
+            "  percentile_disc(0.5) WITHIN GROUP (ORDER BY doorlooptijd_dagen) AS mediaan "
+            f"FROM {type_src} GROUP BY 1 ORDER BY 1 DESC",
+            type_pre,
+        )
+        per_type = [
+            DoorlooptijdType(
+                type="bopa" if r["is_afwijk"] else "regulier",
+                n=r["n"],
+                mediaan_dagen=r["mediaan"],
+            )
+            for r in cur.fetchall()
+        ]
+
+    took = int((time.perf_counter() - t0) * 1000)
+    return DoorlooptijdResponse(
+        kpi=kpi,
+        verdeling=verdeling,
+        per_activiteit=per_activiteit,
+        per_kwartaal=per_kwartaal,
+        per_bevoegd_gezag=per_bg,
+        per_methode=per_methode,
+        per_uitkomst=per_uitkomst,
+        per_type=per_type,
+        methode=methode,
+        uitkomst=uitkomst,
+        afwijk=afwijk,
+        min_bg=min_bg_eff,
+        min_bg_verlaagd=min_bg_eff < min_bg,
         took_ms=took,
     )
 
