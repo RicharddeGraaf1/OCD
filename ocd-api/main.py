@@ -24,6 +24,7 @@ from ponsenkaart import router as ponsenkaart_router
 from regelteksten_bij_vraag import router as regelteksten_router
 from semantisch import router as semantisch_router
 from vergunningen import router as vergunningen_router
+from mer import router as mer_router
 
 load_dotenv()
 
@@ -147,6 +148,9 @@ app.add_middleware(
         "https://www.omgevingsvergunningenregister.nl",
         "https://omgevingsvergunning-register.nl",        # legacy/typo-redirect
         "https://www.omgevingsvergunning-register.nl",
+        "https://mer-register.nl",                         # MER-register (kanaal A+B)
+        "https://www.mer-register.nl",
+        "https://mer-register.pages.dev",                  # Cloudflare Pages (pre-domein)
     ],
     allow_methods=["GET", "POST"],
     allow_headers=["X-Api-Key", "Content-Type"],
@@ -191,6 +195,7 @@ app.include_router(regelteksten_router, dependencies=[Depends(verify_key)])
 app.include_router(antwoord_router, dependencies=[Depends(verify_key)])
 app.include_router(semantisch_router, dependencies=[Depends(verify_key)])
 app.include_router(vergunningen_router, dependencies=[Depends(verify_key)])
+app.include_router(mer_router, dependencies=[Depends(verify_key)])
 app.include_router(planvoorraad_router, dependencies=[Depends(verify_key)])
 app.include_router(ponsenkaart_router, dependencies=[Depends(verify_key)])
 app.include_router(expand_router, dependencies=[Depends(verify_key)])
