@@ -414,10 +414,11 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
                         cur.execute(
                             """INSERT INTO p2p.activiteit_locatieaanduiding
                                (juridische_regel_id, activiteit_id, locatie_id, kwalificatie)
-                               VALUES (%s, %s, %s, %s)""",
+                               VALUES (%s, %s, %s, %s)
+                               ON CONFLICT DO NOTHING""",
                             (regel["identificatie"], act_ref, loc_ref, kwal_val),
                         )
-                        stats["ala"] += 1
+                        stats["ala"] += cur.rowcount
 
                 # Fallback: directe locatieRefs op regel-niveau (geen activiteit).
                 # Komt voor bij Instructieregel/Omgevingswaardegel en bij RvI's van
@@ -437,10 +438,11 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
                         cur.execute(
                             """INSERT INTO p2p.activiteit_locatieaanduiding
                                (juridische_regel_id, activiteit_id, locatie_id, kwalificatie)
-                               VALUES (%s, NULL, %s, NULL)""",
+                               VALUES (%s, NULL, %s, NULL)
+                               ON CONFLICT DO NOTHING""",
                             (regel["identificatie"], loc_ref),
                         )
-                        stats["ala"] += 1
+                        stats["ala"] += cur.rowcount
 
         # ── Omgevingsnormen + Omgevingswaarden ──
         for norm_type_key, norm_type_label in (("omgevingsnormen", "Omgevingsnorm"),
@@ -475,13 +477,14 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
                         cur.execute(
                             """INSERT INTO p2p.normwaarde
                                (norm_id, locatie_id, kwalitatieve_waarde, kwantitatieve_waarde, waarde_in_regeltekst)
-                               VALUES (%s, %s, %s, %s, %s)""",
+                               VALUES (%s, %s, %s, %s, %s)
+                               ON CONFLICT DO NOTHING""",
                             (norm["identificatie"], nw_loc,
                              nw.get("kwalitatieveWaarde"),
                              nw.get("kwantitatieveWaarde"),
                              nw.get("waardeInRegeltekst")),
                         )
-                        stats["normwaarden"] += 1
+                        stats["normwaarden"] += cur.rowcount
 
         # ── Juridische regel → norm junctions ──
         for regel_type_key in ("regelsVoorIedereen", "instructieregels", "omgevingswaarderegels"):
@@ -803,8 +806,13 @@ REGELINGMODEL_MAP = {
 
 def load_via_api(overheid_code: str, naam: str,
                  bronhouder_code: str | None = None,
-                 doc_types: list[str] | None = None):
-    """Load all regelingen for an overheid via API pipeline."""
+                 doc_types: list[str] | None = None,
+                 force: bool = False):
+    """Load all regelingen for an overheid via API pipeline.
+
+    Een FRBR-expressie is immutabel; expressies waarvoor al tekst-elementen
+    bestaan worden overgeslagen tenzij force=True.
+    """
     if bronhouder_code is None:
         bronhouder_code = overheid_code
 
@@ -819,11 +827,24 @@ def load_via_api(overheid_code: str, naam: str,
             upsert_bronhouder(cur, bronhouder_code, naam)
         conn.commit()
 
+        n_skipped = 0
         for reg in regelingen:
             regeling_uri = reg["identificatie"]
             expression_id = reg.get("expressionId", regeling_uri)
             doc_type = reg["type"]
             regelingmodel = REGELINGMODEL_MAP.get(doc_type, "RegelingCompact")
+
+            if not force:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM p2p.tekst_element WHERE regeling_expression = %s LIMIT 1",
+                        (expression_id,))
+                    already_loaded = cur.fetchone() is not None
+                conn.commit()
+                if already_loaded:
+                    n_skipped += 1
+                    console.print(f"  [dim]Skip (al geladen): {reg['titel'][:60]}[/dim]")
+                    continue
 
             console.print(f"\n  [bold]Loading: {reg['titel'][:60]}[/bold] ({doc_type})")
 
@@ -894,7 +915,8 @@ def load_via_api(overheid_code: str, naam: str,
         n_sub = refresh_locatie_subdiv(conn, bronhouder_code)
         console.print(f"  locatie_subdiv ververst: {n_sub} stukjes")
 
-        console.print(f"\n[green]Done: {len(regelingen)} regelingen loaded for {naam}[/green]")
+        console.print(f"\n[green]Done: {len(regelingen) - n_skipped} nieuw geladen, "
+                      f"{n_skipped} overgeslagen (al geladen) voor {naam}[/green]")
 
     finally:
         conn.close()

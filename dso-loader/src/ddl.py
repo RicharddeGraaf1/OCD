@@ -336,6 +336,12 @@ CREATE TABLE IF NOT EXISTS p2p.activiteit_locatieaanduiding (
 ALTER TABLE p2p.activiteit_locatieaanduiding ALTER COLUMN activiteit_id DROP NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_ala_regel ON p2p.activiteit_locatieaanduiding(juridische_regel_id);
 CREATE INDEX IF NOT EXISTS idx_ala_activiteit ON p2p.activiteit_locatieaanduiding(activiteit_id);
+-- Loader-inserts gebruiken ON CONFLICT DO NOTHING; zonder deze unieke index
+-- schoot een herlaad identieke tupels dubbel in (dedup: 2026-07-17-script).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ala_natural
+    ON p2p.activiteit_locatieaanduiding
+       (juridische_regel_id, activiteit_id, locatie_id, kwalificatie)
+    NULLS NOT DISTINCT;
 
 CREATE TABLE IF NOT EXISTS p2p.gebiedsaanwijzing (
     identificatie       TEXT PRIMARY KEY,
@@ -368,6 +374,12 @@ CREATE TABLE IF NOT EXISTS p2p.normwaarde (
     kwantitatieve_waarde NUMERIC NULL,
     waarde_in_regeltekst BOOLEAN NULL
 );
+-- Zie uq_ala_natural: zelfde herlaad-bescherming voor normwaarden.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_normwaarde_natural
+    ON p2p.normwaarde
+       (norm_id, locatie_id, kwalitatieve_waarde,
+        kwantitatieve_waarde, waarde_in_regeltekst)
+    NULLS NOT DISTINCT;
 
 CREATE TABLE IF NOT EXISTS p2p.juridische_regel_norm (
     juridische_regel_id TEXT NOT NULL REFERENCES p2p.juridische_regel(identificatie) ON DELETE CASCADE,
@@ -1123,4 +1135,113 @@ CREATE INDEX IF NOT EXISTS idx_deeplink_werkt
     ON vth.vergunning_deeplink (koop_id) WHERE werkt;
 CREATE INDEX IF NOT EXISTS idx_deeplink_unvalidated
     ON vth.vergunning_deeplink (gevonden_at) WHERE gevalideerd_at IS NULL;
+"""
+
+
+# ---------------------------------------------------------------------------
+# DSO-omgevingsvergunningen (afwijkvergunning / BOPA) — satelliet.
+# Zie vault "Afwijkvergunning (BOPA) vastleggen - DSO-bron, join en classificatie".
+# LET OP: vereist dat core.bronhouder én vth.vergunningkennisgeving al bestaan.
+# ---------------------------------------------------------------------------
+OVG_DDL = """
+CREATE SCHEMA IF NOT EXISTS vth;
+
+CREATE TABLE IF NOT EXISTS vth.omgevingsvergunning_dso (
+    identificatie           TEXT PRIMARY KEY,
+    koop_id                 TEXT UNIQUE
+                              REFERENCES vth.vergunningkennisgeving(koop_id),
+    bevoegd_gezag_code      TEXT NOT NULL
+                              REFERENCES core.bronhouder(overheidscode),
+    officiele_titel         TEXT,
+    referentienummer        TEXT,
+    publicatie_id           TEXT NOT NULL,
+    begin_geldigheid        DATE,
+    begin_inwerking         DATE,
+    tijdstip_registratie    TIMESTAMPTZ,
+    versie                  INTEGER,
+    vergunningsgebied_id    TEXT,
+    geometrie_identificatie UUID,
+    imro_planidentificatie  TEXT[],
+    is_planafwijking        BOOLEAN NOT NULL DEFAULT TRUE,
+    binnenplans_anomalie    BOOLEAN,
+    ingest_run_id           TEXT,
+    ingest_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ovg_bg
+    ON vth.omgevingsvergunning_dso (bevoegd_gezag_code);
+CREATE INDEX IF NOT EXISTS idx_ovg_koop
+    ON vth.omgevingsvergunning_dso (koop_id);
+CREATE INDEX IF NOT EXISTS idx_ovg_anomalie
+    ON vth.omgevingsvergunning_dso (binnenplans_anomalie) WHERE binnenplans_anomalie;
+"""
+
+
+# ---------------------------------------------------------------------------
+# MER (milieueffectrapportage) — schema `mer`, gevoed vanuit mer-register.nl.
+# Kanaal A: MER-proces-events uit KOOP SRU. Kanaal B: Commissie m.e.r.-projecten
+# + documenten. De MER is een 'op het besluit betrekking hebbend stuk' en zit
+# niet in het DSO; daarom een eigen schema naast p2p/vth. FK's naar
+# core.bronhouder/vth zijn nullable kolommen (resolutie is een latere stap).
+# ---------------------------------------------------------------------------
+MER_DDL = """
+CREATE SCHEMA IF NOT EXISTS mer;
+
+CREATE TABLE IF NOT EXISTS mer.event (
+    koop_id            text PRIMARY KEY,
+    titel              text NOT NULL,
+    datum_publicatie   date,
+    publicatieblad     text,
+    bevoegd_gezag_naam text,
+    bronhouder_id      integer,
+    event_type         text,
+    instrument         text,
+    subject_taxonomie  text,
+    url                text,
+    ingest_run_id      text,
+    datum_ingest       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_mer_event_datum ON mer.event (datum_publicatie DESC);
+CREATE INDEX IF NOT EXISTS idx_mer_event_type  ON mer.event (event_type);
+
+CREATE TABLE IF NOT EXISTS mer.project (
+    slug             text PRIMARY KEY,
+    project_nr       integer UNIQUE,
+    titel            text NOT NULL,
+    bevoegd_gezag    text,
+    bronhouder_id    integer,
+    initiatiefnemer  text,
+    start_advisering date,
+    advies_type      text,
+    instrument       text,
+    provincie        text,
+    lat              double precision,
+    lon              double precision,
+    url              text,
+    lastmod          timestamptz,
+    datum_ingest     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_mer_project_bg   ON mer.project (bevoegd_gezag);
+CREATE INDEX IF NOT EXISTS idx_mer_project_prov ON mer.project (provincie);
+
+CREATE TABLE IF NOT EXISTS mer.document (
+    id            bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    project_slug  text NOT NULL REFERENCES mer.project (slug) ON DELETE CASCADE,
+    soort         text,
+    bestandsnaam  text,
+    url           text NOT NULL,
+    mirror_url    text,
+    datum_ingest  timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (project_slug, bestandsnaam)
+);
+CREATE INDEX IF NOT EXISTS idx_mer_document_project ON mer.document (project_slug);
+
+CREATE TABLE IF NOT EXISTS mer.project_event_link (
+    project_slug  text NOT NULL REFERENCES mer.project (slug) ON DELETE CASCADE,
+    koop_id       text NOT NULL REFERENCES mer.event (koop_id) ON DELETE CASCADE,
+    match_methode text,
+    zekerheid     numeric(3,2),
+    datum_ingest  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_slug, koop_id)
+);
 """

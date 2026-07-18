@@ -58,6 +58,58 @@ def setup_koop():
         conn.close()
 
 
+@cli.command("setup-mer")
+def setup_mer_cmd():
+    """Apply het mer-schema (MER milieueffectrapportage). Idempotent."""
+    from src.loaders.mer import setup_mer
+    console.print("[bold]Applying MER schema (schema mer)[/bold]")
+    setup_mer()
+
+
+@cli.command("load-mer")
+@click.option("--sqlite", "sqlite_path", default=None,
+              help="Pad naar de mer-register.nl harvest-store (SQLite). Default: de MER-repo.")
+def load_mer_cmd(sqlite_path):
+    """Laad MER-data (mer-register.nl SQLite) → OCD-Postgres schema mer.
+
+    Twee laad-acties in het dashboard: 'mer-events' (KOOP SRU) en 'mer-commissie'
+    (Commissie m.e.r.-projecten + documenten). Idempotente upsert.
+    """
+    from src.loaders.mer import setup_mer, load_mer_events, load_mer_commissie
+    from src.run_log import load_run
+    console.print("[bold]Loading MER data → schema mer[/bold]")
+    setup_mer()
+    with load_run("mer-events", scope="alle") as run:
+        n = load_mer_events(sqlite_path)
+        run.set(n_verwerkt=n)
+    with load_run("mer-commissie", scope="alle") as run:
+        n = load_mer_commissie(sqlite_path)
+        run.set(n_verwerkt=n)
+
+
+@cli.command("setup-ovg")
+def setup_ovg_cmd():
+    """Apply vth.omgevingsvergunning_dso (DSO-satelliet / afwijkvergunning). Vereist core.bronhouder + vth.vergunningkennisgeving."""
+    from src.loaders.dso_omgevingsvergunning import setup_ovg
+    console.print("[bold]Applying OVG schema (vth.omgevingsvergunning_dso)[/bold]")
+    setup_ovg()
+
+
+@cli.command("load-ovg")
+def load_ovg_cmd():
+    """Laad DSO-omgevingsvergunningen (presenteren/v8) → vth.omgevingsvergunning_dso + bronfout-detectie.
+
+    Full-snapshot met idempotente upsert (geen watermark): haalt de hele set op,
+    nieuwe records komen erbij. Registreert de run in core.load_run zodat het
+    data-actualiteit-dashboard 'm als laad-actie toont.
+    """
+    from src.loaders.dso_omgevingsvergunning import load_ovg
+    from src.run_log import load_run
+    console.print("[bold]Loading DSO omgevingsvergunningen[/bold]")
+    with load_run("ozon-afwijkvergunningen", scope="alle"):
+        load_ovg()
+
+
 @cli.command("load-koop")
 @click.option("--from", "from_date", required=True, help="Startdatum YYYY-MM-DD (inclusief).")
 @click.option("--to", "to_date", required=True, help="Einddatum YYYY-MM-DD (inclusief).")

@@ -252,6 +252,82 @@ def data_health(
     return {"samenvatting": samenvatting, "geo": geo}
 
 
+@app.get("/v1/load-status", dependencies=[Depends(verify_key)])
+def load_status(
+    historie_limiet: int = Query(80, le=500, description="Max aantal runs in de historie-tijdlijn"),
+):
+    """Data-actualiteit: wanneer is welke bron voor het laatst bijgewerkt?
+
+    Voedt het data-actualiteit-dashboard (standalone HTML + OCDviewer).
+    `bronnen` = laatste run per bron (core.v_load_status), `totalen` = live
+    totaal per bron, `lopend` = nu draaiende runs, `laatst_bijgewerkt` = meest
+    recente geslaagde finished_at (glance), `bronhouders` = samenvatting van
+    core.bronhouder.laatst_geladen.
+
+    Uitgebreid met historie zodat je de vórige synchronisatie kunt terugzien:
+    `historie` = laatste N runs per bron (tijdlijn + diff), `sync_runs` = de
+    hele-sync-momenten uit audit.sync_run (dropdown-kiezer). Zie
+    dso-loader/docs/bijwerken.md.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM core.v_load_status ORDER BY bron")
+        bronnen = cur.fetchall()
+
+        cur.execute("SELECT bron, totaal FROM core.v_bron_totalen")
+        totalen = {r["bron"]: r["totaal"] for r in cur.fetchall()}
+
+        cur.execute(
+            "SELECT bron, scope, started_at FROM core.load_run "
+            "WHERE status = 'running' ORDER BY started_at")
+        lopend = cur.fetchall()
+
+        cur.execute(
+            "SELECT max(finished_at) AS laatst_bijgewerkt FROM core.load_run "
+            "WHERE status IN ('ok', 'deels')")
+        laatst_bijgewerkt = cur.fetchone()["laatst_bijgewerkt"]
+
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE laatst_geladen IS NOT NULL) AS met_laatst_geladen, "
+            "count(*) AS totaal, min(laatst_geladen) AS oudste, max(laatst_geladen) AS nieuwste "
+            "FROM core.bronhouder")
+        bronhouders = cur.fetchone()
+
+        # Historie-tijdlijn: laatste N runs (alle bronnen), incl. totaal-na uit
+        # details, zodat de UI een 'toen'-toestand en een diff kan tonen.
+        cur.execute(
+            """SELECT run_id, bron, scope, started_at, finished_at, status,
+                      n_verwerkt, n_fout,
+                      (details->>'totaal_na')::bigint  AS totaal_na,
+                      (details->>'totaal_voor')::bigint AS totaal_voor
+               FROM core.load_run
+               ORDER BY started_at DESC
+               LIMIT %s""", (historie_limiet,))
+        historie = cur.fetchall()
+
+        # Hele-sync-momenten (audit-schema is nieuw; ontbreekt op oudere prod).
+        # `totalen`/`metrics` zijn de per-run momentopname zodat het dashboard
+        # per run het verschil met de vorige run kan tonen.
+        sync_runs = []
+        try:
+            cur.execute(
+                """SELECT run_id, label, gestart_op, klaar_op, opmerking,
+                          totalen, metrics
+                   FROM audit.sync_run ORDER BY gestart_op DESC LIMIT 50""")
+            sync_runs = cur.fetchall()
+        except Exception:
+            conn.rollback()
+
+    return {
+        "bronnen": bronnen,
+        "totalen": totalen,
+        "lopend": lopend,
+        "laatst_bijgewerkt": laatst_bijgewerkt,
+        "bronhouders": bronhouders,
+        "historie": historie,
+        "sync_runs": sync_runs,
+    }
+
+
 def _build_keyword_filter(keywords: list[str], text_col: str) -> tuple[str, list]:
     """Build a SQL WHERE clause that matches any keyword in a text column.
 
