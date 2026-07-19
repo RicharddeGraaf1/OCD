@@ -87,7 +87,8 @@ def trajecten(
             SELECT p.slug, p.titel, p.bevoegd_gezag, p.initiatiefnemer, p.instrument, p.provincie,
                    p.lat, p.lon, le.laatste,
                    (SELECT count(*) FROM mer.project_event_link l WHERE l.project_slug=p.slug) AS n_events,
-                   (SELECT array_agg(DISTINCT d.soort) FROM mer.document d WHERE d.project_slug=p.slug) AS soorten
+                   (SELECT array_agg(DISTINCT d.soort) FROM mer.document d WHERE d.project_slug=p.slug) AS soorten,
+                   EXISTS(SELECT 1 FROM mer.project_regeling r WHERE r.project_slug=p.slug) AS heeft_regeling
             FROM mer.project p {_LE}
             WHERE {where}
             ORDER BY le.laatste DESC NULLS LAST, p.titel
@@ -98,6 +99,7 @@ def trajecten(
             "coord": [r[6], r[7]] if r[6] is not None else None,
             "laatsteEvent": r[8].isoformat() if r[8] else None,
             "aantalEvents": r[9], "documentSoorten": [s for s in (r[10] or []) if s],
+            "heeftRegeling": r[11],
         } for r in cur.fetchall()]
     return {"total": total, "limit": limit, "offset": offset, "items": items}
 
@@ -120,11 +122,20 @@ def traject(slug: str) -> dict[str, Any]:
                                            WHEN 'toetsingsadvies' THEN 3 ELSE 4 END""", (slug,))
         docs = [{"soort": s, "titel": f"{s} — {(fn or '').replace('.pdf','')}", "link": u}
                 for s, fn, u in cur.fetchall()]
+        cur.execute("""SELECT doel_type, doel_id, opschrift, documenttype, methode, zekerheid
+                       FROM mer.project_regeling WHERE project_slug=%s ORDER BY zekerheid DESC""", (slug,))
+        regelingen = [{
+            "doelType": dt, "doelId": did, "opschrift": ops, "documenttype": doct,
+            "methode": m, "zekerheid": float(z) if z is not None else None,
+            "link": (f"https://identifier.overheid.nl{did}" if dt == "ow"
+                     else f"https://www.ruimtelijkeplannen.nl/?planidn={did}"),
+        } for dt, did, ops, doct, m, z in cur.fetchall()]
     return {
         "id": row[0], "titel": row[1], "bevoegdGezag": row[2], "initiatiefnemer": row[3],
         "instrument": row[4], "provincie": row[5],
         "coord": [row[6], row[7]] if row[6] is not None else None,
         "bronnen": {"commissie_mer": row[8]}, "events": events, "documenten": docs,
+        "onderliggendeRegelingen": regelingen,
     }
 
 
