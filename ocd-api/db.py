@@ -12,9 +12,11 @@ DATABASE_URL = os.environ.get(
 )
 
 # Statement timeout op DB-niveau: voorkomt dat één slechte ST_Intersects de
-# pool leegtrekt. Default 10s, overrideable per request via
-# `SET LOCAL statement_timeout`.
-STATEMENT_TIMEOUT_MS = int(os.environ.get("OCD_STATEMENT_TIMEOUT_MS", "10000"))
+# pool leegtrekt. Default 20s (was 10s) — de exacte-count-endpoints (o.a.
+# v_bron_totalen voor het dashboard) zitten normaal ~2s maar tikken bij een
+# koude buffercache tegen 10s aan; 20s geeft marge. Overrideable per request
+# via `SET LOCAL statement_timeout`.
+STATEMENT_TIMEOUT_MS = int(os.environ.get("OCD_STATEMENT_TIMEOUT_MS", "20000"))
 
 
 def _configure_connection(conn):
