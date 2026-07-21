@@ -247,7 +247,14 @@ def data_health(
 
         cur.execute("SELECT * FROM core.v_data_health")
         samenvatting = cur.fetchone()
-        cur.execute("SELECT * FROM core.v_geo_health")
+        # mv_geo_health is de gematerialiseerde snapshot (v_geo_health kost ~26s →
+        # timeout). Fallback op de live view als de matview nog niet bestaat
+        # (bv. prod vóór de 2026-07-21-migratie).
+        try:
+            cur.execute("SELECT * FROM core.mv_geo_health")
+        except Exception:
+            conn.rollback()
+            cur.execute("SELECT * FROM core.v_geo_health")
         geo = cur.fetchone()
     return {"samenvatting": samenvatting, "geo": geo}
 
@@ -4253,10 +4260,16 @@ def overzicht():
         ("i2a", "toepasbaar_regelbestand"), ("i2a", "dmn_element"), ("i2a", "werkzaamheid"),
         ("wro", "ruimtelijk_instrument"), ("wro", "planobject"), ("wro", "wro_tekst_object"),
     ]
+    # Geschatte rij-tellingen uit de planner-statistieken (pg_class.reltuples):
+    # exact count(*) op wro.planobject (16 GB) kostte ~29s → timeout. Voor een
+    # overzicht-totaal is de ANALYZE-schatting ruim voldoende en milliseconden-snel.
     counts: dict[str, int] = {}
     with get_conn() as conn, conn.cursor() as cur:
         for schema, t in tables:
-            cur.execute(f"SELECT count(*) AS n FROM {schema}.{t}")
+            cur.execute(
+                "SELECT GREATEST(reltuples, 0)::bigint AS n "
+                "FROM pg_class WHERE oid = %s::regclass",
+                (f"{schema}.{t}",))
             row = cur.fetchone()
             counts[t] = row["n"] if row else 0
-    return {"tabellen": counts, "totaal": sum(counts.values())}
+    return {"tabellen": counts, "totaal": sum(counts.values()), "geschat": True}

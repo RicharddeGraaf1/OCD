@@ -302,6 +302,12 @@ def fase_post(run_start: datetime.datetime):
     except Exception as e:
         conn.rollback()
         fouten.append(f"mv_bronhouder_health refresh: {e}")
+    try:
+        cur.execute("REFRESH MATERIALIZED VIEW core.mv_geo_health")
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        fouten.append(f"mv_geo_health refresh: {e}")
     health = None
     try:
         cur.execute("SELECT * FROM core.v_data_health")
