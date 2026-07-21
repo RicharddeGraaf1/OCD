@@ -88,13 +88,15 @@ def trajecten(
                    p.lat, p.lon, le.laatste,
                    (SELECT count(*) FROM mer.project_event_link l WHERE l.project_slug=p.slug) AS n_events,
                    (SELECT array_agg(DISTINCT d.soort) FROM mer.document d WHERE d.project_slug=p.slug) AS soorten,
-                   EXISTS(SELECT 1 FROM mer.project_regeling r WHERE r.project_slug=p.slug) AS heeft_regeling
+                   EXISTS(SELECT 1 FROM mer.project_regeling r WHERE r.project_slug=p.slug) AS heeft_regeling,
+                   COALESCE(b.label, p.bevoegd_gezag) AS bg_uniform
             FROM mer.project p {_LE}
+            LEFT JOIN core.bronhouder b ON b.overheidscode = p.bronhouder_code
             WHERE {where}
             ORDER BY le.laatste DESC NULLS LAST, p.titel
             LIMIT %(limit)s OFFSET %(offset)s""", params)
         items = [{
-            "id": r[0], "titel": r[1], "bevoegdGezag": r[2], "initiatiefnemer": r[3],
+            "id": r[0], "titel": r[1], "bevoegdGezag": r[2], "bevoegdGezagUniform": r[12], "initiatiefnemer": r[3],
             "instrument": r[4], "provincie": r[5],
             "coord": [r[6], r[7]] if r[6] is not None else None,
             "laatsteEvent": r[8].isoformat() if r[8] else None,
@@ -107,8 +109,10 @@ def trajecten(
 @router.get("/trajecten/{slug}")
 def traject(slug: str) -> dict[str, Any]:
     with get_conn() as conn, conn.cursor(row_factory=tuple_row) as cur:
-        cur.execute("""SELECT slug,titel,bevoegd_gezag,initiatiefnemer,instrument,provincie,lat,lon,url
-                       FROM mer.project WHERE slug=%s""", (slug,))
+        cur.execute("""SELECT p.slug,p.titel,p.bevoegd_gezag,p.initiatiefnemer,p.instrument,p.provincie,
+                              p.lat,p.lon,p.url,COALESCE(b.label,p.bevoegd_gezag)
+                       FROM mer.project p LEFT JOIN core.bronhouder b ON b.overheidscode=p.bronhouder_code
+                       WHERE p.slug=%s""", (slug,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "traject niet gevonden")
@@ -131,8 +135,8 @@ def traject(slug: str) -> dict[str, Any]:
                      else f"https://www.ruimtelijkeplannen.nl/?planidn={did}"),
         } for dt, did, ops, doct, m, z in cur.fetchall()]
     return {
-        "id": row[0], "titel": row[1], "bevoegdGezag": row[2], "initiatiefnemer": row[3],
-        "instrument": row[4], "provincie": row[5],
+        "id": row[0], "titel": row[1], "bevoegdGezag": row[2], "bevoegdGezagUniform": row[9],
+        "initiatiefnemer": row[3], "instrument": row[4], "provincie": row[5],
         "coord": [row[6], row[7]] if row[6] is not None else None,
         "bronnen": {"commissie_mer": row[8]}, "events": events, "documenten": docs,
         "onderliggendeRegelingen": regelingen,
