@@ -2413,22 +2413,40 @@ def viewer_boom(
     }
 
 
+# Hertaling-contract: één gepind (model, prompt_versie)-paar voor alle
+# afnemers. De lookup gaat via v2a.element_hertaling (functioneel id →
+# begrijpelijk); de content-hash blijft intern. Zie
+# dso-loader/scripts/2026-07-add-element-hash-koppeling.sql.
+HERTAAL_MODEL = "claude-sonnet-5"
+HERTAAL_PROMPT_VERSIE = "v1"
+
+
 @app.get("/v1/viewer/tekst/{wid}", dependencies=[Depends(verify_key)])
 def viewer_tekst(wid: str):
     """Tekst-inhoud (STOP-XML markup) van een enkel tekst_element (lazy loading).
 
     Geeft de XML met behoud van structuur (Lijst/Li/IntRef/Al) zodat de
     frontend lijsten en interne verwijzingen correct kan renderen.
+    Additief veld `begrijpelijk`: precomputed hertaling (of null) —
+    geen juridische status.
     """
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT inhoud AS tekst FROM p2p.tekst_element WHERE wid = %s LIMIT 1",
-            (wid,),
+            """
+            SELECT te.inhoud AS tekst, eh.begrijpelijk
+            FROM p2p.tekst_element te
+            LEFT JOIN v2a.element_hertaling eh
+                   ON eh.tekst_element_id = te.id
+                  AND eh.model = %s AND eh.prompt_versie = %s
+            WHERE te.wid = %s
+            LIMIT 1
+            """,
+            (HERTAAL_MODEL, HERTAAL_PROMPT_VERSIE, wid),
         )
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "Tekst niet gevonden")
-    return {"wid": wid, "tekst": row["tekst"]}
+    return {"wid": wid, "tekst": row["tekst"], "begrijpelijk": row["begrijpelijk"]}
 
 
 class TekstenRequest(BaseModel):
@@ -2455,14 +2473,79 @@ def viewer_teksten(req: TekstenRequest = Body(...)):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT ON (wid) wid, inhoud AS tekst
-            FROM p2p.tekst_element
-            WHERE wid = ANY(%s)
+            SELECT DISTINCT ON (te.wid) te.wid, te.inhoud AS tekst, eh.begrijpelijk
+            FROM p2p.tekst_element te
+            LEFT JOIN v2a.element_hertaling eh
+                   ON eh.tekst_element_id = te.id
+                  AND eh.model = %s AND eh.prompt_versie = %s
+            WHERE te.wid = ANY(%s)
             """,
-            (wids,),
+            (HERTAAL_MODEL, HERTAAL_PROMPT_VERSIE, wids),
         )
         rows = cur.fetchall()
-    return {"teksten": [{"wid": r["wid"], "tekst": r["tekst"]} for r in rows]}
+    return {"teksten": [
+        {"wid": r["wid"], "tekst": r["tekst"], "begrijpelijk": r["begrijpelijk"]}
+        for r in rows
+    ]}
+
+
+class HertalingLookupRequest(BaseModel):
+    """Óf teksten (server hasht met v2a.norm_hash) óf wids (via de koppeltabel)."""
+    teksten: list[str] | None = None
+    wids: list[str] | None = None
+
+
+@app.post("/v1/hertaling/lookup", dependencies=[Depends(verify_key)])
+def hertaling_lookup(req: HertalingLookupRequest = Body(...)):
+    """Precomputed begrijpelijke hertaling opzoeken (geen LLM-call, geen
+    juridische status).
+
+    Twee varianten, één response-vorm:
+    - `{"teksten": [...]}` — content-lookup: de server normaliseert+hasht
+      (v2a.norm_hash, dé ene hash-implementatie) en zoekt in v2a.hertaling.
+      Werkt alleen met de VOLLEDIGE element-tekst (inhoud_plain); getrunceerde
+      snippets matchen per definitie niet.
+    - `{"wids": [...]}` — id-lookup via v2a.element_hertaling.
+
+    Response: {"hertalingen": [{"key": <tekst|wid>, "begrijpelijk": str|null}]}
+    in de volgorde van de aanvraag. Cache-miss → null (caller kiest fallback).
+    """
+    if bool(req.teksten) == bool(req.wids):
+        raise HTTPException(422, "Geef precies één van 'teksten' of 'wids' op.")
+
+    with get_conn() as conn, conn.cursor() as cur:
+        if req.teksten:
+            items = [t for t in req.teksten if t and t.strip()][:200]
+            cur.execute(
+                """
+                SELECT t.ord, h.tekst AS begrijpelijk
+                FROM unnest(%s::text[]) WITH ORDINALITY AS t(tekst, ord)
+                LEFT JOIN v2a.hertaling h
+                       ON h.bron_hash = v2a.norm_hash(t.tekst)
+                      AND h.model = %s AND h.prompt_versie = %s
+                ORDER BY t.ord
+                """,
+                (items, HERTAAL_MODEL, HERTAAL_PROMPT_VERSIE),
+            )
+            found = {r["ord"]: r["begrijpelijk"] for r in cur.fetchall()}
+            return {"hertalingen": [
+                {"key": items[i], "begrijpelijk": found.get(i + 1)}
+                for i in range(len(items))
+            ]}
+
+        wids = [w.strip() for w in req.wids if w and w.strip()][:200]
+        cur.execute(
+            """
+            SELECT DISTINCT ON (wid) wid, begrijpelijk
+            FROM v2a.element_hertaling
+            WHERE wid = ANY(%s) AND model = %s AND prompt_versie = %s
+            """,
+            (wids, HERTAAL_MODEL, HERTAAL_PROMPT_VERSIE),
+        )
+        by_wid = {r["wid"]: r["begrijpelijk"] for r in cur.fetchall()}
+        return {"hertalingen": [
+            {"key": w, "begrijpelijk": by_wid.get(w)} for w in wids
+        ]}
 
 
 def _csv_param(value: str | None) -> list[str] | None:
