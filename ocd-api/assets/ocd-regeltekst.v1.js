@@ -395,6 +395,7 @@
       color: var(--ocd-badge-fg, #7a5b00); background: var(--ocd-badge-bg, #fdf3d7);
       border: 1px solid var(--ocd-badge-bd, #e8d9a8); border-radius: 9px; padding: .05em .6em; }
     .ocd-fallback-note { margin: 0 0 .4em; font-size: .8em; font-style: italic; color: #888; }
+    mark.ocd-mark { background: var(--ocd-mark-bg, #e8f5e9); color: var(--ocd-mark-fg, #275937); font-weight: 700; padding: 0 1px; border-radius: 2px; }
   `;
 
   // Class-syntax mag in een klassiek script (alleen import/export maakt het een module).
@@ -405,7 +406,7 @@
 
       constructor() {
         super();
-        this._tekst = ''; this._begrijpelijk = null; this._namen = [];
+        this._tekst = ''; this._begrijpelijk = null; this._namen = []; this._markeer = [];
         this.attachShadow({ mode: 'open' });
       }
 
@@ -415,11 +416,13 @@
       set begrijpelijk(v) { this._begrijpelijk = v || null; this._render(); }
       get namen() { return this._namen; }
       set namen(v) { this._namen = Array.isArray(v) ? v : []; this._render(); }
+      get markeer() { return this._markeer; }
+      set markeer(v) { this._markeer = Array.isArray(v) ? v : []; this._render(); }
       get weergave() { return this.getAttribute('weergave') || 'juridisch'; }
       set weergave(v) { this.setAttribute('weergave', v || 'juridisch'); }
 
       connectedCallback() {
-        for (const p of ['tekst', 'begrijpelijk', 'namen']) {
+        for (const p of ['tekst', 'begrijpelijk', 'namen', 'markeer']) {
           if (Object.prototype.hasOwnProperty.call(this, p)) { const v = this[p]; delete this[p]; this[p] = v; }
         }
         this._render();
@@ -440,6 +443,7 @@
         if (toonBegrijpelijk) {
           const badge = document.createElement('span'); badge.className = 'ocd-badge'; badge.textContent = 'geen juridische status'; root.appendChild(badge);
           const p = document.createElement('p'); p.className = 'ocd-beg'; p.textContent = this._begrijpelijk; root.appendChild(p);
+          this._markeerHighlight(root, this._markeer);
           return;
         }
         if (this.weergave === 'begrijpelijk' && !this._begrijpelijk) {
@@ -448,6 +452,39 @@
         }
         const emit = (t, d) => this._emit(t, d);
         root.appendChild(renderBlocks(parseTekst(this._tekst, this._namen), { emit }));
+        this._markeerHighlight(root, this._markeer);
+      }
+
+      // Zoek-highlight: wikkel voorkomens van `woorden` in <mark>, in de al
+      // gerenderde DOM (los van de parser). Slaat het <style>-element over.
+      _markeerHighlight(root, woorden) {
+        if (!woorden || !woorden.length) return;
+        const esc = woorden.filter(w => w && w.length > 1).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        if (!esc.length) return;
+        const re = new RegExp(`\\b(?:${esc.join('|')})\\b`, 'gi');
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const nodes = [];
+        let tn;
+        while ((tn = walker.nextNode())) {
+          if (tn.parentNode && tn.parentNode.nodeName === 'STYLE') continue;
+          nodes.push(tn);
+        }
+        for (const node of nodes) {
+          const text = node.nodeValue;
+          re.lastIndex = 0;
+          if (!re.test(text)) continue;
+          re.lastIndex = 0;
+          const frag = document.createDocumentFragment();
+          let pos = 0, m;
+          while ((m = re.exec(text)) !== null) {
+            if (m.index > pos) frag.appendChild(document.createTextNode(text.slice(pos, m.index)));
+            const mark = document.createElement('mark'); mark.className = 'ocd-mark'; mark.textContent = m[0];
+            frag.appendChild(mark);
+            pos = m.index + m[0].length;
+          }
+          if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+          node.parentNode.replaceChild(frag, node);
+        }
       }
     };
 
