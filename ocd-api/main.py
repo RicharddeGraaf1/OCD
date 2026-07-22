@@ -2361,6 +2361,7 @@ def viewer_boom(
                 "naam": row["activiteit_naam"],
                 "groep": row["activiteit_groep"],
                 "kwalificatie": row["kwalificatie"],
+                "locatie_id": row["ala_locatie_id"],
             }
             if entry not in annot[wid]["activiteiten"]:
                 annot[wid]["activiteiten"].append(entry)
@@ -2393,6 +2394,7 @@ def viewer_boom(
                 if row["kwantitatieve_waarde"] is not None
                 else row["kwalitatieve_waarde"]
             ),
+            "locatie_id": row["nw_locatie_id"],
         }
         if entry not in annot[wid]["normwaarden"]:
             annot[wid]["normwaarden"].append(entry)
