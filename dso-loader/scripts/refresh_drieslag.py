@@ -7,9 +7,13 @@ p2p.norm, p2p.locatie_basisgeo of p2p.gio_basisgeo wijzigt.
 
 Volgorde:
   1. Niet-annoteerbaar markeren (recursive UPDATE op tekst_element)
+  1b. REFRESH v2a.mv_element_hash (element→content-hash voor hertalingen, ~10s)
   2. REFRESH p2p.naammatch_signaal (de duurste — 20-35 min)
   3. REFRESH p2p.naammatch_signaal_intra (~10s; hangt af van #2)
   4. REFRESH p2p.tekst_object_consistentie_mv (~30s; hangt af van #3)
+  5. REFRESH p2p.gio_referentie_consistentie_mv (GIO-tak, ~3 min; onafhankelijk
+     van de naammatch-keten, hangt af van geo_informatieobject.naam_informatieobject
+     + tekst_inline_referentie)
 
 Run: python scripts/refresh_drieslag.py
 """
@@ -26,6 +30,9 @@ STAPPEN = [
     ("Niet-annoteerbaar markeren",
      "scripts/2026-05-add-niet-annoteerbaar.sql",
      "SELECT COUNT(*) FILTER (WHERE is_niet_annoteerbaar) AS n FROM p2p.tekst_element"),
+    ("REFRESH v2a.mv_element_hash",  # element→content-hash koppeling (hertalingen), ~10s
+     "REFRESH MATERIALIZED VIEW CONCURRENTLY v2a.mv_element_hash",
+     "SELECT COUNT(*) AS n FROM v2a.mv_element_hash"),
     ("REFRESH p2p.gio_locatie",
      "REFRESH MATERIALIZED VIEW CONCURRENTLY p2p.gio_locatie",
      "SELECT COUNT(*) AS n FROM p2p.gio_locatie"),
@@ -38,6 +45,9 @@ STAPPEN = [
     ("REFRESH p2p.tekst_object_consistentie_mv",
      "REFRESH MATERIALIZED VIEW CONCURRENTLY p2p.tekst_object_consistentie_mv",
      "SELECT COUNT(*) AS n FROM p2p.tekst_object_consistentie_mv"),
+    ("REFRESH p2p.gio_referentie_consistentie_mv",
+     "REFRESH MATERIALIZED VIEW CONCURRENTLY p2p.gio_referentie_consistentie_mv",
+     "SELECT COUNT(*) AS n FROM p2p.gio_referentie_consistentie_mv"),
 ]
 
 
