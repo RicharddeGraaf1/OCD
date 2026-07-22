@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import FileResponse, JSONResponse
 
 from antwoord_bij_vraag import router as antwoord_router
 from db import get_conn, pool
@@ -2413,6 +2413,25 @@ def viewer_boom(
         "boom": boom,
         "locatie_ids": sorted(locatie_ids),
     }
+
+
+# ── Gedeelde frontend-asset: <ocd-regeltekst> STOP-weergavecomponent ──
+# Publiek (géén API-key): afnemende (statische) sites laden dit via <script src>.
+# Versie in de URL zodat een breaking change niet alle sites tegelijk raakt —
+# sites migreren v1→v2 wanneer ze klaar zijn. Bron van waarheid: assets/.
+# Zie vault: analysis/Generiek leesmodel en STOP-weergavecomponent.
+_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+
+
+@app.get("/assets/ocd-regeltekst.v1.js")
+def serve_ocd_regeltekst_v1():
+    """Gedeelde STOP-XML weergavecomponent (klassiek script, nul deps).
+    Eén bron voor OCDviewer / instructieregels / omgevingsbot / RoM."""
+    return FileResponse(
+        os.path.join(_ASSETS_DIR, "ocd-regeltekst.v1.js"),
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 # Hertaling-contract: één gepind (model, prompt_versie)-paar voor alle
