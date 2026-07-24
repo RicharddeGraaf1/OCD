@@ -316,6 +316,7 @@ ON CONFLICT (frbr_expression) DO UPDATE
 
 
 def fase_post(run_start: datetime.datetime):
+    from src.run_log import load_run
     py = sys.executable
     conn = get_conn()
     cur = conn.cursor()
@@ -327,25 +328,43 @@ def fase_post(run_start: datetime.datetime):
                (run_start,))
     conn.close()
 
-    subproc([py, "-m", "src.cli", "repair-pons-placeholders"], "repair-pons-placeholders")
-    subproc([py, "-m", "src.cli", "refresh-ponsenkaart-stats"], "refresh-ponsenkaart-stats")
-    subproc([py, str(ROOT / "scripts" / "refresh_drieslag.py")], "drieslag-MV-refresh",
-            timeout=3 * 3600)
+    # Post-stappen elk in een load_run zodat ze mét duur in het
+    # data-actualiteit-dashboard verschijnen (voorheen onzichtbaar, terwijl de
+    # drieslag-MV-refresh de langste fase van de hele sync is).
+    with load_run("post-processing", scope="repair-pons + ponsenkaart-stats") as run:
+        ok = subproc([py, "-m", "src.cli", "repair-pons-placeholders"], "repair-pons-placeholders")
+        ok = subproc([py, "-m", "src.cli", "refresh-ponsenkaart-stats"], "refresh-ponsenkaart-stats") and ok
+        run.set(n_fout=0 if ok else 1)
 
+    with load_run("drieslag-mv", scope="naammatch/tekst-object/gio-consistentie MV's") as run:
+        ok = subproc([py, str(ROOT / "scripts" / "refresh_drieslag.py")], "drieslag-MV-refresh",
+                     timeout=3 * 3600)
+        run.set(n_fout=0 if ok else 1)
+
+    with load_run("health-mv", scope="mv_bronhouder_health + mv_geo_health") as run:
+        nfout = 0
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute("REFRESH MATERIALIZED VIEW core.mv_bronhouder_health")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            fouten.append(f"mv_bronhouder_health refresh: {e}")
+            nfout += 1
+        try:
+            cur.execute("REFRESH MATERIALIZED VIEW core.mv_geo_health")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            fouten.append(f"mv_geo_health refresh: {e}")
+            nfout += 1
+        conn.close()
+        run.set(n_fout=nfout)
+
+    # Report-metingen (buiten de load_runs; snel).
     conn = get_conn()
     cur = conn.cursor()
-    try:
-        cur.execute("REFRESH MATERIALIZED VIEW core.mv_bronhouder_health")
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        fouten.append(f"mv_bronhouder_health refresh: {e}")
-    try:
-        cur.execute("REFRESH MATERIALIZED VIEW core.mv_geo_health")
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        fouten.append(f"mv_geo_health refresh: {e}")
     health = None
     try:
         cur.execute("SELECT * FROM core.v_data_health")
@@ -388,6 +407,7 @@ def snapshot_totalen(run_id: int):
 # ── Fase 7: embeddings ───────────────────────────────────────────────
 
 def fase_embed():
+    from src.run_log import load_run
     import httpx
     base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
     try:
@@ -396,8 +416,10 @@ def fase_embed():
         rapporteer("Embeddings", [f"- OVERGESLAGEN: Ollama niet bereikbaar op {base}"])
         log("Embeddings overgeslagen: Ollama niet bereikbaar")
         return
-    ok = subproc([sys.executable, str(ROOT / "scripts" / "run_overnight.py")],
-                 "embeddings (run_overnight)", timeout=10 * 3600)
+    with load_run("embeddings", scope="vectors (run_overnight)") as run:
+        ok = subproc([sys.executable, str(ROOT / "scripts" / "run_overnight.py")],
+                     "embeddings (run_overnight)", timeout=10 * 3600)
+        run.set(n_fout=0 if ok else 1)
     rapporteer("Embeddings", [f"- run_overnight.py: {'ok' if ok else 'FOUT (zie log)'}"])
 
 
