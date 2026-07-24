@@ -280,8 +280,29 @@ def load_status(
         cur.execute("SELECT * FROM core.v_load_status ORDER BY bron")
         bronnen = cur.fetchall()
 
-        cur.execute("SELECT bron, totaal FROM core.v_bron_totalen")
-        totalen = {r["bron"]: r["totaal"] for r in cur.fetchall()}
+        # Live exacte tellingen per bron. Deze view telt per bron-tabel en is bij
+        # een koude buffercache (of gelijktijdige sync-writes) traag genoeg om
+        # tegen de statement_timeout aan te tikken → dan zou de HELE monitor 500'en.
+        # Daarom een korte eigen timeout + terugval op de laatste sync-snapshot
+        # (audit.sync_run.totalen), zodat het dashboard altijd laadt.
+        totalen_bron = "live"
+        try:
+            cur.execute("SET LOCAL statement_timeout = 8000")
+            cur.execute("SELECT bron, totaal FROM core.v_bron_totalen")
+            totalen = {r["bron"]: r["totaal"] for r in cur.fetchall()}
+        except Exception:
+            conn.rollback()
+            totalen_bron = "snapshot"
+            try:
+                cur.execute(
+                    "SELECT totalen FROM audit.sync_run "
+                    "WHERE totalen IS NOT NULL ORDER BY gestart_op DESC LIMIT 1")
+                row = cur.fetchone()
+                totalen = dict(row["totalen"]) if row and row["totalen"] else {}
+            except Exception:
+                conn.rollback()
+                totalen = {}
+                totalen_bron = "onbekend"
 
         cur.execute(
             "SELECT bron, scope, started_at FROM core.load_run "
@@ -304,6 +325,8 @@ def load_status(
         cur.execute(
             """SELECT run_id, bron, scope, started_at, finished_at, status,
                       n_verwerkt, n_fout,
+                      round(extract(epoch from (coalesce(finished_at, now()) - started_at)))::bigint
+                        AS duur_seconden,
                       (details->>'totaal_na')::bigint  AS totaal_na,
                       (details->>'totaal_voor')::bigint AS totaal_voor
                FROM core.load_run
@@ -318,6 +341,8 @@ def load_status(
         try:
             cur.execute(
                 """SELECT run_id, label, gestart_op, klaar_op, opmerking,
+                          round(extract(epoch from (coalesce(klaar_op, now()) - gestart_op)))::bigint
+                            AS duur_seconden,
                           totalen, metrics
                    FROM audit.sync_run ORDER BY gestart_op DESC LIMIT 50""")
             sync_runs = cur.fetchall()
@@ -327,6 +352,7 @@ def load_status(
     return {
         "bronnen": bronnen,
         "totalen": totalen,
+        "totalen_bron": totalen_bron,
         "lopend": lopend,
         "laatst_bijgewerkt": laatst_bijgewerkt,
         "bronhouders": bronhouders,
@@ -4271,13 +4297,18 @@ def _row_to_besluit_meta(r: dict) -> dict:
 
 @app.get("/v1/viewer/regeling/{expression:path}/wijzigingen",
         dependencies=[Depends(verify_key)])
-def viewer_wijzigingen(expression: str):
+def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
     """Aankomende wijzigingen (ontwerpen + besluitversies) op een regeling.
 
     Volgt de Plan A-TS-shape (`WijzigingenFixture`): één response met
     `regelingWork` + `wijzigingen[]`. Per bron de gestripte tekst-elementen
     (gewijzigd + parent-chain), IMOW-annotatie-deltas en locatie-deltas
-    (incl. NULL-geometrie waar de backfill nog niet liep — Plan D)."""
+    (incl. NULL-geometrie waar de backfill nog niet liep — Plan D).
+
+    Verouderde ontwerpen (basis-expression niet meer in `p2p.regeling` voor
+    deze work — ingehaald door een nieuwere vaststelling in de tijdreis)
+    worden default verborgen; `verouderdVerborgen` in de response telt
+    hoeveel er verborgen zijn. `include_verouderd=true` toont ze alsnog."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT frbr_work FROM p2p.regeling WHERE frbr_expression = %s",
@@ -4290,19 +4321,33 @@ def viewer_wijzigingen(expression: str):
 
         # Bronnen — exclusief vervangRegeling-besluiten (die zijn geen
         # renvooi-overlay; volledige nieuwe regeling).
+        # `is_verouderd` = basis-expression zit niet (meer) in p2p.regeling
+        # voor deze work → ontwerp is achterhaald door een nieuwere vaststelling.
         cur.execute(
             """
-            SELECT ontwerpbesluit_id, soort, status, opschrift,
-                   bekend_op, begin_geldigheid, begin_inwerking,
-                   bronhouder, documenttype, is_vervang_regeling
-            FROM   p2pwijziging.besluit
-            WHERE  regeling_work = %s
-              AND  is_vervang_regeling = FALSE
-            ORDER  BY bekend_op NULLS LAST
+            SELECT b.ontwerpbesluit_id, b.soort, b.status, b.opschrift,
+                   b.bekend_op, b.begin_geldigheid, b.begin_inwerking,
+                   b.bronhouder, b.documenttype, b.is_vervang_regeling,
+                   NOT EXISTS (
+                     SELECT 1 FROM p2p.regeling r
+                     WHERE  r.frbr_work = b.regeling_work
+                       AND  r.frbr_expression = b.wijzigt_expression
+                   ) AS is_verouderd
+            FROM   p2pwijziging.besluit b
+            WHERE  b.regeling_work = %s
+              AND  b.is_vervang_regeling = FALSE
+            ORDER  BY b.bekend_op NULLS LAST
             """,
             (regeling_work,),
         )
-        besluiten = cur.fetchall()
+        alle_besluiten = cur.fetchall()
+
+        if include_verouderd:
+            besluiten = alle_besluiten
+            verouderd_verborgen = 0
+        else:
+            besluiten = [b for b in alle_besluiten if not b["is_verouderd"]]
+            verouderd_verborgen = len(alle_besluiten) - len(besluiten)
 
         wijzigingen = []
         for b in besluiten:
@@ -4350,7 +4395,11 @@ def viewer_wijzigingen(expression: str):
             wijziging["locatieDeltas"] = [_row_to_locatie_delta(r) for r in loc_rows]
             wijzigingen.append(wijziging)
 
-    return {"regelingWork": regeling_work, "wijzigingen": wijzigingen}
+    return {
+        "regelingWork": regeling_work,
+        "wijzigingen": wijzigingen,
+        "verouderdVerborgen": verouderd_verborgen,
+    }
 
 
 @app.get("/v1/overzicht", dependencies=[Depends(verify_key)])
