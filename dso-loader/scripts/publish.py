@@ -77,9 +77,23 @@ class Site:
     actief: bool = True             # False = bekend maar nog niet ingevuld
 
 
+def _git_bash() -> str:
+    """Vind Git Bash — NIET de WSL-bash uit System32 (die faalt hier)."""
+    import shutil
+    for c in (r"C:\Program Files\Git\bin\bash.exe",
+              r"C:\Program Files\Git\usr\bin\bash.exe",
+              r"C:\Program Files (x86)\Git\bin\bash.exe"):
+        if Path(c).exists():
+            return c
+    w = shutil.which("bash")
+    if w and "System32" not in w:
+        return w
+    raise FileNotFoundError("Git Bash niet gevonden (vermijd WSL-bash in System32)")
+
+
 def _bash(script: str, *args: str) -> list[str]:
-    """Roep een bash-script aan (Git Bash op Windows)."""
-    return ["bash", script, *args]
+    """Roep een bash-script aan via Git Bash op Windows."""
+    return [_git_bash(), script, *args]
 
 
 def sites(db_source: str) -> list[Site]:
