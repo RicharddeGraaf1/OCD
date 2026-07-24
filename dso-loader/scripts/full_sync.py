@@ -185,20 +185,58 @@ def bouw_bronhouderlijst():
     return lijst
 
 
-def fase_p2p(bronhouders) -> dict[str, str]:
+def bepaal_sinds() -> str:
+    """Ondergrens voor de p2p-delta-sweep.
+
+    = start van de vorige geslaagde sync minus 2 dagen marge (overlap is
+    onschadelijk dankzij de skip-guard). Valt terug op 90 dagen als er geen
+    geslaagde sync bekend is. Retourneert ISO-8601 UTC ("…Z").
+    """
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        sinds = q1(cur, """
+            SELECT to_char((max(gestart_op) AT TIME ZONE 'UTC') - interval '2 days',
+                           'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+            FROM audit.sync_run
+            WHERE klaar_op IS NOT NULL
+              AND coalesce(opmerking,'') NOT ILIKE '%%afgebroken%%'
+        """)
+    finally:
+        conn.close()
+    if not sinds:
+        val = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=90)
+        sinds = val.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return sinds
+
+
+def fase_p2p(bronhouders, sinds: str | None = None, full: bool = False) -> dict[str, str]:
     from src.pipeline import p2p
     from src.run_log import load_run
-    log(f"p2p-sweep over {len(bronhouders)} bronhouders (incrementeel)")
-    with load_run("ozon-regelingen", scope=f"sync:{len(bronhouders)} bronhouders") as run:
-        resultaten = p2p.run(bronhouders)
+    if full:
+        log(f"p2p VOLLEDIGE sweep over {len(bronhouders)} bronhouders (per bronhouder pollen)")
+        scope = f"full-sweep:{len(bronhouders)} bronhouders"
+    else:
+        sinds = sinds or bepaal_sinds()
+        log(f"p2p delta-sweep (registratietijdstip >= {sinds}) over {len(bronhouders)} bronhouders")
+        scope = f"delta:sinds {sinds}"
+    with load_run("ozon-regelingen", scope=scope) as run:
+        if full:
+            resultaten = p2p.run(bronhouders)
+        else:
+            resultaten = p2p.run_delta(bronhouders, sinds)
         ok = sum(1 for v in resultaten.values() if v == "ok")
         err = {k: v for k, v in resultaten.items() if v != "ok"}
-        run.set(n_fout=len(err))
+        run.set(n_fout=len(err), n_verwerkt=len(resultaten))
         run.markeer_bronhouder(*[k for k, v in resultaten.items() if v == "ok"])
     for k, v in err.items():
         fouten.append(f"p2p {k}: {v}")
+    if full:
+        detail = f"- {ok}/{len(resultaten)} bronhouders ok"
+    else:
+        detail = f"- {ok} bronhouders met nieuwe regelingen sinds {sinds} (rest ongewijzigd)"
     rapporteer("p2p (Ow-regelingen)", [
-        f"- {ok}/{len(resultaten)} bronhouders ok",
+        detail,
         f"- fouten: {len(err)}" + (f" — {', '.join(list(err)[:15])}" if err else ""),
     ])
     return resultaten
@@ -372,6 +410,12 @@ def main():
     ap.add_argument("--skip-vth", action="store_true")
     ap.add_argument("--skip-post", action="store_true")
     ap.add_argument("--skip-embed", action="store_true")
+    ap.add_argument("--full-p2p", action="store_true",
+                    help="volledige per-bronhouder-sweep i.p.v. de snelle "
+                         "registratietijdstip-delta (voor verse restore / integriteitscheck)")
+    ap.add_argument("--sinds", default=None,
+                    help="ISO-8601 UTC ondergrens voor de p2p-delta-sweep; "
+                         "default = start vorige geslaagde sync − 2 dagen")
     ap.add_argument("--label", default=f"full-sync-{VANDAAG}")
     args = ap.parse_args()
 
@@ -389,7 +433,7 @@ def main():
 
     bronhouders = bouw_bronhouderlijst()
     if not args.skip_p2p:
-        fase_p2p(bronhouders)
+        fase_p2p(bronhouders, sinds=args.sinds, full=args.full_p2p)
     if not args.skip_i2a:
         fase_i2a(bronhouders)
     if not args.skip_vth:
