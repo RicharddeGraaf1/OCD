@@ -187,7 +187,14 @@ def run_stap(s: Stap, dry: bool) -> None:
         return
     if s.cwd and not s.cwd.exists():
         raise FileNotFoundError(f"cwd bestaat niet: {s.cwd}")
-    subprocess.run(s.argv, cwd=s.cwd, env=env, check=True)
+    # Windows: npx/npm/odkwaliteit zijn .cmd/.exe — resolve via which, anders
+    # vindt subprocess ze niet (WinError 2).
+    import shutil
+    argv = list(s.argv)
+    exe = shutil.which(argv[0])
+    if exe:
+        argv[0] = exe
+    subprocess.run(argv, cwd=s.cwd, env=env, check=True)
 
 
 def publiceer_site(site: Site, dry: bool) -> tuple[str, str]:
@@ -278,9 +285,15 @@ def main() -> int:
           f" | db-source={args.db_source} | prod-mode={args.prod_mode}")
     print("=" * 70)
 
-    # Poort: alleen na een geslaagde sync (tenzij --force).
+    # Poort: alleen na een geslaagde sync (tenzij --force). De sync zet
+    # opmerking op "<n> fouten" — parse het getal (niet op de substring "fout"
+    # matchen, want "0 fouten" bevat die ook).
+    import re
     status = _sync_status()
-    if status is not None and "fout" not in status.lower() and "afgebroken" not in status.lower():
+    m = re.search(r"(\d+)\s*fout", status or "")
+    n_fout = int(m.group(1)) if m else 0
+    schoon = status is not None and n_fout == 0 and "afgebroken" not in (status or "").lower()
+    if schoon:
         print(f"  poort: laatste sync-run OK ({status!r})")
     elif args.force:
         print(f"  poort: sync-status {status!r} — genegeerd (--force)")
