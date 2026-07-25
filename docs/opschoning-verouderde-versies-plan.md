@@ -115,8 +115,45 @@ Veiligheids-checklist:
   defence-in-depth.
 - **Nooit prunen tijdens een load** (geen leeg venster voor lezers).
 
-## Nog te meten / bevestigen
+## Gemeten (2026-07-25) — script `scripts/prune_verouderde_versies.py`
 
-- Exacte volumes (tekst_element + embeddings) op de 185 inactieve expressies.
-- Cascade-gedrag van de annotatie-tabellen (regeling vs tekst_element).
-- Volledige lijst retrieval-ingangen die `NOT inactief` (nog) missen.
+**Volumes op de 177 `verouderde-versie`-expressies** (dry-run, lokale DB):
+
+| Tabel | Rijen | Hoe verwijderd |
+|---|---:|---|
+| `p2p.tekst_element` | 197.051 | via regeling-cascade (22,6% van 872.581) |
+| `v2a.tekst_embedding` | 64.045 | **expliciet** (geen FK; 3,7% van 1.715.635) |
+| `p2p.juridische_regel` | 7.077 | **expliciet** → cascade ALA/norm/gebiedsaanwijzing |
+| `p2p.geo_informatieobject` | 4.960 | **expliciet, vóór regeling** (NO ACTION blokkeert anders) |
+| `p2p.regeling` | 177 | cascade-anker |
+
+**FK-kaart (geverifieerd, corrigeert/verrijkt de bevindingen hierboven):**
+
+- **Cascade vanaf `regeling`**: `tekst_element` (→ `tekst_inline_referentie`,
+  zelf-ref `parent_id`), `besluit_regeling`, `regeling_load`.
+- **`geo_informatieobject` = NO ACTION** → **blokkeert** de regeling-DELETE →
+  expliciet vóór regeling weg (cascadeert `juridische_borging`; SET NULL op
+  `tekst_inline_referentie.target_gio_expression`).
+- **`juridische_regel` = los** (geen FK naar regeling) → expliciet; cascadeert
+  wél naar `activiteit_locatieaanduiding`, `juridische_regel_norm`,
+  `juridische_regel_gebiedsaanwijzing`.
+- **Losse basistabel `v2a.tekst_embedding`** → expliciet (bevestigt het plan).
+- **Views/MV's, NIET prunen** (volgen vanzelf / worden ge-refresht):
+  `v2a.chunk` (1:1 view over tekst_embedding), `v2a.element_hertaling` (view op
+  `mv_element_hash`⋈`hertaling`), `p2p.tekst_object_consistentie` (view) +
+  `_mv`.
+- **Gedeelde dimensies, NIET aanraken**: `activiteit`, `norm`, `locatie`,
+  `pons`, `kaartlaag`, `werkzaamheid`, `regelbeheerobject` (geen
+  `regeling_expression`; gedeeld tussen de vigerende en verdrongen versie) en
+  `v2a.hertaling` (content-adresseerbaar op `bron_hash`).
+
+**Delete-volgorde gevalideerd** met transactie + ROLLBACK (3 expressies,
+geen FK-fout).
+
+## Nog te doen
+
+- **Hide-first (A)**: volledige lijst retrieval-ingangen die `NOT inactief`
+  (nog) missen — vóór een prod-prune afvinken.
+- **Uitvoeren**: `--apply` lokaal → verifiëren (DB-krimp + retrieval-sanity) →
+  dan `--target prod --apply` (proxy tijdelijk aan).
+- **Na een grote prune**: `REINDEX` van de HNSW-vectorindex overwegen.
