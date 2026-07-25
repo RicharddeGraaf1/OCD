@@ -135,25 +135,49 @@ if($Refresh){
     #      SQL-functie -> hier de onderliggende ST_Subdivide-INSERT inline.
     # NB2: parallelisme UIT — de Railway-container heeft een kleine /dev/shm; parallelle
     #      REFRESH/queries geven "could not resize shared memory segment / No space left".
+    # NB3: NIET meer een hardgecodeerde MV-lijst. Na een verse restore komen alle MV's
+    #      onvuld binnen (relispopulated=false). We refreshen dynamisch ÁLLE onvulde MV's
+    #      in een multi-pass loop: afhankelijke MV's (bv. mv_regel_op_locatie op gio_locatie)
+    #      slagen pas nadat hun basis-MV in een eerdere pass is gevuld. Zo hoeft
+    #      refresh_prod_mvs.py nooit meer handmatig achteraf te draaien.
     $sql = @'
 SET max_parallel_workers_per_gather = 0;
 SET max_parallel_maintenance_workers = 0;
 SET work_mem = '256MB';
+SET statement_timeout = '40min';
 TRUNCATE p2p.locatie_subdiv;
 INSERT INTO p2p.locatie_subdiv (identificatie, geometrie)
 SELECT l.identificatie, ST_Subdivide(l.geometrie, 256)
 FROM p2p.locatie l
 WHERE ST_GeometryType(l.geometrie) IN ('ST_Polygon','ST_MultiPolygon');
 DO $$
+DECLARE
+  mv text;
+  pass int := 0;
+  remaining int;
 BEGIN
-  IF to_regclass('p2p.naammatch_signaal') IS NOT NULL THEN
-     EXECUTE 'REFRESH MATERIALIZED VIEW p2p.naammatch_signaal'; RAISE NOTICE 'refreshed p2p.naammatch_signaal';
-  END IF;
-  IF to_regclass('p2p.tekst_object_consistentie_mv') IS NOT NULL THEN
-     EXECUTE 'REFRESH MATERIALIZED VIEW p2p.tekst_object_consistentie_mv'; RAISE NOTICE 'refreshed p2p.tekst_object_consistentie_mv';
-  END IF;
-  IF to_regclass('v2a.ponsenkaart_gemeente_stats') IS NOT NULL THEN
-     EXECUTE 'REFRESH MATERIALIZED VIEW v2a.ponsenkaart_gemeente_stats'; RAISE NOTICE 'refreshed v2a.ponsenkaart_gemeente_stats';
+  LOOP
+    pass := pass + 1;
+    remaining := 0;
+    FOR mv IN
+      SELECT n.nspname || '.' || c.relname
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind = 'm' AND NOT c.relispopulated
+      ORDER BY 1
+    LOOP
+      BEGIN
+        EXECUTE 'REFRESH MATERIALIZED VIEW ' || mv;
+        RAISE NOTICE 'pass %: refreshed %', pass, mv;
+      EXCEPTION WHEN OTHERS THEN
+        remaining := remaining + 1;
+        RAISE NOTICE 'pass %: nog niet %: %', pass, mv, SQLERRM;
+      END;
+    END LOOP;
+    RAISE NOTICE 'pass % klaar; nog % onvuld', pass, remaining;
+    EXIT WHEN remaining = 0 OR pass >= 5;
+  END LOOP;
+  IF remaining > 0 THEN
+    RAISE WARNING 'Na % passes nog % MV(s) onvuld — controleer handmatig', pass, remaining;
   END IF;
 END $$;
 '@
@@ -176,7 +200,10 @@ UNION ALL SELECT 'vth.vergunningkennisgeving', count(*)::text FROM vth.vergunnin
 UNION ALL SELECT 'p2p.activiteit_locatieaanduiding', count(*)::text FROM p2p.activiteit_locatieaanduiding
 UNION ALL SELECT 'p2p.tekst_element', count(*)::text FROM p2p.tekst_element
 UNION ALL SELECT 'p2p.locatie_subdiv (herbouwd)', count(*)::text FROM p2p.locatie_subdiv
-UNION ALL SELECT 'wro.planobject', count(*)::text FROM wro.planobject;
+UNION ALL SELECT 'wro.planobject', count(*)::text FROM wro.planobject
+UNION ALL SELECT 'MV onvuld (moet 0 zijn)', count(*)::text
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind='m' AND NOT c.relispopulated;
 '@
     & $psql $ProdUrl -v ON_ERROR_STOP=1 -c $q
     if($LASTEXITCODE -ne 0){ throw "verify faalde (exit $LASTEXITCODE)" }
