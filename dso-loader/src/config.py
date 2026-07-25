@@ -37,6 +37,12 @@ class Config:
 
     @property
     def db_url(self) -> str:
+        # Expliciete DSN-override (bv. prod-directe sync via full_sync.py
+        # --target prod). Al bestaande conventie in enkele scripts; hier
+        # gecentraliseerd zodat álle callers via get_conn/cfg.db_url 'm volgen.
+        override = os.getenv("OCD_DB_URL")
+        if override:
+            return override
         return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
 
     # PoC municipality

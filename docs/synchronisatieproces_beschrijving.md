@@ -1,6 +1,6 @@
 # Synchronisatieproces OCD — beschrijving, timings & efficiëntie
 
-*Laatst bijgewerkt: 2026-07-24*
+*Laatst bijgewerkt: 2026-07-25*
 
 Dit document beschrijft hoe de nachtelijke synchronisatie van de OCD-database
 werkt, wat elke fase doet, **hoe lang elke stap duurt**, en — kritisch — **hoe
@@ -16,6 +16,50 @@ python scripts/full_sync.py --label "sync-<datum>"
 | `--full-p2p` | volledige per-bronhouder-sweep i.p.v. de registratietijdstip-delta (alleen voor verse restore / integriteitscheck) |
 | `--sinds <ISO-UTC>` | ondergrens voor de p2p-delta forceren (default = start vorige geslaagde sync − 2 dagen) |
 | `--skip-p2p` / `--skip-i2a` / `--skip-vth` / `--skip-post` / `--skip-embed` | fase overslaan |
+| `--target local` (default) `\| prod` | DB-doelwit; `prod` draait de sync **direct tegen de Railway-prod-DB** (`PROD_DB_URL` uit `.env`, via de TCP-proxy) |
+| `--dsn <connectstring>` | expliciete doel-DB; overschrijft `--target` |
+| `--yes` | sla de prod-typbevestiging over (voor cron/non-interactief) |
+
+---
+
+## Prod-directe delta-sync (i.p.v. de 80 GB dump/restore)
+
+Sinds de goedkope registratietijdstip-delta hoeft een prod-verversing géén
+volledige dump→restore meer te zijn. `full_sync.py --target prod` draait dezelfde
+fasen **rechtstreeks tegen productie**, waarbij de delta alleen de bronhouders
+met nieuwe registraties raakt.
+
+**Aanbevolen (snel):**
+
+```bash
+# Vereist: Railway TCP-proxy tijdelijk AAN; PROD_DB_URL in dso-loader/.env.
+cd c:/GIT/OCD/dso-loader
+python scripts/full_sync.py --target prod --skip-i2a --skip-vth --label "prod-delta-<datum>"
+```
+
+Wat er dan tegen prod draait: preflight → snapshot/dedup (idempotent) →
+**p2p-delta** (alleen nieuwe regelingen) → post (`regeling_load`-backfill,
+repair-pons, ponsenkaart-stats, drieslag-MV's, health-MV's) → embeddings
+(lokale Ollama, schrijft vectors direct in prod).
+
+**Veiligheid & mechaniek:**
+
+- Een prod-doelwit vraagt een **typbevestiging** (`PROD`) tenzij `--yes`.
+- De connectstring wordt **gemaskeerd** in log/rapport (nooit wachtwoord in het
+  logbestand).
+- `get_conn()` zet bij een prod-DSN automatisch `max_parallel_workers*=0` — de
+  Railway-container heeft een kleine `/dev/shm`, anders falen REFRESH/index-builds
+  met *"could not resize shared memory segment"*.
+- `sinds` komt uit prod's eigen `audit.sync_run` (na de restore = de dev-actualiteit),
+  dus de delta pakt precies alles ná de laatste stand die op prod staat. Elke
+  prod-run voegt zelf een `sync_run`-rij toe → volgende keer schuift `sinds` mee.
+
+**Nog niet in de prod-delta (bewust overslaan met `--skip-i2a --skip-vth`):**
+i2a en vth hebben nog geen delta en pollen álle bronhouders → over de proxy traag.
+Laat die voorlopig via de lokale sync + restore lopen, of draai ze gericht. Delta
+voor i2a/vth is de volgende stap (gaps G-94).
+
+---
 
 ---
 

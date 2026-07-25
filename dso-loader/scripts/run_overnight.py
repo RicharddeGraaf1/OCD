@@ -11,7 +11,7 @@ import os, re, sys, time, subprocess, traceback
 import httpx, psycopg
 from psycopg.rows import dict_row
 
-DB = "postgresql://postgres:postgres@localhost:5434/dso"
+DB = os.environ.get("OCD_DB_URL", "postgresql://postgres:postgres@localhost:5434/dso")
 OLLAMA = "http://localhost:11434"; MODEL = "nomic-embed-text"
 REPO = r"C:\GIT\OCD"
 SCRIPTS = r"C:\GIT\OCD\dso-loader\scripts"

@@ -6,6 +6,19 @@ Draai vanuit dso-loader root:
     python scripts/full_sync.py [--skip-p2p] [--skip-i2a] [--skip-vth]
                                 [--skip-post] [--skip-embed] [--label TEKST]
 
+Doelwit-DB (nieuw):
+    --target local (default) | prod   — prod leest PROD_DB_URL uit .env en
+                                        draait de sync DIRECT tegen de Railway-
+                                        prod-DB (via de TCP-proxy). Vraagt een
+                                        typbevestiging tenzij --yes.
+    --dsn <connectstring>             — expliciete DB (overschrijft --target).
+
+  Prod-directe DELTA (aanbevolen; snel, alleen nieuwe registraties):
+      python scripts/full_sync.py --target prod --skip-i2a --skip-vth
+  i2a/vth hebben nog geen delta en pollen álle bronhouders → over de proxy
+  traag; laat die (voorlopig) via de lokale sync + restore lopen, of draai ze
+  gericht. Zie gaps G-94.
+
 Fasen:
   0. preflight — DB / API-key / schijfruimte
   1. snapshot  — actualiteit vorige sync naar audit.regeling_load_hist,
@@ -30,6 +43,7 @@ Rapport: scripts/SYNC-REPORT-<datum>.md
 import argparse
 import datetime
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -423,6 +437,47 @@ def fase_embed():
     rapporteer("Embeddings", [f"- run_overnight.py: {'ok' if ok else 'FOUT (zie log)'}"])
 
 
+# ── Doelwit-DB (lokaal vs prod-direct) ───────────────────────────────
+
+def _masker_dsn(dsn: str) -> str:
+    """Verberg wachtwoord/gebruiker in een connectstring voor logging."""
+    return re.sub(r"://[^:/@]+(:[^@]+)?@", "://***@", dsn)
+
+
+def kies_doelwit_db(args):
+    """Zet OCD_DB_URL op basis van --dsn/--target vóór enige DB-connectie.
+
+    Local (default) = ongewijzigd (cfg bouwt de DSN uit DB_HOST-delen). Prod
+    leest PROD_DB_URL uit .env en draait de sync DIRECT tegen de Railway-prod-DB.
+    Een prod-doelwit vereist een typbevestiging tenzij --yes, want we schrijven
+    dan rechtstreeks in productie. get_conn() zet bij een prod-DSN automatisch
+    parallelisme uit (Railway /dev/shm).
+    """
+    dsn = args.dsn
+    if not dsn and args.target == "prod":
+        from dotenv import dotenv_values
+        dsn = (dotenv_values(ROOT / ".env") or {}).get("PROD_DB_URL")
+        if not dsn:
+            raise SystemExit("PROD_DB_URL ontbreekt in .env — kan niet tegen prod draaien.")
+    if not dsn:
+        log("Doelwit-DB: LOKAAL (default)")
+        return
+    dsn = dsn.strip().strip('"').strip("'")
+    os.environ["OCD_DB_URL"] = dsn
+    prod = ("rlwy.net" in dsn) or ("railway" in dsn) or (args.target == "prod")
+    log(f"Doelwit-DB: {'PROD (direct!)' if prod else 'EXPLICIET'} → {_masker_dsn(dsn)}")
+    report.insert(1, f"> **Doelwit-DB:** {'PRODUCTIE (direct)' if prod else _masker_dsn(dsn)}")
+    if prod and not args.yes:
+        try:
+            antwoord = input(
+                "\n⚠  Je gaat DIRECT tegen PRODUCTIE schrijven. "
+                "Typ exact 'PROD' om door te gaan: ")
+        except EOFError:
+            raise SystemExit("Non-interactief zonder --yes; afgebroken.")
+        if antwoord.strip() != "PROD":
+            raise SystemExit("Afgebroken door gebruiker.")
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
@@ -438,8 +493,17 @@ def main():
     ap.add_argument("--sinds", default=None,
                     help="ISO-8601 UTC ondergrens voor de p2p-delta-sweep; "
                          "default = start vorige geslaagde sync − 2 dagen")
+    ap.add_argument("--target", choices=["local", "prod"], default="local",
+                    help="DB-doelwit; 'prod' draait direct tegen de Railway-prod-DB "
+                         "(PROD_DB_URL uit .env, via TCP-proxy)")
+    ap.add_argument("--dsn", default=None,
+                    help="expliciete DB-connectstring; overschrijft --target")
+    ap.add_argument("--yes", action="store_true",
+                    help="sla de prod-bevestiging over (voor cron/non-interactief)")
     ap.add_argument("--label", default=f"full-sync-{VANDAAG}")
     args = ap.parse_args()
+
+    kies_doelwit_db(args)
 
     run_start = datetime.datetime.now(datetime.timezone.utc)
     t0 = time.monotonic()

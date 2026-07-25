@@ -1,5 +1,7 @@
 """Database connection and helpers."""
 
+import os
+
 import psycopg
 from psycopg.rows import dict_row
 from src.config import cfg
@@ -47,9 +49,27 @@ def qualify(table: str) -> str:
     return f"{schema}.{table}"
 
 
+def _is_prod(url: str) -> bool:
+    """Herken de Railway-prod-DB (via de TCP-proxy) aan de host."""
+    return "rlwy.net" in url or "railway" in url
+
+
 def get_conn() -> psycopg.Connection:
-    """Get a new database connection."""
-    return psycopg.connect(cfg.db_url, row_factory=dict_row, autocommit=False)
+    """Get a new database connection.
+
+    Wanneer we tegen de Railway-prod-DB draaien (OCD_DB_URL via de TCP-proxy),
+    zetten we parallelisme uit: de container heeft een kleine /dev/shm, waardoor
+    parallelle queries/REFRESH/index-builds falen met "could not resize shared
+    memory segment / No space left on device". SET (zonder LOCAL) blijft voor de
+    hele sessie staan en is lokaal onschadelijk (wordt daar niet gezet).
+    """
+    conn = psycopg.connect(cfg.db_url, row_factory=dict_row, autocommit=False)
+    if _is_prod(cfg.db_url):
+        with conn.cursor() as cur:
+            cur.execute("SET max_parallel_workers_per_gather = 0")
+            cur.execute("SET max_parallel_maintenance_workers = 0")
+        conn.commit()
+    return conn
 
 
 def execute_sql_file(conn: psycopg.Connection, sql: str) -> None:
