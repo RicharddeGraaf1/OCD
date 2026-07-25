@@ -54,6 +54,15 @@ STAPPEN = [
 def main():
     conn = get_conn()
     cur = conn.cursor()
+    # Parallelisme UIT: zowel de lokale Docker-PostGIS als de Railway-container
+    # hebben een kleine /dev/shm; een parallelle REFRESH faalt anders met
+    # "could not resize shared memory segment / No space left on device"
+    # (tekst_object_consistentie_mv sloopte hier eerder op). SET (zonder LOCAL)
+    # blijft de hele sessie staan. get_conn() zet dit al bij een prod-DSN; hier
+    # onvoorwaardelijk zodat ook lokaal geen /dev/shm-fout optreedt.
+    cur.execute("SET max_parallel_workers_per_gather = 0")
+    cur.execute("SET max_parallel_maintenance_workers = 0")
+    conn.commit()
     t_total = time.time()
 
     for i, (naam, sql_or_path, count_query) in enumerate(STAPPEN, 1):
