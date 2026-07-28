@@ -19,6 +19,12 @@
  * Programmatische API staat op window.ocdRegeltekst (parseTekst, renderTekst, …).
  *
  * GEEN netwerk, GEEN API-calls: puur STOP-XML (string) → HTML, client-side.
+ *
+ * ── CANONIEKE BRON ──────────────────────────────────────────────────────────
+ * Dit bestand (OCD/ocd-api/assets/ocd-regeltekst.v1.js) is de ENIGE bron van
+ * waarheid. De kopieën in RoM-prototype, instructieregels.nl, omgevingsbot.nl
+ * en OCDviewer worden hieruit gegenereerd — NIET met de hand bewerken.
+ * Wijzig hier, draai daarna OCD/scripts/sync-shared-component.ps1.
  */
 (function (global) {
   'use strict';
