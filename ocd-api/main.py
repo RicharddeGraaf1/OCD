@@ -2279,7 +2279,8 @@ def viewer_boom(
     with get_conn() as conn, conn.cursor() as cur:
         # Regeling-metadata
         cur.execute(
-            "SELECT frbr_expression, opschrift, documenttype, bronhouder "
+            "SELECT frbr_expression, opschrift, documenttype, bronhouder, "
+            "inactief, reden_inactief "
             "FROM p2p.regeling WHERE frbr_expression = %s",
             (expression,),
         )
@@ -2435,6 +2436,11 @@ def viewer_boom(
             "expression": regeling["frbr_expression"],
             "titel": regeling["opschrift"],
             "type": regeling["documenttype"],
+            # Soft-flag (hide-first-audit G3): endpoint blijft werken voor
+            # historisch inzien, maar markeert een verdrongen/ingetrokken versie
+            # zodat de frontend een badge kan tonen. Zoek/adres tonen 'm niet.
+            "inactief": bool(regeling["inactief"]),
+            "reden_inactief": regeling["reden_inactief"],
         },
         "boom": boom,
         "locatie_ids": sorted(locatie_ids),
@@ -2478,14 +2484,22 @@ def viewer_tekst(wid: str):
     geen juridische status.
     """
     with get_conn() as conn, conn.cursor() as cur:
+        # Soft-flag (hide-first-audit G1): wid is niet uniek (wId-fan-out). Join
+        # naar p2p.regeling voor de inactief-vlag en prefereer bij een fan-out de
+        # ACTIEVE versie (ORDER BY r.inactief NULLS FIRST → false vóór true), zodat
+        # een directe wid-call de vigerende tekst teruggeeft en anders 'inactief'
+        # meldt i.p.v. stil de verdrongen versie te tonen.
         cur.execute(
             """
-            SELECT te.inhoud AS tekst, eh.begrijpelijk
+            SELECT te.inhoud AS tekst, eh.begrijpelijk,
+                   coalesce(r.inactief, false) AS inactief
             FROM p2p.tekst_element te
             LEFT JOIN v2a.element_hertaling eh
                    ON eh.tekst_element_id = te.id
                   AND eh.model = %s AND eh.prompt_versie = %s
+            LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE te.wid = %s
+            ORDER BY r.inactief ASC NULLS FIRST
             LIMIT 1
             """,
             (HERTAAL_MODEL, HERTAAL_PROMPT_VERSIE, wid),
@@ -2493,7 +2507,8 @@ def viewer_tekst(wid: str):
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "Tekst niet gevonden")
-    return {"wid": wid, "tekst": row["tekst"], "begrijpelijk": row["begrijpelijk"]}
+    return {"wid": wid, "tekst": row["tekst"], "begrijpelijk": row["begrijpelijk"],
+            "inactief": bool(row["inactief"])}
 
 
 class TekstenRequest(BaseModel):
@@ -2518,20 +2533,27 @@ def viewer_teksten(req: TekstenRequest = Body(...)):
     if not wids:
         return {"teksten": []}
     with get_conn() as conn, conn.cursor() as cur:
+        # Soft-flag (hide-first-audit G2): zie /v1/viewer/tekst. DISTINCT ON (wid)
+        # met ORDER BY wid, r.inactief kiest per wid de actieve versie; de vlag
+        # gaat mee zodat de frontend een ingetrokken artikel kan badgen.
         cur.execute(
             """
-            SELECT DISTINCT ON (te.wid) te.wid, te.inhoud AS tekst, eh.begrijpelijk
+            SELECT DISTINCT ON (te.wid) te.wid, te.inhoud AS tekst, eh.begrijpelijk,
+                   coalesce(r.inactief, false) AS inactief
             FROM p2p.tekst_element te
             LEFT JOIN v2a.element_hertaling eh
                    ON eh.tekst_element_id = te.id
                   AND eh.model = %s AND eh.prompt_versie = %s
+            LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE te.wid = ANY(%s)
+            ORDER BY te.wid, r.inactief ASC NULLS FIRST
             """,
             (HERTAAL_MODEL, HERTAAL_PROMPT_VERSIE, wids),
         )
         rows = cur.fetchall()
     return {"teksten": [
-        {"wid": r["wid"], "tekst": r["tekst"], "begrijpelijk": r["begrijpelijk"]}
+        {"wid": r["wid"], "tekst": r["tekst"], "begrijpelijk": r["begrijpelijk"],
+         "inactief": bool(r["inactief"])}
         for r in rows
     ]}
 
@@ -3478,7 +3500,17 @@ def viewer_regelmix_document(
             )
         rows = cur.fetchall()
 
-    return {"regelmix": rows}
+        # Soft-flag (hide-first-audit G4): markeer of de OW-bron een
+        # verdrongen/ingetrokken versie is (Wro kent geen inactief). De frontend
+        # kan dan badgen; retrieval/adres tonen deze bron sowieso niet.
+        inactief = False
+        if bron_type == 'ow':
+            cur.execute("SELECT inactief FROM p2p.regeling WHERE frbr_expression = %s",
+                        (bron,))
+            r = cur.fetchone()
+            inactief = bool(r["inactief"]) if r else False
+
+    return {"regelmix": rows, "inactief": inactief}
 
 
 def _meest_specifiek_cte(op_punt_sql: str) -> str:
@@ -3928,7 +3960,14 @@ def viewer_ala(
             for row in cur.fetchall()
         ]
 
-    return {"type": "FeatureCollection", "features": features}
+        # Soft-flag (hide-first-audit G5): markeer of deze regeling-versie
+        # verdrongen/ingetrokken is, zodat de kaart-ALA-laag kan badgen.
+        cur.execute("SELECT inactief FROM p2p.regeling WHERE frbr_expression = %s",
+                    (expression,))
+        r = cur.fetchone()
+        inactief = bool(r["inactief"]) if r else False
+
+    return {"type": "FeatureCollection", "features": features, "inactief": inactief}
 
 
 @app.get("/v1/viewer/wro/{idn}/detail", dependencies=[Depends(verify_key)])

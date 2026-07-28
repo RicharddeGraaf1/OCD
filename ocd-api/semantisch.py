@@ -112,6 +112,11 @@ ontwerp_scope AS (
     FROM p2p.regeling r
     JOIN p2p.locatie_subdiv ls ON ls.identificatie = r.regelingsgebied_id
     WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+      -- hide-first-audit G6: consistent met _SCOPE_CTE — een inactieve
+      -- (ingetrokken/verdrongen) regeling mag haar frbr_work niet bijdragen,
+      -- anders lekken ontwerp-chunks van een niet-vigerende regeling (ze worden
+      -- nergens later hergated omdat ze op frbr_work i.p.v. frbr_expression keyen).
+      AND NOT r.inactief
 )"""
 _ONTWERP_INNER = """
     SELECT id, regeling_expression, bron_soort, kop_pad, inhoud_plain, embedding, fts
