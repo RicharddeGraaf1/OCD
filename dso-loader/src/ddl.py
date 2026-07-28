@@ -997,7 +997,13 @@ CREATE TABLE IF NOT EXISTS vth.vergunningkennisgeving (
             'aanvraag', 'verleend', 'geweigerd', 'ontwerp',
             'van_rechtswege', 'ingetrokken', 'verlenging_beslistermijn',
             'melding', 'melding_geaccepteerd', 'kennisgeving',
-            'rectificatie', 'overig'
+            'rectificatie', 'overig',
+            -- Sinds de tweede classificatietrap op inhoud_tekst (2026-07-27).
+            -- Beide zijn terminale uitkomsten van een aanvraag, maar geen
+            -- inhoudelijk besluit op de vergunning; ze tellen daarom NIET mee
+            -- in vth.dossier_doorlooptijd.
+            'buiten_behandeling',   -- art. 4:5 Awb, aanvraag niet in behandeling
+            'vergunningvrij'        -- geen vergunning nodig
         )),
 
     -- Geometrie (PostGIS; 95% gevuld in PoC)
@@ -1051,7 +1057,11 @@ ALTER TABLE vth.vergunningkennisgeving
     ADD COLUMN IF NOT EXISTS afwijk_status       TEXT,
     ADD COLUMN IF NOT EXISTS procedure           TEXT,
     ADD COLUMN IF NOT EXISTS afwijk_bron         TEXT,
-    ADD COLUMN IF NOT EXISTS afwijk_evidence     TEXT;
+    ADD COLUMN IF NOT EXISTS afwijk_evidence     TEXT,
+    -- Herkomst van type_besluit: 'titel' (eerste trap) of 'tekst' (tweede trap
+    -- op inhoud_tekst, alleen toegepast waar de titel 'overig' opleverde).
+    -- Maakt de reclassificatie auditeerbaar en terugdraaibaar.
+    ADD COLUMN IF NOT EXISTS type_besluit_bron   TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_vk_bg_datum
     ON vth.vergunningkennisgeving (bg_naam, datum_publicatie DESC);

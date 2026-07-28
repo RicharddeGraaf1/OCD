@@ -109,6 +109,129 @@ def classify_type_besluit(titel: str) -> Optional[str]:
     return "overig"
 
 
+# ---------- Tweede trap: classificatie uit de body-tekst ---------------------
+#
+# Veel bronhouders zetten de uitkomst niet in de titel ("Besluit
+# Omgevingsvergunning - Eindhovensingel 125 in Arnhem") maar wel in de tekst
+# ("De vergunning is verleend" / "Besluit: Verleend"). Die records belandden
+# allemaal in `overig` en vielen daarmee uit vth.dossier_doorlooptijd — hele
+# gemeenten (Arnhem, Gouda, Enschede) ontbraken zo in de doorlooptijd-cijfers.
+#
+# Ontwerpprincipes (gevalideerd op de lokale DB, 2026-07-27):
+#   1. Precisie boven dekking — een besluit dat als aanvraag wordt gelabeld
+#      fabriceert een spookdossier met een verkeerde startdatum.
+#   2. Alleen de kop van de tekst telt (TEKST_VENSTER). De uitkomst staat
+#      vooraan; daarna volgt bezwaar-boilerplate met dezelfde woorden.
+#   3. Intrekking vóór verlening ("verleend en later ingetrokken").
+#   4. Geen aanvraag-gok uit vrije tekst — alleen de gelabelde
+#      'Ontvangstdatum:'-vorm.
+# Gemeten fout-positieven op records waarvan de titel 'aanvraag' zegt: 0,59%.
+
+TEKST_VENSTER = 600  # tekens vanaf het begin waarin de uitkomst moet staan
+
+_TEKST_LABEL_RE = re.compile(
+    r"^[ \t]*Besluit[ \t]*:[ \t]*(.{0,60}?)[ \t]*$", re.IGNORECASE | re.MULTILINE
+)
+
+# Waarden zoals ze in een gelabelde 'Besluit:'-regel voorkomen.
+_TEKST_LABEL_MAP: list[tuple[re.Pattern[str], Optional[str]]] = [
+    (re.compile(r"^_?afgebroken", re.IGNORECASE), None),  # testdata bij de bron
+    (re.compile(r"buiten behandeling", re.IGNORECASE), "buiten_behandeling"),
+    (re.compile(r"vergunning[sv]?vrij|niet vergunningsplichtig", re.IGNORECASE),
+     "vergunningvrij"),
+    (re.compile(r"ingetrokken", re.IGNORECASE), "ingetrokken"),
+    (re.compile(r"gewei?gerd", re.IGNORECASE), "geweigerd"),
+    (re.compile(r"verleend|verlenen|toegekend|akkoord", re.IGNORECASE), "verleend"),
+]
+
+# Vrije-tekst besluitzinnen. Volgorde = prioriteit.
+_TEKST_BESLUIT_RULES: list[tuple[re.Pattern[str], str]] = [
+    # intrekking (vóór verlening)
+    (re.compile(r"\b(de\s+)?(aanvraag|(omgevings)?vergunning)\s+(is|wordt|zijn)\s+"
+                r"ingetrokken\b", re.IGNORECASE), "ingetrokken"),
+    (re.compile(r"\bhebben\s+(wij\s+|zij\s+)?(de\s+)?(aanvraag|vergunning)\s+"
+                r"ingetrokken\b", re.IGNORECASE), "ingetrokken"),
+    # weigering
+    (re.compile(r"\b(de\s+)?(omgevings)?vergunning\s+(is|wordt)\s+gewei?gerd\b",
+                re.IGNORECASE), "geweigerd"),
+    (re.compile(r"\bbeslo(ten|t)\s+(om\s+)?(de\s+)?(aangevraagde\s+)?(omgevings)?"
+                r"vergunning\s+(niet\s+)?(te\s+)?(verlenen|wei?geren)", re.IGNORECASE),
+     "_polariteit"),
+    (re.compile(r"\bhebben\s+(wij\s+)?(de\s+)?(aanvraag|vergunning)\s+gewei?gerd\b",
+                re.IGNORECASE), "geweigerd"),
+    (re.compile(r"\b(aanvraag|(omgevings)?vergunning)\s+(hebben|heeft)\s+"
+                r"gewei?gerd\b", re.IGNORECASE), "geweigerd"),
+    # buiten behandeling (art. 4:5 Awb): besluit, maar geen inhoudelijk oordeel
+    (re.compile(r"\bbuiten\s+behandeling\s+(gesteld|gelaten|te\s+stellen)\b",
+                re.IGNORECASE), "buiten_behandeling"),
+    # vergunningvrij
+    (re.compile(r"\b(is|zijn)\s+vergunning[sv]?vrij\b|\bvergunning[sv]?vrij\s+"
+                r"(te\s+)?verklaar", re.IGNORECASE), "vergunningvrij"),
+    # verlening
+    (re.compile(r"\b(de\s+)?(omgevings)?vergunning\s+(is|zijn|wordt)\s+"
+                r"(verleend|toegekend)\b", re.IGNORECASE), "verleend"),
+    (re.compile(r"\b(heeft|hebben)\s+(zij\s+|wij\s+)?(een\s+|de\s+)?(omgevings)?"
+                r"vergunning\s+verleend\b", re.IGNORECASE), "verleend"),
+    # Bijzin-woordvolgorde: "...dat zij een omgevingsvergunning HEBBEN VERLEEND"
+    (re.compile(r"\b(omgevings)?vergunning\s+(hebben|heeft)\s+verleend\b",
+                re.IGNORECASE), "verleend"),
+    (re.compile(r"\b(aanvraag|aanvragen)\s+hebben\s+verleend\b", re.IGNORECASE),
+     "verleend"),                                              # Noordenveld-vorm
+    (re.compile(r",\s*verleend\s+op\s+\d", re.IGNORECASE), "verleend"),
+    (re.compile(r"\btoestemming\s+(gegeven|verleend)\b", re.IGNORECASE), "verleend"),
+    # melding
+    (re.compile(r"\bmelding\s+(voor\s+.{0,120}?\s+)?is\s+geaccepteerd\b",
+                re.IGNORECASE | re.DOTALL), "melding_geaccepteerd"),
+    # aanvraag: alleen de gelabelde vorm
+    (re.compile(r"^[ \t]*Ontvangstdatum[ \t]*:", re.IGNORECASE | re.MULTILINE),
+     "aanvraag"),
+]
+
+# "besloten de vergunning NIET te verlenen" / "te weigeren" → weigering.
+_TEKST_NEGATIE = re.compile(
+    r"\bbeslo(ten|t)\s+(om\s+)?(de\s+)?(aangevraagde\s+)?(omgevings)?vergunning\s+"
+    r"(niet\s+te\s+verlenen|te\s+wei?geren)", re.IGNORECASE)
+
+# Voorwaardelijke bijzin: "Tegen een aanvraag kunt u geen bezwaar maken. Dat kan
+# pas ALS de vergunning is verleend." Voorlichting, geen besluit.
+_TEKST_BIJZIN = re.compile(
+    r"\b(als|zodra|indien|wanneer|nadat|voordat|pas|mocht|tenzij|totdat|"
+    r"of\s+de|wordt\s+de|zou\s+de)\b[^.!?]{0,60}$", re.IGNORECASE)
+
+
+def _raakt_buiten_bijzin(pat: re.Pattern[str], kop: str) -> bool:
+    """True als het patroon raakt op een plek die geen voorwaardelijke bijzin is."""
+    for m in pat.finditer(kop):
+        if not _TEKST_BIJZIN.search(kop[max(0, m.start() - 70):m.start()]):
+            return True
+    return False
+
+
+def classify_type_besluit_uit_tekst(tekst: str) -> Optional[str]:
+    """Tweede trap: leid type_besluit af uit de body-tekst.
+
+    Retourneert None als de tekst geen eenduidige uitkomst geeft — dan blijft
+    de titel-classificatie staan. Bedoeld voor records die op de titel
+    'overig' scoren; niet om een titel-uitkomst te overschrijven.
+    """
+    if not tekst:
+        return None
+    m = _TEKST_LABEL_RE.search(tekst)
+    if m:
+        waarde = m.group(1).strip()
+        for pat, label in _TEKST_LABEL_MAP:
+            if pat.search(waarde):
+                return label
+        return None  # gelabelde regel met onbekende waarde → niet raden
+    kop = tekst[:TEKST_VENSTER]
+    for pat, label in _TEKST_BESLUIT_RULES:
+        if _raakt_buiten_bijzin(pat, kop):
+            if label == "_polariteit":
+                return "geweigerd" if _TEKST_NEGATIE.search(kop) else "verleend"
+            return label
+    return None
+
+
 # ---------- Geometry helpers ------------------------------------------------
 
 _POINT_RE = re.compile(r"^\s*POINT\s*\(\s*([\-0-9.eE]+)\s+([\-0-9.eE]+)\s*\)\s*$")
@@ -191,14 +314,27 @@ _TITLE_ADDR_RE = re.compile(
 
 # Zaaknummer-patronen die we tegenkomen in NL publicaties.
 # Examples: GU-Z2026-0047412, Z-2026-001234, 2026M0841, OV-2026-12345
+#
+# NB (2026-07-27): de gelabelde patronen accepteerden geen PUNT in het nummer,
+# waardoor Rotterdam (OMV.24.31.12345), Arnhem (N26AB.1150) en Huizen (Z.467853)
+# volledig gemist werden — 31k records zonder zaaknummer terwijl het er letterlijk
+# staat. Zonder zaaknummer valt de exacte koppeltrap van vth.dossier_doorlooptijd
+# weg. Tegelijk zijn de labels verbreed (zaakid/zaaknr/referentienummer/
+# aanvraagnummer/olo-nummer) en is een cijfer-eis toegevoegd, zodat een
+# waarde-op-de-volgende-regel ("Omschrijving", "Datum") niet als zaaknummer
+# wordt opgepikt.
+_ZAAKNR_LABEL_WAARDE = r"([A-Za-z0-9][\w.\-/]{3,30})"
 _ZAAKNR_PATTERNS = [
     re.compile(r"\b([A-Z]{1,4}-?Z[-/]?20\d{2}[-/]?\d{3,8})\b"),  # GU-Z2026-0047412
     re.compile(r"\b(Z[-/]?20\d{2}[-/]?\d{3,8})\b"),               # Z-2026-001234
     re.compile(r"\b(OV[-/]?20\d{2}[-/]?\d{3,8})\b"),              # OV-2026-12345
     re.compile(r"\b(20\d{2}[A-Z][A-Z0-9]{3,8})\b"),               # 2026M0841
-    re.compile(r"\bZaaknummer[:\s]+([A-Z0-9][\w\-/]{4,30})", re.IGNORECASE),
-    re.compile(r"\b(kenmerk|dossiernummer)[:\s]+([A-Z0-9][\w\-/]{4,30})", re.IGNORECASE),
+    re.compile(r"\b(?:zaak\s?(?:nummer|id|nr\.?)|dossier\s?(?:nummer|nr\.?)|"
+               r"referentie(?:nummer)?|aanvraag\s?nummer|olo[-\s]?nummer|kenmerk)\b"
+               r"\s*[:\-]?\s*" + _ZAAKNR_LABEL_WAARDE, re.IGNORECASE),
 ]
+
+_ZAAKNR_HEEFT_CIJFER = re.compile(r"\d")
 
 
 def extract_adres_uit_titel(titel: str) -> dict[str, Optional[str]]:
@@ -233,10 +369,12 @@ def extract_zaaknummer_bg(text: str) -> Optional[str]:
     if not text:
         return None
     for pat in _ZAAKNR_PATTERNS:
-        m = pat.search(text)
-        if m:
-            # 'kenmerk: XYZ' geeft 2 groepen — pak de laatste
-            return m.group(m.lastindex or 1)
+        for m in pat.finditer(text):
+            waarde = m.group(m.lastindex or 1).rstrip(".,;:")
+            # Een zaaknummer bevat altijd een cijfer; zonder die eis pikt de
+            # label-regel de kop van de vólgende regel op ("Omschrijving").
+            if len(waarde) >= 4 and _ZAAKNR_HEEFT_CIJFER.search(waarde):
+                return waarde
     return None
 
 
@@ -1057,7 +1195,7 @@ def _enrich_one_batch(limit: int,
             if type_filter:
                 cur.execute(
                     "SELECT koop_id, titel, xml_url, straatnaam, postcode, "
-                    "       huisnummer, woonplaats "
+                    "       huisnummer, woonplaats, type_besluit "
                     "FROM vth.vergunningkennisgeving "
                     "WHERE inhoud_geladen_at IS NULL "
                     "  AND xml_url IS NOT NULL "
@@ -1069,7 +1207,7 @@ def _enrich_one_batch(limit: int,
             else:
                 cur.execute(
                     "SELECT koop_id, titel, xml_url, straatnaam, postcode, "
-                    "       huisnummer, woonplaats "
+                    "       huisnummer, woonplaats, type_besluit "
                     "FROM vth.vergunningkennisgeving "
                     "WHERE inhoud_geladen_at IS NULL "
                     "  AND xml_url IS NOT NULL "
@@ -1098,6 +1236,12 @@ def _enrich_one_batch(limit: int,
             )
             ontvangst = extract_datum_ontvangst(tekst)
 
+            # Tweede trap: alleen waar de titel niets opleverde. Nooit een
+            # titel-uitkomst overschrijven — zie classify_type_besluit_uit_tekst.
+            tekst_type = None
+            if row["type_besluit"] == "overig":
+                tekst_type = classify_type_besluit_uit_tekst(tekst)
+
             # If address fields are empty, try parsing the title as a fallback.
             addr: dict = {}
             if not row["straatnaam"]:
@@ -1120,6 +1264,9 @@ def _enrich_one_batch(limit: int,
                     "  huisnummertoevoeging = COALESCE(huisnummertoevoeging, %s), "
                     "  postcode = COALESCE(postcode, %s), "
                     "  woonplaats = COALESCE(woonplaats, %s), "
+                    "  type_besluit = COALESCE(%s, type_besluit), "
+                    "  type_besluit_bron = CASE WHEN %s IS NOT NULL "
+                    "                           THEN 'tekst' ELSE type_besluit_bron END, "
                     "  inhoud_geladen_at = now() "
                     "WHERE koop_id = %s",
                     (
@@ -1129,6 +1276,7 @@ def _enrich_one_batch(limit: int,
                         addr.get("huisnummertoevoeging"),
                         addr.get("postcode"),
                         addr.get("woonplaats"),
+                        tekst_type, tekst_type,
                         koop_id,
                     ),
                 )
