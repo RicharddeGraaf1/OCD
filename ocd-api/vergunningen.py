@@ -156,6 +156,10 @@ class StatsResponse(BaseModel):
     enriched: int
     enriched_pct: float
     per_type_besluit: list[FacetBucket]
+    # Wanneer de matview met deze totalen is berekend; None = live geaggregeerd
+    # (dev-DB zonder de matview-migratie). Verschil met last_ingest laat zien
+    # of de refresh-ronde is overgeslagen.
+    stats_refreshed_at: datetime | None = None
     took_ms: int
 
 
@@ -550,31 +554,77 @@ def list_facets(
     return FacetsResponse(**result, took_ms=took)
 
 
+_STATS_MATVIEW_PRESENT = False  # positief resultaat cachen; negatief blijven checken
+
+
+def _has_stats_matview(cur) -> bool:
+    """Bestaan de stats-matviews? Eén catalog-lookup, geen tabel-toegang.
+
+    Positief antwoord wordt gecached (matviews verdwijnen niet), negatief niet
+    — zo pikt een dev-DB de migratie op zonder herstart van de API.
+    """
+    global _STATS_MATVIEW_PRESENT
+    if _STATS_MATVIEW_PRESENT:
+        return True
+    cur.execute(
+        "SELECT to_regclass('vth.vergunning_stats') IS NOT NULL"
+        "   AND to_regclass('vth.vergunning_stats_type_besluit') IS NOT NULL AS ok"
+    )
+    row = cur.fetchone()
+    _STATS_MATVIEW_PRESENT = bool(row and row["ok"])
+    return _STATS_MATVIEW_PRESENT
+
+
 @router.get(
     "/stats",
     response_model=StatsResponse,
     summary="Totalen voor het register (header / lege-staat)",
 )
 def stats():
+    """Header-totalen.
+
+    Leest uit de matviews vth.vergunning_stats(_type_besluit) — de live
+    aggregatie is een seq scan over 1,35 GB heap (geen index op
+    datum_publicatie_ts / ingest_at / inhoud_tekst, dus niet index-only te
+    maken) en kostte op prod 23-46 s: over de statement_timeout van 20 s,
+    dus 500. Zie scripts/2026-07-add-vergunning-stats-matview.sql; verversen
+    gebeurt in refresh-koop-to-prod.ps1 -Refresh.
+
+    Ontbreekt de matview (dev-DB zonder migratie), dan valt hij terug op de
+    live aggregatie — daar is de tabel klein genoeg.
+    """
     t0 = time.perf_counter()
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            SELECT count(*) AS total,
-                   max(datum_publicatie_ts) AS last_publicatie,
-                   max(ingest_at) AS last_ingest,
-                   count(*) FILTER (WHERE inhoud_tekst IS NOT NULL) AS enriched
-            FROM vth.vergunningkennisgeving
-        """)
-        r = cur.fetchone()
-        total = r["total"]
-        enriched = r["enriched"]
-        cur.execute("""
-            SELECT type_besluit AS value, count(*) AS count
-            FROM vth.vergunningkennisgeving
-            WHERE type_besluit IS NOT NULL
-            GROUP BY 1 ORDER BY 2 DESC
-        """)
+        if _has_stats_matview(cur):
+            cur.execute("""
+                SELECT total, last_publicatie, last_ingest, enriched, refreshed_at
+                FROM vth.vergunning_stats
+            """)
+            r = cur.fetchone() or {}
+            cur.execute("""
+                SELECT value, count
+                FROM vth.vergunning_stats_type_besluit
+                ORDER BY count DESC
+            """)
+        else:
+            cur.execute("""
+                SELECT count(*) AS total,
+                       max(datum_publicatie_ts) AS last_publicatie,
+                       max(ingest_at) AS last_ingest,
+                       count(*) FILTER (WHERE inhoud_tekst IS NOT NULL) AS enriched,
+                       NULL::timestamptz AS refreshed_at
+                FROM vth.vergunningkennisgeving
+            """)
+            r = cur.fetchone()
+            cur.execute("""
+                SELECT type_besluit AS value, count(*) AS count
+                FROM vth.vergunningkennisgeving
+                WHERE type_besluit IS NOT NULL
+                GROUP BY 1 ORDER BY 2 DESC
+            """)
         per_tb = [FacetBucket(**dict(b)) for b in cur.fetchall()]
+    total = r["total"] or 0
+    enriched = r["enriched"] or 0
     took = int((time.perf_counter() - t0) * 1000)
     return StatsResponse(
         total=total,
@@ -583,6 +633,7 @@ def stats():
         enriched=enriched,
         enriched_pct=round(enriched / total * 100, 2) if total else 0.0,
         per_type_besluit=per_tb,
+        stats_refreshed_at=r["refreshed_at"],
         took_ms=took,
     )
 
