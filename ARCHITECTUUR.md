@@ -283,16 +283,35 @@ van directe DSO-API calls (zie `docs/optimalisaties.md`).
 - IMTR-retrieval-path via i2a-tabellen
 - Wro-teksten altijd ophalen (niet conditioneel op PONS)
 
-### odkwaliteit (`C:/GIT/odkwaliteit/`)
+### odkwaliteit (`C:/GIT/annotatieconformiteit.nl/`)
 
-Annotatieconformiteit-scorer: 36 richtlijnen + thema-dekking. Scoort
-per omgevingsdocument op kwaliteit (gewogen A-F) en volledigheid.
+Annotatieconformiteit-scorer achter [annotatieconformiteit.nl](https://annotatieconformiteit.nl):
+**45 richtlijnen** — de 36 Geonovum-richtlijnen (cat. A–F; F is in v1.0 leeg) plus
+projecteigen cat. G (R37–R43, toepasbare regels) en H (R44–R45, ontbrekende
+referenties). Per omgevingsdocument een conformiteitsscore (gewogen A–F) en een
+uitgebreide score (A–H, met G 12% en H 8%), plus een rollup per bevoegd gezag.
+Stand 2026-07-30: 1597 regelingen, 363 bevoegde gezagen.
 
-**Geplande OCD-integratie** (zie `docs/plan-ocd-integratie.md`):
-- OCD-collector vervangt DSO-API collector (2-4 uur → <5 minuten)
-- Categorie G: 6 nieuwe richtlijnen voor toepasbare-regel-kwaliteit
-- R11/R13 upgrade van handmatig naar LLM-ondersteunde heuristiek
-- R36 (overlap-detectie) via PostGIS
+**OCD-integratie is gerealiseerd** (`docs/plan-ocd-integratie.md`):
+- OCD-collector is de standaardbron (`collect --source ocd`, default); de
+  DSO-API-collector bestaat nog als alternatief. Volledige run duurt minuten
+  i.p.v. uren.
+- Cat. G en H draaien, inclusief G43 (dangling toepasbare regels per bronhouder)
+  en H44/H45 op de drieslag-matviews `tekst_object_consistentie_mv` /
+  `gio_referentie_consistentie_mv`.
+- R11 is geautomatiseerd op `p2p.tekst_element.inhoud` — een tekstheuristiek,
+  géén LLM (er zit nergens een LLM in de scorer).
+
+**Nog niet af:**
+- R13 is nog 100% handmatig — 1597 van 1597 bevindingen staan op "niet getoetst".
+- R36 (overlap-detectie via PostGIS) zit wél in de collector
+  (`collect_norm_overlaps`), maar staat uit in de pijplijn:
+  `ocd_orchestrator` zet `norm_overlaps = []` met de comment "PostGIS overlap is
+  slow". Gevolg: R36 meldt voor alle 52 regelingen met normen "geen overlap
+  gevonden" = voldoet, zonder dat de check ooit liep — een gratis pass.
+- R44 is voor 1468 van 1597 regelingen "niet getoetst" omdat
+  `naamInformatieObject` nog niet in OCD is geladen (loader + GIO-tak in de
+  naam-match vereist).
 
 ### bp-converter (gepland)
 

@@ -390,11 +390,13 @@ Bij 142 activiteiten = ~142-284 LLM-calls per gemeente.
 
 ## Integratie met odkwaliteit (annotatieconformiteit)
 
-De repo `c:\GIT\odkwaliteit` (OD-Kwaliteit) is een bestaand
-scoringssysteem dat 36 annotatierichtlijnen controleert en een gewogen
-kwaliteitsscore per omgevingsdocument oplevert. De architectuur is
-modulair: elke richtlijn is een Python-class met een `@register`
-decorator in `src/odkwaliteit/scoring/rules/`.
+De repo `c:\GIT\annotatieconformiteit.nl` (OD-Kwaliteit) is een bestaand
+scoringssysteem dat **45 richtlijnen** controleert — de 36 Geonovum-richtlijnen
+(cat. A–F) plus projecteigen cat. G (R37–R43, toepasbare regels) en H (R44–R45,
+ontbrekende referenties) — en een gewogen kwaliteitsscore per omgevingsdocument
+oplevert. De architectuur is modulair: elke richtlijn is een Python-class met een
+`@register` decorator in `src/odkwaliteit/scoring/rules/`. Het leest sinds
+medio 2026 rechtstreeks uit OCD (`collect --source ocd`, de default).
 
 ### Overlap met de checker
 
@@ -405,19 +407,25 @@ odkwaliteit raakt al aan toepasbare regels:
 | R14 | `activiteitregelkwalificatie` consistent met regeltype | Heuristiek op regeltype-ratio's |
 | R22 | Activiteiten met toepasbare regels onderaan hiërarchie | RTR-API check op leaf-level |
 
-Maar drie richtlijnen zijn **handmatig (M)** omdat ze inhoudelijke
-beoordeling vereisen:
+Drie richtlijnen vereisen inhoudelijke beoordeling. Stand 2026-07-30:
 
 | Richtlijn | Wat het zou moeten checken | Nu |
 |---|---|---|
-| R11 | Annoteer alleen wat in de tekst staat | Handmatig |
-| R13 | Activiteit helder voor viewer + toepasbare regels | Handmatig |
+| R11 | Annoteer alleen wat in de tekst staat | **Geautomatiseerd** — tekstheuristiek op `p2p.tekst_element.inhoud`, geen LLM (1191 van 1597 regelingen toetsbaar) |
+| R13 | Activiteit helder voor viewer + toepasbare regels | Handmatig — 1597/1597 "niet getoetst" |
 | R23 | Hiërarchieniveau raadplegen | Handmatig |
 
-Dit zijn precies de checks die de checker met LLM-extractie kan
-(deels) automatiseren.
+R13 en R23 zijn precies de checks die de checker met LLM-extractie
+(deels) kan automatiseren. R11 is inmiddels zonder LLM opgelost.
 
 ### Optie 1: Nieuwe categorie G in odkwaliteit
+
+> **Status 2026-07-30:** categorie G en H bestaan inmiddels in odkwaliteit, maar
+> met andere inhoud dan dit voorstel: R37–R43 gaan over *dekking* van toepasbare
+> regels (blad-activiteiten met TR, regelbestanden, TR-plichtige activiteiten,
+> dangling regelbeheerobjecten), niet over DMN-conditie-extractie. De
+> nummers R37–R43 zijn dus bezet — het onderstaande voorstel is nog steeds
+> onbenut, maar heeft nieuwe nummers nodig.
 
 Voeg een `f_toepasbare_regels.py` toe aan
 `src/odkwaliteit/scoring/rules/` met nieuwe richtlijnen:
