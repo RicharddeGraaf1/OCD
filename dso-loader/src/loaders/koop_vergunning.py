@@ -1265,7 +1265,12 @@ def _enrich_one_batch(limit: int,
                     "  postcode = COALESCE(postcode, %s), "
                     "  woonplaats = COALESCE(woonplaats, %s), "
                     "  type_besluit = COALESCE(%s, type_besluit), "
-                    "  type_besluit_bron = CASE WHEN %s IS NOT NULL "
+                    # Cast verplicht: in `%s IS NOT NULL` heeft de parameter geen
+                    # enkele type-context, dus Postgres weigert met
+                    # IndeterminateDatatype "could not determine data type of
+                    # parameter $11". De regel erboven ontsnapt daaraan omdat
+                    # COALESCE(%s, type_besluit) het kolomtype meegeeft.
+                    "  type_besluit_bron = CASE WHEN %s::text IS NOT NULL "
                     "                           THEN 'tekst' ELSE type_besluit_bron END, "
                     "  inhoud_geladen_at = now() "
                     "WHERE koop_id = %s",
