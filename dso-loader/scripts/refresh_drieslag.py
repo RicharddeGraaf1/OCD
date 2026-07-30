@@ -3,11 +3,17 @@ drieslag tekst↔object in de juiste volgorde.
 
 Gebruik: draai na een ingest of backfill die p2p.tekst_element,
 p2p.tekst_inline_referentie, p2p.gebiedsaanwijzing, p2p.activiteit,
-p2p.norm, p2p.locatie_basisgeo of p2p.gio_basisgeo wijzigt.
+p2p.norm, p2p.activiteit_locatieaanduiding, p2p.juridische_regel,
+p2p.locatie_basisgeo of p2p.gio_basisgeo wijzigt.
+
+Draait automatisch mee in fase 6 (post) van scripts/full_sync.py. Alleen
+`--skip-post` slaat 'm over; dan zijn de MV's hieronder verouderd.
 
 Volgorde:
   1. Niet-annoteerbaar markeren (recursive UPDATE op tekst_element)
   1b. REFRESH v2a.mv_element_hash (element→content-hash voor hertalingen, ~10s)
+  1c. REFRESH p2p.gio_locatie (GIO ↔ locatie-koppeling)
+  1d. REFRESH p2p.ala_punt (activiteit-op-locatie voor de punt-endpoints, ~2s)
   2. REFRESH p2p.naammatch_signaal (de duurste — 20-35 min)
   3. REFRESH p2p.naammatch_signaal_intra (~10s; hangt af van #2)
   4. REFRESH p2p.tekst_object_consistentie_mv (~30s; hangt af van #3)
@@ -36,6 +42,12 @@ STAPPEN = [
     ("REFRESH p2p.gio_locatie",
      "REFRESH MATERIALIZED VIEW CONCURRENTLY p2p.gio_locatie",
      "SELECT COUNT(*) AS n FROM p2p.gio_locatie"),
+    # ~2s. Voedt de punt-endpoints van de viewer (welke activiteiten gelden
+    # hier?). Verouderd deze niet mee, dan blijft de viewer oude activiteiten
+    # tonen zonder foutmelding — zie 2026-07-add-ala-punt-mv.sql.
+    ("REFRESH p2p.ala_punt",
+     "REFRESH MATERIALIZED VIEW CONCURRENTLY p2p.ala_punt",
+     "SELECT COUNT(*) AS n FROM p2p.ala_punt"),
     ("REFRESH p2p.naammatch_signaal",
      "REFRESH MATERIALIZED VIEW CONCURRENTLY p2p.naammatch_signaal",
      "SELECT COUNT(*) AS n FROM p2p.naammatch_signaal"),

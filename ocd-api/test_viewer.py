@@ -430,6 +430,44 @@ class TestObjecten:
         unieke_locaties = {f["properties"]["locatie_id"] for f in features}
         assert len(data["geometrieen"]) == len(unieke_locaties)
 
+    def test_ala_punt_matview_dekt_de_live_keten(self):
+        """De punt-endpoints lezen p2p.ala_punt in plaats van de live keten
+        ALA -> juridische_regel -> tekst_element. Deze test bewaakt dat die
+        matview hetzelfde antwoord geeft als die keten — de klassieke manier
+        waarop zo'n constructie stukgaat is dat hij niet ververst is na een
+        ingest, en dan zwijgt hij daarover.
+
+        Faalt hij? Draai `python scripts/refresh_drieslag.py` in dso-loader,
+        of los `REFRESH MATERIALIZED VIEW CONCURRENTLY p2p.ala_punt`.
+        """
+        from db import get_conn
+        with get_conn() as conn, conn.cursor() as cur:
+            punt = "ST_SetSRID(ST_MakePoint(%s, %s), 28992)"
+            cur.execute(f"""
+                SELECT DISTINCT ala.activiteit_id AS id
+                FROM p2p.activiteit_locatieaanduiding ala
+                JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
+                JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+                JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                    AND (te.regeling_expression = jr.regeling_expression
+                         OR jr.regeling_expression IS NULL)
+                WHERE ST_Intersects(ls.geometrie, {punt})""", (ZAAN_X, ZAAN_Y))
+            live = {r["id"] for r in cur.fetchall()}
+
+            cur.execute(f"""
+                SELECT DISTINCT ap.activiteit_id AS id
+                FROM p2p.locatie_subdiv ls
+                JOIN p2p.ala_punt ap ON ap.locatie_id = ls.identificatie
+                WHERE ST_Intersects(ls.geometrie, {punt})""", (ZAAN_X, ZAAN_Y))
+            mv = {r["id"] for r in cur.fetchall()}
+
+        assert live, "geen activiteiten op het testpunt — fixture klopt niet meer"
+        assert mv == live, (
+            f"ala_punt wijkt af van de live keten: "
+            f"{len(live - mv)} missend, {len(mv - live)} teveel. "
+            f"Waarschijnlijk niet ververst na een ingest."
+        )
+
     def test_zee_locatie_alleen_rijksobjecten(self):
         """Noordzee: alleen Rijks-gebiedsaanwijzingen, geen gemeentelijke."""
         r = client.get(f"/v1/viewer/objecten?x={ZEE_X}&y={ZEE_Y}")

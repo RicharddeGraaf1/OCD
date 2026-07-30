@@ -2158,26 +2158,17 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
         # Dedupliceer op opschrift: zelfde titel = zelfde regeling voor de
         # gebruiker, zelfs als er 340 expressions zijn (bv. Voorbeschermings-
         # regels hyperscale datacentra per gemeente). Pak de nieuwste expression.
-        # Vroeg ontdubbelen: het punt raakt ~14k ALA-rijen die naar maar ~12
-        # regelingen leiden. Door in twee CTE's eerst op juridische_regel_id en
-        # dan op regeling_expression te DISTINCT'en, dragen we die 14k rijen
-        # niet door de regeling-/bronhouder-join heen (was: 6,6M weggegooide
-        # join-rijen op een seq scan van core.bronhouder). Resultaat is
-        # bewezen identiek aan de oude query; ~0,58s -> ~0,23s warm.
+        # Leest p2p.ala_punt: daarin staat de regeling al per (locatie,
+        # activiteit) ontdubbeld, dus de keten ALA -> juridische_regel ->
+        # tekst_element is hier niet meer nodig. Was eerst een live keten van
+        # ~14k tussenrijen voor ~12 regelingen.
         cur.execute(
             """
-            WITH raak AS (
-                SELECT DISTINCT ala.juridische_regel_id
+            WITH expr AS (
+                SELECT DISTINCT ap.regeling_expression
                 FROM p2p.locatie_subdiv ls
-                JOIN p2p.activiteit_locatieaanduiding ala
-                       ON ala.locatie_id = ls.identificatie
+                JOIN p2p.ala_punt ap ON ap.locatie_id = ls.identificatie
                 WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
-            ), expr AS (
-                SELECT DISTINCT te.regeling_expression
-                FROM raak
-                JOIN p2p.juridische_regel jr ON jr.identificatie = raak.juridische_regel_id
-                JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-                    AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
             )
             SELECT DISTINCT ON (r.opschrift)
                 r.frbr_expression   AS expression,
@@ -3635,13 +3626,15 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
         # met alle regelingen + locatie_ids voor hover-highlight op de kaart.
         # 'meest-specifieke-wint': koepel-activiteiten waarvan een specifiekere
         # afstammeling óók op dit punt geldt vallen weg (zie _meest_specifiek_cte).
+        # Beide queries lezen p2p.ala_punt in plaats van de live keten
+        # ALA -> juridische_regel -> tekst_element -> regeling. Die keten sleepte
+        # ~13.700 tussenrijen mee om ~560 activiteiten op te leveren (297k
+        # buffers per klik); de matview heeft het antwoord al ontdubbeld.
+        # Zie dso-loader/scripts/2026-07-add-ala-punt-mv.sql.
         op_punt_sql = f"""
-            SELECT DISTINCT ala.activiteit_id AS id
-            FROM p2p.activiteit_locatieaanduiding ala
-            JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
-            JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-                AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
+            SELECT DISTINCT ap.activiteit_id AS id
+            FROM p2p.locatie_subdiv ls
+            JOIN p2p.ala_punt ap ON ap.locatie_id = ls.identificatie
             WHERE ST_Intersects(ls.geometrie, {point})
         """
         cur.execute(
@@ -3649,21 +3642,18 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
             WITH RECURSIVE {_meest_specifiek_cte(op_punt_sql)}
             SELECT a.naam,
                    a.groep,
-                   ala.kwalificatie,
+                   ap.kwalificatie,
                    ARRAY_AGG(DISTINCT r.opschrift) AS regelingen,
-                   ARRAY_AGG(DISTINCT ala.locatie_id) AS locatie_ids
-            FROM p2p.activiteit_locatieaanduiding ala
-            JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
-            JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
-            JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-                AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
-            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+                   ARRAY_AGG(DISTINCT ap.locatie_id) AS locatie_ids
+            FROM p2p.locatie_subdiv ls
+            JOIN p2p.ala_punt ap ON ap.locatie_id = ls.identificatie
+            JOIN p2p.activiteit a ON a.identificatie = ap.activiteit_id
+            JOIN p2p.regeling r ON r.frbr_expression = ap.regeling_expression
             WHERE ST_Intersects(ls.geometrie, {point})
               AND NOT r.inactief
               AND a.identificatie NOT IN (SELECT id FROM scaffolding)
-            GROUP BY a.naam, a.groep, ala.kwalificatie
-            ORDER BY a.groep, ala.kwalificatie, a.naam
+            GROUP BY a.naam, a.groep, ap.kwalificatie
+            ORDER BY a.groep, ap.kwalificatie, a.naam
             """,
             (x, y, x, y),
         )
@@ -3941,18 +3931,19 @@ def viewer_ala(
     # zodat de kaart-ALA-laag en het objecten-panel exact dezelfde activiteiten
     # tonen (geen koepels waarvan een specifiekere afstammeling ook geldt).
     # Scope = deze regeling (+ optioneel het punt), gelijk aan de hoofd-query.
+    # Leest p2p.ala_punt in plaats van de ALA -> juridische_regel ->
+    # tekst_element-keten; de scope-filter op de regeling zit daar al in als
+    # kolom. De hóófd-query hieronder houdt die keten wél nodig, want die
+    # levert per activiteit het artikel-label en de wId erbij.
     op_punt_ls_join = (
-        "JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id"
+        "JOIN p2p.locatie_subdiv ls ON ls.identificatie = ap.locatie_id"
         if loc_filter else ""
     )
     op_punt_sql = f"""
-        SELECT DISTINCT ala.activiteit_id AS id
-        FROM p2p.activiteit_locatieaanduiding ala
-        JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-        JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-                                 AND te.regeling_expression = %s
+        SELECT DISTINCT ap.activiteit_id AS id
+        FROM p2p.ala_punt ap
         {op_punt_ls_join}
-        WHERE TRUE {loc_filter}
+        WHERE ap.regeling_expression = %s {loc_filter}
     """
 
     with get_conn() as conn, conn.cursor() as cur:
