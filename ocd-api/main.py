@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import FileResponse, JSONResponse
 
 from antwoord_bij_vraag import router as antwoord_router
@@ -127,6 +128,12 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
         content={"detail": f"Rate limit exceeded: {exc.detail}"},
     )
 
+
+# Gzip op alle responses > 1 KB. De viewer-endpoints leveren GeoJSON, dat
+# 3-17x comprimeert (gemeten: /viewer/objecten 269 KB -> 15,5 KB,
+# /viewer/geometrie 3,4 MB -> 1,1 MB). Vóór CORS toegevoegd zodat CORS de
+# buitenste laag blijft en de headers ook op gecomprimeerde responses staan.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 app.add_middleware(
     CORSMiddleware,
@@ -2151,8 +2158,27 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
         # Dedupliceer op opschrift: zelfde titel = zelfde regeling voor de
         # gebruiker, zelfs als er 340 expressions zijn (bv. Voorbeschermings-
         # regels hyperscale datacentra per gemeente). Pak de nieuwste expression.
+        # Vroeg ontdubbelen: het punt raakt ~14k ALA-rijen die naar maar ~12
+        # regelingen leiden. Door in twee CTE's eerst op juridische_regel_id en
+        # dan op regeling_expression te DISTINCT'en, dragen we die 14k rijen
+        # niet door de regeling-/bronhouder-join heen (was: 6,6M weggegooide
+        # join-rijen op een seq scan van core.bronhouder). Resultaat is
+        # bewezen identiek aan de oude query; ~0,58s -> ~0,23s warm.
         cur.execute(
             """
+            WITH raak AS (
+                SELECT DISTINCT ala.juridische_regel_id
+                FROM p2p.locatie_subdiv ls
+                JOIN p2p.activiteit_locatieaanduiding ala
+                       ON ala.locatie_id = ls.identificatie
+                WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+            ), expr AS (
+                SELECT DISTINCT te.regeling_expression
+                FROM raak
+                JOIN p2p.juridische_regel jr ON jr.identificatie = raak.juridische_regel_id
+                JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                    AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
+            )
             SELECT DISTINCT ON (r.opschrift)
                 r.frbr_expression   AS expression,
                 r.opschrift         AS titel,
@@ -2160,15 +2186,10 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
                 r.bronhouder,
                 b.naam              AS bronhouder_naam,
                 b.bestuurslaag
-            FROM p2p.activiteit_locatieaanduiding ala
-            JOIN p2p.locatie_subdiv ls ON ls.identificatie = ala.locatie_id
-            JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-                AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
-            JOIN p2p.regeling r       ON r.frbr_expression = te.regeling_expression
-            JOIN core.bronhouder b    ON b.overheidscode = r.bronhouder
-            WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
-              AND NOT r.inactief
+            FROM expr
+            JOIN p2p.regeling r    ON r.frbr_expression = expr.regeling_expression
+            JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
+            WHERE NOT r.inactief
             ORDER BY r.opschrift, r.frbr_expression DESC
             """,
             (x, y),
@@ -3824,7 +3845,13 @@ def _viewer_geometrie(ids: list[str]) -> dict:
                    ga.type  AS ga_type,
                    ga.naam  AS ga_naam,
                    ga.groep AS ga_groep,
-                   ST_AsGeoJSON(l.geometrie)::json AS geometry
+                   -- 0 decimalen: geometrie staat in RD (EPSG:28992, meters),
+                   -- dus sub-meter-precisie is voor kaartweergave zinloos.
+                   -- Default is 9 decimalen; dat scheelt hier bijna een derde
+                   -- payload (3,44 MB -> 2,37 MB op een Utrechts omgevingsplan).
+                   -- NB: geen procent-teken in SQL-commentaar -- psycopg leest
+                   -- dat als placeholder en gooit ProgrammingError.
+                   ST_AsGeoJSON(l.geometrie, 0)::json AS geometry
             FROM p2p.locatie l
             LEFT JOIN p2p.gebiedsaanwijzing ga ON ga.locatie_id = l.identificatie
             WHERE l.identificatie = ANY(%s)
@@ -3890,6 +3917,19 @@ def viewer_ala(
     kwalificatie, en het artikel waar de ALA uit komt. Dit maakt het
     mogelijk om op de kaart te tonen waar welke activiteit met welke
     kwalificatie geldt — vergelijkbaar met "Regels op de kaart".
+
+    **Geometrie staat NIET inline op de features.** Veel activiteiten delen
+    dezelfde locatie — een Utrechts omgevingsplan levert 93 features die
+    allemaal naar hetzelfde ambtsgebied wijzen. Inline betekende dan 93
+    kopieën van dezelfde polygoon: 10,2 MB voor 4.900 unieke punten. Daarom
+    komt de geometrie één keer terug in `geometrieen` (locatie_id -> GeoJSON
+    geometry) en dragen de features alleen `properties.locatie_id`. Payload
+    wordt daarmee ~0,17 MB, en de client kan dezelfde geometrie-referentie
+    aan alle features hangen (scheelt ook parse- en geheugendruk in de kaart).
+
+    De client hydrateert: `feature.geometry = geometrieen[locatie_id]`.
+    Zie `GeometrieStore.laadAla` in de OCDviewer-frontend. Op dit moment is
+    die viewer de enige consument van dit endpoint.
     """
     loc_filter = ""
     loc_params: list = []
@@ -3926,8 +3966,9 @@ def viewer_ala(
                 ocd_artikel_label(te.opschrift, te.wid)        AS artikel,
                 te.wid              AS artikel_wid,
                 l.identificatie     AS locatie_id,
-                l.noemer            AS locatie_noemer,
-                ST_AsGeoJSON(l.geometrie)::json AS geometry
+                l.noemer            AS locatie_noemer
+                -- Geen geometrie hier: die zou per rij herhaald worden. Zie
+                -- de tweede query hieronder, die 'm eenmalig per locatie haalt.
             FROM p2p.activiteit_locatieaanduiding ala
             JOIN p2p.activiteit a        ON a.identificatie = ala.activiteit_id
             JOIN p2p.locatie l            ON l.identificatie = ala.locatie_id
@@ -3955,10 +3996,28 @@ def viewer_ala(
                     "locatie_id": row["locatie_id"],
                     "locatie_noemer": row["locatie_noemer"],
                 },
-                "geometry": row["geometry"],
+                # De client vult dit uit `geometrieen[locatie_id]`.
+                "geometry": None,
             }
             for row in cur.fetchall()
         ]
+
+        # Geometrie eenmalig per unieke locatie. Scheelt naast payload ook
+        # DB-werk: ST_AsGeoJSON draaide voorheen 93x op dezelfde polygoon.
+        locatie_ids = sorted({f["properties"]["locatie_id"] for f in features})
+        geometrieen: dict[str, dict] = {}
+        if locatie_ids:
+            cur.execute(
+                """
+                SELECT identificatie,
+                       -- 0 decimalen — RD is in meters, zie _viewer_geometrie.
+                       ST_AsGeoJSON(geometrie, 0)::json AS geometry
+                FROM p2p.locatie
+                WHERE identificatie = ANY(%s)
+                """,
+                (locatie_ids,),
+            )
+            geometrieen = {r["identificatie"]: r["geometry"] for r in cur.fetchall()}
 
         # Soft-flag (hide-first-audit G5): markeer of deze regeling-versie
         # verdrongen/ingetrokken is, zodat de kaart-ALA-laag kan badgen.
@@ -3967,7 +4026,12 @@ def viewer_ala(
         r = cur.fetchone()
         inactief = bool(r["inactief"]) if r else False
 
-    return {"type": "FeatureCollection", "features": features, "inactief": inactief}
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "geometrieen": geometrieen,
+        "inactief": inactief,
+    }
 
 
 @app.get("/v1/viewer/wro/{idn}/detail", dependencies=[Depends(verify_key)])
@@ -4010,7 +4074,8 @@ def viewer_wro_detail(
             SELECT po.identificatie, po.object_type, po.naam,
                    po.bestemmingshoofdgroep, po.artikelnummer,
                    po.maatvoering_info,
-                   ST_AsGeoJSON(po.geometrie)::json AS geometry
+                   -- 0 decimalen — RD is in meters, zie _viewer_geometrie.
+                   ST_AsGeoJSON(po.geometrie, 0)::json AS geometry
             FROM wro.planobject po
             WHERE po.instrument_idn = %s {loc_filter}
             ORDER BY po.object_type, po.naam

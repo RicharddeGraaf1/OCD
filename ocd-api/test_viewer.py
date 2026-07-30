@@ -401,6 +401,35 @@ class TestObjecten:
         verschil = kaart_namen - panel
         assert not verschil, f"Kaart toont activiteiten die het panel verbergt: {verschil}"
 
+    def test_ala_geometrie_is_ontdubbeld(self):
+        """De ALA-response draagt geometrie ontdubbeld in `geometrieen`, niet
+        inline per feature. Veel activiteiten delen dezelfde locatie (vaak het
+        ambtsgebied); inline betekende tientallen kopieën van dezelfde polygoon
+        — 10,2 MB op het Utrechtse omgevingsplan. De client hydrateert via
+        properties.locatie_id."""
+        regs = client.get(f"/v1/viewer/regelingen?x={ZAAN_X}&y={ZAAN_Y}").json()["regelingen"]
+        op = next((r for r in regs if "omgevingsplan" in r["titel"].lower()), None)
+        if op is None:
+            pytest.skip("Geen omgevingsplan op dit punt")
+        data = client.get(
+            f"/v1/viewer/regeling/{op['expression']}/ala?x={ZAAN_X}&y={ZAAN_Y}").json()
+
+        assert "geometrieen" in data
+        features = data["features"]
+        assert len(features) > 0
+
+        # Geen inline geometrie meer.
+        assert all(f["geometry"] is None for f in features)
+
+        # Elke feature is te hydrateren: locatie_id staat in geometrieen.
+        for f in features:
+            loc_id = f["properties"]["locatie_id"]
+            assert loc_id in data["geometrieen"], f"geometrie ontbreekt voor {loc_id}"
+
+        # Ontdubbeld: nooit meer geometrieën dan unieke locaties.
+        unieke_locaties = {f["properties"]["locatie_id"] for f in features}
+        assert len(data["geometrieen"]) == len(unieke_locaties)
+
     def test_zee_locatie_alleen_rijksobjecten(self):
         """Noordzee: alleen Rijks-gebiedsaanwijzingen, geen gemeentelijke."""
         r = client.get(f"/v1/viewer/objecten?x={ZEE_X}&y={ZEE_Y}")
