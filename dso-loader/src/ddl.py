@@ -1063,6 +1063,21 @@ ALTER TABLE vth.vergunningkennisgeving
     -- Maakt de reclassificatie auditeerbaar en terugdraaibaar.
     ADD COLUMN IF NOT EXISTS type_besluit_bron   TEXT;
 
+-- De CHECK hierboven staat in de CREATE TABLE en raakt dus alleen NIEUWE DB's.
+-- Bestaande DB's (prod!) houden de oude, smallere lijst en weigeren
+-- buiten_behandeling/vergunningvrij. Daarom hier idempotent herzetten, zodat
+-- KOOP_DDL alléén al volstaat om een bestaande DB bij te trekken.
+ALTER TABLE vth.vergunningkennisgeving
+    DROP CONSTRAINT IF EXISTS vergunningkennisgeving_type_besluit_check;
+ALTER TABLE vth.vergunningkennisgeving
+    ADD CONSTRAINT vergunningkennisgeving_type_besluit_check
+    CHECK (type_besluit IS NULL OR type_besluit IN (
+        'aanvraag', 'verleend', 'geweigerd', 'ontwerp',
+        'van_rechtswege', 'ingetrokken', 'verlenging_beslistermijn',
+        'melding', 'melding_geaccepteerd', 'kennisgeving',
+        'rectificatie', 'overig', 'buiten_behandeling', 'vergunningvrij'
+    ));
+
 CREATE INDEX IF NOT EXISTS idx_vk_bg_datum
     ON vth.vergunningkennisgeving (bg_naam, datum_publicatie DESC);
 CREATE INDEX IF NOT EXISTS idx_vk_datum
