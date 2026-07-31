@@ -366,6 +366,47 @@ Zie `docs/toepasbare-regel-checker.md`.
 
 ---
 
+## Databaseconfiguratie
+
+Niet-standaard instellingen op `dso-postgis`. Ze staan in
+`postgresql.auto.conf` in PGDATA (gezet via `ALTER SYSTEM`) en overleven
+daarmee een herstart en het opnieuw aanmaken van de container op hetzelfde
+volume. **Ze overleven geen verse database of een restore naar een nieuw
+volume** — de container draait op een kale `docker run` zonder
+compose-bestand, dus er is niets dat ze automatisch terugzet. Bij een nieuwe
+database: opnieuw zetten.
+
+| Instelling | Waarde | Default | Sinds |
+|---|---|---|---|
+| `client_connection_check_interval` | `10s` | `0` (uit) | 2026-07-31 |
+
+```sql
+ALTER SYSTEM SET client_connection_check_interval = '10s';
+SELECT pg_reload_conf();
+```
+
+### Waarom `client_connection_check_interval`
+
+Postgres breekt een lopende query **niet** af als de client wegvalt. Sterft
+het aanroepende proces — handmatig gestopt, sessie afgebroken, script
+opnieuw gestart — dan rekent de backend door tot hij klaar is of expliciet
+gecanceld wordt. Op 2026-07-31 hielden twee zulke weesquery's ruim zes uur
+lang drie cores bezet (R36-overlapcheck vanuit odkwaliteit, client allang
+verdwenen). Met deze instelling kijkt de server tijdens het uitvoeren
+periodiek of de socket er nog is en breekt hij binnen ~10 seconden af.
+Alleen ondersteund op Linux; de container draait Debian, dus dat is rond.
+
+Bewust **géén** `statement_timeout` op database- of serverniveau: alles
+verbindt als dezelfde superuser `postgres` (loaders, API, bot, odkwaliteit,
+psql). Een timeout die streng genoeg is om weesquery's te vangen, breekt ook
+een legitieme `REFRESH MATERIALIZED VIEW` af. Een timeout ziet het verschil
+niet tussen "zwaar maar gewild" en "niemand luistert nog"; deze knop wel.
+Een `statement_timeout` hoort daarom in de applicatie, waar de verwachte
+duur van de query bekend is — zoals `OcdCollector.STATEMENT_TIMEOUT` (600s)
+en `NORM_OVERLAP_TIMEOUT` (120s) in odkwaliteit.
+
+---
+
 ## Technische stack
 
 | Component | Technologie |
