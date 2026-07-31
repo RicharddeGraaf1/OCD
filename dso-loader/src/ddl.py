@@ -696,6 +696,83 @@ CREATE OR REPLACE VIEW p2pwijziging.ontwerp AS
 CREATE OR REPLACE VIEW p2pwijziging.besluitversie AS
   SELECT * FROM p2pwijziging.besluit WHERE soort = 'besluitversie';
 
+-- Juridische regel delta + bindingen (fase 1 sub 1.0).
+-- Zonder deze tabellen kunnen we voor een annotatie-delta niet afleiden
+-- aan welk artikel hij hangt — vooral bij binding-only-wijzigingen, waar
+-- er géén tekst_element-delta is die de artikel-context geeft. Zie
+-- 2026-07-add-juridische-regel-delta.sql voor motivatie en design-keuzes.
+CREATE TABLE IF NOT EXISTS p2pwijziging.juridische_regel_delta (
+    identificatie        TEXT NOT NULL,
+    ontwerpbesluit_id    TEXT NOT NULL
+        REFERENCES p2pwijziging.besluit(ontwerpbesluit_id) ON DELETE CASCADE,
+    regeltekst_wid       TEXT NOT NULL,
+    PRIMARY KEY (identificatie, ontwerpbesluit_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pw_jr_besluit
+    ON p2pwijziging.juridische_regel_delta(ontwerpbesluit_id);
+CREATE INDEX IF NOT EXISTS idx_pw_jr_wid
+    ON p2pwijziging.juridische_regel_delta(regeltekst_wid);
+
+CREATE TABLE IF NOT EXISTS p2pwijziging.juridische_regel_activiteit_delta (
+    id                             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ontwerpbesluit_id              TEXT NOT NULL
+        REFERENCES p2pwijziging.besluit(ontwerpbesluit_id) ON DELETE CASCADE,
+    juridische_regel_identificatie TEXT NOT NULL,
+    activiteit_identificatie       TEXT NOT NULL,
+    locatie_identificatie          TEXT,
+    bewerking                      TEXT NOT NULL
+        CHECK (bewerking IN ('toevoegen', 'wijzigen', 'verwijderen')),
+    UNIQUE (ontwerpbesluit_id, juridische_regel_identificatie,
+            activiteit_identificatie, locatie_identificatie),
+    FOREIGN KEY (juridische_regel_identificatie, ontwerpbesluit_id)
+        REFERENCES p2pwijziging.juridische_regel_delta(identificatie, ontwerpbesluit_id)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_pw_jr_act_besluit
+    ON p2pwijziging.juridische_regel_activiteit_delta(ontwerpbesluit_id);
+CREATE INDEX IF NOT EXISTS idx_pw_jr_act_activiteit
+    ON p2pwijziging.juridische_regel_activiteit_delta(activiteit_identificatie);
+CREATE INDEX IF NOT EXISTS idx_pw_jr_act_locatie
+    ON p2pwijziging.juridische_regel_activiteit_delta(locatie_identificatie)
+    WHERE locatie_identificatie IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS p2pwijziging.juridische_regel_norm_delta (
+    id                             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ontwerpbesluit_id              TEXT NOT NULL
+        REFERENCES p2pwijziging.besluit(ontwerpbesluit_id) ON DELETE CASCADE,
+    juridische_regel_identificatie TEXT NOT NULL,
+    norm_identificatie             TEXT NOT NULL,
+    bewerking                      TEXT NOT NULL
+        CHECK (bewerking IN ('toevoegen', 'wijzigen', 'verwijderen')),
+    UNIQUE (ontwerpbesluit_id, juridische_regel_identificatie, norm_identificatie),
+    FOREIGN KEY (juridische_regel_identificatie, ontwerpbesluit_id)
+        REFERENCES p2pwijziging.juridische_regel_delta(identificatie, ontwerpbesluit_id)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_pw_jr_norm_besluit
+    ON p2pwijziging.juridische_regel_norm_delta(ontwerpbesluit_id);
+CREATE INDEX IF NOT EXISTS idx_pw_jr_norm_norm
+    ON p2pwijziging.juridische_regel_norm_delta(norm_identificatie);
+
+CREATE TABLE IF NOT EXISTS p2pwijziging.juridische_regel_gebiedsaanwijzing_delta (
+    id                             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ontwerpbesluit_id              TEXT NOT NULL
+        REFERENCES p2pwijziging.besluit(ontwerpbesluit_id) ON DELETE CASCADE,
+    juridische_regel_identificatie TEXT NOT NULL,
+    gebiedsaanwijzing_identificatie TEXT NOT NULL,
+    bewerking                      TEXT NOT NULL
+        CHECK (bewerking IN ('toevoegen', 'wijzigen', 'verwijderen')),
+    UNIQUE (ontwerpbesluit_id, juridische_regel_identificatie,
+            gebiedsaanwijzing_identificatie),
+    FOREIGN KEY (juridische_regel_identificatie, ontwerpbesluit_id)
+        REFERENCES p2pwijziging.juridische_regel_delta(identificatie, ontwerpbesluit_id)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_pw_jr_ga_besluit
+    ON p2pwijziging.juridische_regel_gebiedsaanwijzing_delta(ontwerpbesluit_id);
+CREATE INDEX IF NOT EXISTS idx_pw_jr_ga_ga
+    ON p2pwijziging.juridische_regel_gebiedsaanwijzing_delta(gebiedsaanwijzing_identificatie);
+
 -- =============================================================
 -- v2a.* — Vraag-tot-antwoord: viewer-aggregaties
 -- =============================================================
