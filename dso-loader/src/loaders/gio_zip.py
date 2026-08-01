@@ -230,6 +230,55 @@ def extract_gio_naam(zip_path: Path) -> dict[str, str]:
     return mapping
 
 
+def extract_gio_naam_informatieobject(zip_path: Path) -> dict[str, str]:
+    """Parse de Download-ZIP → {gio_frbr: naamInformatieObject}.
+
+    De officiële `naamInformatieObject` staat in `IO-<uuid>/Metadata.xml`
+    (InformatieObjectMetadata), niet in de GML. De GML in dezelfde IO-map levert
+    de FRBR-expression. We koppelen op mapnaam: per IO-map de FRBR uit de .gml en
+    de naam uit Metadata.xml.
+
+    I.t.t. `extract_gio_naam` (gesynthetiseerd label) is dit de schone,
+    enkelvoudige naam, geschikt voor naam-match.
+    """
+    z = zipfile.ZipFile(zip_path)
+
+    # 1. folder → frbr (uit de .gml's)
+    folder_frbr: dict[str, str] = {}
+    for name in z.namelist():
+        if not name.endswith(".gml"):
+            continue
+        try:
+            root = etree.parse(z.open(name), _TOLERANT_PARSER).getroot()
+        except etree.XMLSyntaxError:
+            continue
+        if not root.tag.endswith("}GeoInformatieObjectVaststelling"):
+            continue
+        frbr_el = root.find(
+            "geo:vastgesteldeVersie/geo:GeoInformatieObjectVersie/geo:FRBRExpression", NS
+        )
+        if frbr_el is not None and frbr_el.text:
+            folder_frbr[name.rsplit("/", 1)[0]] = frbr_el.text.strip()
+
+    # 2. frbr → naamInformatieObject (uit Metadata.xml in dezelfde folder)
+    data_ns = "https://standaarden.overheid.nl/stop/imop/data/"
+    mapping: dict[str, str] = {}
+    for name in z.namelist():
+        if not name.endswith("/Metadata.xml"):
+            continue
+        frbr = folder_frbr.get(name.rsplit("/", 1)[0])
+        if not frbr:
+            continue
+        try:
+            root = etree.parse(z.open(name), _TOLERANT_PARSER).getroot()
+        except etree.XMLSyntaxError:
+            continue
+        el = root.find(f"{{{data_ns}}}naamInformatieObject")
+        if el is not None and el.text and el.text.strip():
+            mapping[frbr] = el.text.strip()
+    return mapping
+
+
 # ── DB-updates ───────────────────────────────────────────────────────
 
 def update_locatie_basisgeo(conn, rows: list[tuple[str, str]]) -> int:
@@ -270,7 +319,8 @@ def update_gio_basisgeo(conn, rows: list[tuple[str, str]]) -> int:
 
 def insert_missing_gios(conn, gio_rows: list[tuple[str, str]],
                          regeling_expression: str | None = None,
-                         naam_map: dict[str, str] | None = None) -> int:
+                         naam_map: dict[str, str] | None = None,
+                         naam_io_map: dict[str, str] | None = None) -> int:
     """Vul p2p.geo_informatieobject aan met GIO-FRBRs uit de ZIP die nog
     niet bekend zijn uit ExtIoRef.target_ref (optie A).
 
@@ -287,6 +337,7 @@ def insert_missing_gios(conn, gio_rows: list[tuple[str, str]],
     if not gio_rows:
         return 0
     naam_map = naam_map or {}
+    naam_io_map = naam_io_map or {}
     unique_frbrs = {frbr for frbr, _ in gio_rows}
     inserted = 0
     with conn.cursor() as cur:
@@ -294,14 +345,19 @@ def insert_missing_gios(conn, gio_rows: list[tuple[str, str]],
             # RETURNING (xmax = 0) onderscheidt een echte INSERT (xmax 0) van
             # een DO UPDATE op een bestaande rij, zodat de telling alleen
             # nieuwe GIO's telt en niet de naam-backfill van bekende rijen.
+            # naam_informatieobject is autoritatief → altijd overschrijven
+            # (COALESCE op EXCLUDED zodat een ontbrekende naam de bestaande niet wist).
             cur.execute(
                 """INSERT INTO p2p.geo_informatieobject
-                     (frbr_expression, frbr_work, regeling_expression, naam)
-                   VALUES (%s, %s, %s, %s)
+                     (frbr_expression, frbr_work, regeling_expression, naam, naam_informatieobject)
+                   VALUES (%s, %s, %s, %s, %s)
                    ON CONFLICT (frbr_expression) DO UPDATE
-                     SET naam = COALESCE(p2p.geo_informatieobject.naam, EXCLUDED.naam)
+                     SET naam = COALESCE(p2p.geo_informatieobject.naam, EXCLUDED.naam),
+                         naam_informatieobject = COALESCE(EXCLUDED.naam_informatieobject,
+                                                          p2p.geo_informatieobject.naam_informatieobject)
                    RETURNING (xmax = 0) AS was_insert""",
-                (frbr, frbr.split("@")[0], regeling_expression, naam_map.get(frbr)),
+                (frbr, frbr.split("@")[0], regeling_expression,
+                 naam_map.get(frbr), naam_io_map.get(frbr)),
             )
             row = cur.fetchone()
             if row and row["was_insert"]:
@@ -324,7 +380,8 @@ def process_zip(zip_path: Path, conn=None,
         loc_rows = build_locatie_basisgeo_rows(zip_path)
         gio_rows = extract_gio_basisgeo(zip_path)
         naam_map = extract_gio_naam(zip_path)
-        new_gios = insert_missing_gios(conn, gio_rows, regeling_expression, naam_map)
+        naam_io_map = extract_gio_naam_informatieobject(zip_path)
+        new_gios = insert_missing_gios(conn, gio_rows, regeling_expression, naam_map, naam_io_map)
         loc_inserted = update_locatie_basisgeo(conn, loc_rows)
         gio_inserted = update_gio_basisgeo(conn, gio_rows)
         conn.commit()

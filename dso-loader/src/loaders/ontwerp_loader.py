@@ -33,10 +33,31 @@ DOC_EMBED_KEY = {
 # Renvooi-stijl is detecteerbaar uit de listing zelf: een echte delta heeft
 # een link naar de versie waarop hij voortbouwt. Een vervangRegeling-stijl
 # besluit heeft die link niet — het hele document is dan "nieuw".
+# Dezelfde link levert (na een extra fetch) de basis-expression waarop het
+# ontwerp voortbouwt — die slaan we op als `wijzigt_expression` zodat de
+# viewer verouderde ontwerpen kan uitfilteren zodra hun basis is ingehaald.
 VERVANG_LINK = {
     "ontwerp": "beoogdeOpvolgerVan",
     "besluitversie": "wijzigtRegelingversie",
 }
+
+
+def _fetch_basis_expression(href: str | None) -> str | None:
+    """Volg beoogdeOpvolgerVan/wijzigtRegelingversie en lees `expressionId`
+    van de basis-versie waarop dit ontwerp/besluit voortbouwt.
+
+    None → link ontbrak (vervang-regeling; besluit heeft geen basis) of
+    fetch faalde. In het laatste geval blijft `wijzigt_expression` NULL,
+    waardoor de viewer-A1-check het ontwerp filtert — wat correct is,
+    want zonder bekende basis kunnen we z'n deltas niet interpreteren."""
+    if not href:
+        return None
+    try:
+        data = _get(href)
+        return data.get("expressionId")
+    except Exception as e:
+        console.print(f"      [yellow]basis-fetch faalde ({href[:80]}...): {e}[/yellow]")
+        return None
 
 
 def _get(url: str, params: dict | None = None, max_retries: int = 3) -> dict:
@@ -205,6 +226,113 @@ def _store_annotaties(cur, ontwerpbesluit_id: str, annotaties: dict):
             """, (ontwerpbesluit_id, db_type, ident, bewerking, naam, Jsonb(item)))
 
 
+def _store_juridische_regel_deltas(cur, ontwerpbesluit_id: str, annotaties: dict) -> int:
+    """Vul juridische_regel_delta + drie binding-tabellen vanuit de
+    Presenteren-annotatie-payload. Fase 1 sub 1.1.
+
+    Alleen regels met een expliciete `_delta.bewerking` zijn echte
+    wijzigingen — de Presenteren-response bevat ook onveranderde regels
+    als context. Regels zonder _delta worden overgeslagen (anders zou
+    de tabel groeien met tienduizenden ongewijzigde rijen die de artikel-
+    aggregatie zouden vervuilen).
+
+    Voor bindings binnen een gewijzigde regel wordt de bewerking van de
+    regel zelf overgenomen. Semantisch is dat 'onderdeel van gewijzigde
+    bindings-set'. Een precieze per-binding diff tegen p2p.juridische_regel_*
+    voor toevoegen/verwijderen komt in een latere sub-fase — voor de
+    artikel-aggregatie is 'regel wijzigt, deze binding hoort erbij' al
+    voldoende signaal.
+
+    Return: aantal regels ingest (voor logging)."""
+    # regeltekstRef (IMOW-identificatie) → wid (STOP tekst-element wId).
+    # De mapping bouwen we uit alle regeltekst-annotaties in deze response;
+    # elke juridische_regel wijst met regeltekstRef naar één van die IDs.
+    wid_by_ref: dict[str, str] = {}
+    for rt in annotaties.get("regelteksten", []) or []:
+        ident = rt.get("identificatie")
+        wid = rt.get("wId")
+        if ident and wid:
+            wid_by_ref[ident] = wid
+
+    # Wis bestaande delta's voor deze besluit — cascade schoont bindingen.
+    cur.execute(
+        "DELETE FROM p2pwijziging.juridische_regel_delta WHERE ontwerpbesluit_id = %s",
+        (ontwerpbesluit_id,),
+    )
+
+    # De juridische_regel-annotaties zitten verdeeld over drie type-buckets
+    # in de Presenteren-response — behandelen we uniform.
+    regel_buckets = ("regelsVoorIedereen", "instructieregels", "omgevingswaarderegels")
+    count = 0
+    for bucket in regel_buckets:
+        for regel in annotaties.get(bucket, []) or []:
+            delta = regel.get("_delta")
+            if not delta:
+                continue  # ongewijzigde regel — geen delta-rij
+            bewerking = delta.get("bewerking", "toevoegen")
+
+            regel_id = regel.get("identificatie")
+            regeltekst_ref = regel.get("regeltekstRef")
+            wid = wid_by_ref.get(regeltekst_ref) if regeltekst_ref else None
+            if not regel_id or not wid:
+                # Zonder regel-id of wid kunnen we later niet aan een artikel
+                # koppelen — regel skippen i.p.v. gebrekkig rij achterlaten.
+                continue
+
+            cur.execute("""
+                INSERT INTO p2pwijziging.juridische_regel_delta
+                    (identificatie, ontwerpbesluit_id, regeltekst_wid)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (identificatie, ontwerpbesluit_id) DO NOTHING
+            """, (regel_id, ontwerpbesluit_id, wid))
+            count += 1
+
+            # Activiteit-bindingen (RegelVoorIedereen). Elke binding heeft
+            # activiteitRef + locatieRefs (array — één activiteit kan aan
+            # meerdere locaties koppelen binnen dezelfde regel). Kwalificatie
+            # is optioneel en niet in dit schema opgeslagen (bewerking is
+            # voldoende signaal voor de artikel-aggregatie).
+            for ala in regel.get("activiteitLocatieaanduidingen", []) or []:
+                act_ref = ala.get("activiteitRef")
+                if not act_ref:
+                    continue
+                loc_refs = ala.get("locatieRefs") or [None]
+                for loc_ref in loc_refs:
+                    cur.execute("""
+                        INSERT INTO p2pwijziging.juridische_regel_activiteit_delta
+                            (ontwerpbesluit_id, juridische_regel_identificatie,
+                             activiteit_identificatie, locatie_identificatie, bewerking)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                    """, (ontwerpbesluit_id, regel_id, act_ref, loc_ref, bewerking))
+
+            # Norm-bindingen (Omgevingswaardegel + Instructieregel op normen).
+            # Zowel omgevingsnormRefs als omgevingswaardeRefs vallen semantisch
+            # onder onze `juridische_regel_norm_delta` — beide zijn norm-objecten
+            # gekoppeld aan een regel via dezelfde relatie in p2p.
+            for ref in (regel.get("omgevingsnormRefs") or []) + \
+                       (regel.get("omgevingswaardeRefs") or []):
+                cur.execute("""
+                    INSERT INTO p2pwijziging.juridische_regel_norm_delta
+                        (ontwerpbesluit_id, juridische_regel_identificatie,
+                         norm_identificatie, bewerking)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                """, (ontwerpbesluit_id, regel_id, ref, bewerking))
+
+            # Gebiedsaanwijzing-bindingen.
+            for ref in regel.get("gebiedsaanwijzingRefs", []) or []:
+                cur.execute("""
+                    INSERT INTO p2pwijziging.juridische_regel_gebiedsaanwijzing_delta
+                        (ontwerpbesluit_id, juridische_regel_identificatie,
+                         gebiedsaanwijzing_identificatie, bewerking)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                """, (ontwerpbesluit_id, regel_id, ref, bewerking))
+
+    return count
+
+
 def _store_locaties(cur, ontwerpbesluit_id: str, locaties: list,
                      fetch_geometry: bool = False):
     """Sla locatie-delta's op. Geometrie wordt default NIET opgehaald
@@ -358,9 +486,13 @@ def load_ontwerp(item: dict, conn: psycopg.Connection) -> str | None:
 
     # Renvooi vs vervangRegeling: een echt wijzigingsontwerp heeft een
     # _links.beoogdeOpvolgerVan; ontbreekt die, dan vervangt het besluit
-    # de hele regeling.
+    # de hele regeling. Bij een renvooi haalt de link ook de basis-
+    # expression (waarop dit ontwerp voortbouwt) — nodig voor de
+    # viewer-A1-filter die verouderde ontwerpen verbergt.
     links = item.get("_links", {}) or {}
     is_vervang = VERVANG_LINK["ontwerp"] not in links
+    basis_href = (links.get("beoogdeOpvolgerVan") or {}).get("href") if not is_vervang else None
+    basis_expression = _fetch_basis_expression(basis_href)
 
     with conn.cursor() as cur:
         cur.execute("""
@@ -378,7 +510,7 @@ def load_ontwerp(item: dict, conn: psycopg.Connection) -> str | None:
                 is_vervang_regeling = EXCLUDED.is_vervang_regeling,
                 beschikbaar_op = NOW()
         """, (ontwerpbesluit_id, item.get("technischId"),
-              item.get("identificatie"), expression_id, expression_id,
+              item.get("identificatie"), basis_expression, expression_id,
               bekend_op, ontvangen_op, bronhouder_code,
               item.get("type", {}).get("waarde"),
               item.get("opschrift"), item.get("citeerTitel"),
@@ -412,6 +544,7 @@ def load_ontwerp(item: dict, conn: psycopg.Connection) -> str | None:
             try:
                 ann_data = _get(ann_url)
                 _store_annotaties(cur, ontwerpbesluit_id, ann_data)
+                _store_juridische_regel_deltas(cur, ontwerpbesluit_id, ann_data)
                 _store_locaties(cur, ontwerpbesluit_id, ann_data.get("locaties", []))
             except Exception as e:
                 import traceback
@@ -446,9 +579,14 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
 
     # Renvooi vs vervangRegeling: een besluit dat een bestaande regeling
     # wijzigt heeft een _links.wijzigtRegelingversie; ontbreekt die,
-    # dan is het een vervang-besluit (volledig nieuwe regeling).
+    # dan is het een vervang-besluit (volledig nieuwe regeling). Bij een
+    # renvooi haalt de link ook de basis-expression waarop dit besluit
+    # voortbouwt — wordt opgeslagen als `wijzigt_expression` voor de
+    # viewer-A1-filter (verouderde ontwerpen verbergen).
     links = item.get("_links", {}) or {}
     is_vervang = VERVANG_LINK["besluitversie"] not in links
+    basis_href = (links.get("wijzigtRegelingversie") or {}).get("href") if not is_vervang else None
+    basis_expression = _fetch_basis_expression(basis_href)
 
     with conn.cursor() as cur:
         cur.execute("""
@@ -469,7 +607,7 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
                 is_vervang_regeling = EXCLUDED.is_vervang_regeling,
                 beschikbaar_op = NOW()
         """, (besluit_id, technisch_id, item.get("identificatie"),
-              instrumentversie, expression_id,
+              basis_expression, expression_id,
               bekend_op, ontvangen_op, begin_geldigheid, begin_inwerking,
               item.get("eindverantwoordelijke"), bronhouder_code,
               item.get("type", {}).get("waarde"),
@@ -499,6 +637,7 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
             try:
                 ann_data = _get(ann_url)
                 _store_annotaties(cur, besluit_id, ann_data)
+                _store_juridische_regel_deltas(cur, besluit_id, ann_data)
                 _store_locaties(cur, besluit_id, ann_data.get("locaties", []))
             except Exception as e:
                 console.print(f"      [red]annotaties faalden: {e}[/red]")

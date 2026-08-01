@@ -11,8 +11,60 @@ from unittest.mock import MagicMock
 from src.loaders.gio_zip import (
     extract_gio_geometrie_ids,
     extract_gio_naam,
+    extract_gio_naam_informatieobject,
     update_geo_informatieobject_gids,
 )
+
+_GEO_NS = "https://standaarden.overheid.nl/stop/imop/geo/"
+_DATA_NS = "https://standaarden.overheid.nl/stop/imop/data/"
+
+
+def _build_download_zip(tmp_path: Path, gios: dict[str, tuple[str, str]]) -> Path:
+    """Bouw een mini-Download-ZIP. gios = {io_folder: (frbr, naamInformatieObject)}.
+
+    Per GIO een IO-<folder>/geom.gml (GeoInformatieObjectVaststelling + FRBR) en
+    een IO-<folder>/Metadata.xml (InformatieObjectMetadata + naamInformatieObject).
+    """
+    zip_path = tmp_path / "download.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        for folder, (frbr, naam) in gios.items():
+            z.writestr(
+                f"{folder}/geom.gml",
+                f'<geo:GeoInformatieObjectVaststelling xmlns:geo="{_GEO_NS}">'
+                f"<geo:vastgesteldeVersie><geo:GeoInformatieObjectVersie>"
+                f"<geo:FRBRExpression>{frbr}</geo:FRBRExpression>"
+                f"</geo:GeoInformatieObjectVersie></geo:vastgesteldeVersie>"
+                f"</geo:GeoInformatieObjectVaststelling>",
+            )
+            naam_xml = (f"<naamInformatieObject>{naam}</naamInformatieObject>"
+                        if naam is not None else "")
+            z.writestr(
+                f"{folder}/Metadata.xml",
+                f'<InformatieObjectMetadata xmlns="{_DATA_NS}">{naam_xml}'
+                f"</InformatieObjectMetadata>",
+            )
+    return zip_path
+
+
+class TestExtractGioNaamInformatieObject:
+    def test_koppelt_frbr_aan_naam_via_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = _build_download_zip(Path(tmp), {
+                "IO-aaa": ("/join/id/regdata/gm0014/2024/Centrumgebied/nld@1;1", "Centrumgebied"),
+                "IO-bbb": ("/join/id/regdata/gm0014/2024/Voetpaden/nld@1;1", "voetpaden"),
+            })
+            result = extract_gio_naam_informatieobject(zip_path)
+            assert result == {
+                "/join/id/regdata/gm0014/2024/Centrumgebied/nld@1;1": "Centrumgebied",
+                "/join/id/regdata/gm0014/2024/Voetpaden/nld@1;1": "voetpaden",
+            }
+
+    def test_gio_zonder_naam_blijft_weg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = _build_download_zip(Path(tmp), {
+                "IO-ccc": ("/join/id/regdata/gm0014/2024/Naamloos/nld@1;1", None),
+            })
+            assert extract_gio_naam_informatieobject(zip_path) == {}
 
 # Pad naar de Gemeentestad-voorbeeldbestanden in de vault
 VAULT_OPDRACHT = Path(

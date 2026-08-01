@@ -719,3 +719,24 @@ class TestWijzigingen:
         r = client.get(_wijz_url(GM0353_EXPR))
         for w in r.json()["wijzigingen"]:
             assert w["isVervangRegeling"] is False
+
+    def test_verouderd_default_verborgen(self):
+        """Ontwerpen met een wijzigt_expression die niet meer in p2p.regeling
+        staat (basis is ingehaald) worden default weggefilterd; het aantal
+        verborgen komt via `verouderdVerborgen` mee."""
+        r = client.get(_wijz_url(GM0353_EXPR))
+        data = r.json()
+        assert "verouderdVerborgen" in data
+        assert data["verouderdVerborgen"] >= 1, \
+            "gm0353 heeft bekend verouderde ontwerpen — filter zou > 0 moeten geven"
+
+    def test_include_verouderd_toont_alles(self):
+        """Met include_verouderd=true zijn de verouderde ontwerpen weer zichtbaar
+        en is de teller 0."""
+        r_zonder = client.get(_wijz_url(GM0353_EXPR))
+        r_met    = client.get(_wijz_url(GM0353_EXPR) + "?include_verouderd=true")
+        d_zonder = r_zonder.json()
+        d_met    = r_met.json()
+        assert d_met["verouderdVerborgen"] == 0
+        assert len(d_met["wijzigingen"]) == \
+               len(d_zonder["wijzigingen"]) + d_zonder["verouderdVerborgen"]

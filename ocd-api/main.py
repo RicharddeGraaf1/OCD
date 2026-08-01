@@ -4348,14 +4348,147 @@ def _row_to_tekst_element(r: dict) -> dict:
     }
 
 
-def _row_to_annotatie_delta(r: dict) -> dict:
+def _row_to_annotatie_delta(r: dict, artikel_wids: list[str] | None = None) -> dict:
     return {
         "type": r["type"],
         "identificatie": r["identificatie"],
         "bewerking": r["bewerking"],
         "naam": r["naam"],
         "payload": r["payload"],
+        # Artikel-ankers waar deze annotatie via een juridische regel of
+        # tekstdeel-verwijzing aan hangt. Kan meerdere zijn (annotatie via
+        # meerdere regels aan verschillende artikelen). Leeg = geen artikel-
+        # koppeling gevonden — annotatie valt in de "Algemeen"-bucket in
+        # de tour (bv. omdat de bijbehorende regel niet in dit ontwerp is
+        # gewijzigd of bij een tekstdeel zonder divisietekstRef).
+        "artikelWids": artikel_wids or [],
     }
+
+
+def _artikel_wids_per_annotatie(cur, ontwerpbesluit_id: str) -> dict[str, list[str]]:
+    """Voor elke annotatie-delta in dit ontwerp: bepaal aan welke artikelen
+    hij hangt. Drie paden:
+
+      1. **Delta-bindingen**: annotaties waarvoor de koppeling in dit
+         ontwerp WIJZIGT — via `p2pwijziging.juridische_regel_*_delta`
+         → juridische_regel_delta.regeltekst_wid.
+      2. **P2P-fallback**: annotaties waarvan het OBJECT wijzigt maar de
+         koppeling aan een bestaande, ongewijzigde regel is — via
+         `p2p.juridische_regel_*` en `p2p.activiteit_locatieaanduiding`.
+         Zonder deze fallback zouden bv. hernoemde gebiedsaanwijzingen
+         die aan bestaande regels hangen in de "Algemeen"-bucket vallen.
+      3. **Tekstdeel-annotaties**: via payload.divisietekstRef/divisieRef
+         → wid direct.
+
+    Alle drie paden komen uit op een regeltekst-wid, waarna één recursive
+    parent-walk in p2pwijziging.tekst_element de dichtstbijzijnde Artikel-
+    parent bepaalt. p2p-wids en p2pwijziging-wids zijn identiek (STOP-
+    invariant: wids zijn stabiel over versies), dus de walk werkt voor
+    beide bronnen.
+
+    Return: {annotatie_identificatie: [artikel_wid, ...]} — dedupliceerd."""
+    cur.execute(
+        """
+        WITH RECURSIVE
+        -- Pad 1: bindingen die in dit ontwerp wijzigen.
+        delta_bindings AS (
+          SELECT bd.activiteit_identificatie AS ann_id, jrd.regeltekst_wid
+          FROM   p2pwijziging.juridische_regel_activiteit_delta bd
+          JOIN   p2pwijziging.juridische_regel_delta jrd
+            ON   jrd.identificatie = bd.juridische_regel_identificatie
+           AND   jrd.ontwerpbesluit_id = bd.ontwerpbesluit_id
+          WHERE  bd.ontwerpbesluit_id = %(ob)s
+          UNION ALL
+          SELECT bd.norm_identificatie, jrd.regeltekst_wid
+          FROM   p2pwijziging.juridische_regel_norm_delta bd
+          JOIN   p2pwijziging.juridische_regel_delta jrd
+            ON   jrd.identificatie = bd.juridische_regel_identificatie
+           AND   jrd.ontwerpbesluit_id = bd.ontwerpbesluit_id
+          WHERE  bd.ontwerpbesluit_id = %(ob)s
+          UNION ALL
+          SELECT bd.gebiedsaanwijzing_identificatie, jrd.regeltekst_wid
+          FROM   p2pwijziging.juridische_regel_gebiedsaanwijzing_delta bd
+          JOIN   p2pwijziging.juridische_regel_delta jrd
+            ON   jrd.identificatie = bd.juridische_regel_identificatie
+           AND   jrd.ontwerpbesluit_id = bd.ontwerpbesluit_id
+          WHERE  bd.ontwerpbesluit_id = %(ob)s
+        ),
+        -- Pad 2: annotaties in dit ontwerp die via een BESTAANDE (p2p)
+        -- regel aan een artikel hangen. Alleen relevant voor annotaties
+        -- die zelf een _delta hebben (anders zouden we ongewijzigde bindings
+        -- ook meepakken). Restricted to annotaties in dit ontwerp.
+        p2p_bindings AS (
+          SELECT ala.activiteit_id AS ann_id, jr.regeltekst_wid
+          FROM   p2p.activiteit_locatieaanduiding ala
+          JOIN   p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+          WHERE  ala.activiteit_id IN (
+                   SELECT identificatie FROM p2pwijziging.annotatie_delta
+                   WHERE ontwerpbesluit_id = %(ob)s AND type = 'activiteit'
+                 )
+          UNION ALL
+          SELECT jrn.norm_id, jr.regeltekst_wid
+          FROM   p2p.juridische_regel_norm jrn
+          JOIN   p2p.juridische_regel jr ON jr.identificatie = jrn.juridische_regel_id
+          WHERE  jrn.norm_id IN (
+                   SELECT identificatie FROM p2pwijziging.annotatie_delta
+                   WHERE ontwerpbesluit_id = %(ob)s
+                     AND type IN ('omgevingsnorm','omgevingswaarde')
+                 )
+          UNION ALL
+          SELECT jrg.gebiedsaanwijzing_id, jr.regeltekst_wid
+          FROM   p2p.juridische_regel_gebiedsaanwijzing jrg
+          JOIN   p2p.juridische_regel jr ON jr.identificatie = jrg.juridische_regel_id
+          WHERE  jrg.gebiedsaanwijzing_id IN (
+                   SELECT identificatie FROM p2pwijziging.annotatie_delta
+                   WHERE ontwerpbesluit_id = %(ob)s AND type = 'gebiedsaanwijzing'
+                 )
+        ),
+        -- Pad 3: tekstdeel-annotaties via payload.divisietekstRef → wid
+        -- (divisietekst-annotatie geeft die wid als eigen wId)
+        tekstdeel_wids AS (
+          SELECT ad_td.identificatie AS ann_id, dt.payload->>'wId' AS regeltekst_wid
+          FROM   p2pwijziging.annotatie_delta ad_td
+          JOIN   p2pwijziging.annotatie_delta dt
+            ON   dt.ontwerpbesluit_id = ad_td.ontwerpbesluit_id
+           AND   dt.type = 'divisietekst'
+           AND   dt.identificatie = COALESCE(
+                   ad_td.payload->>'divisietekstRef',
+                   ad_td.payload->>'divisieRef'
+                 )
+          WHERE  ad_td.ontwerpbesluit_id = %(ob)s
+            AND  ad_td.type = 'tekstdeel'
+        ),
+        starts AS (
+          SELECT * FROM delta_bindings
+          UNION SELECT * FROM p2p_bindings     -- UNION (niet ALL) — dedupliceert overlap tussen delta+p2p
+          UNION SELECT * FROM tekstdeel_wids
+        ),
+        -- Klim in de tekst-element-boom naar de dichtstbijzijnde Artikel-parent.
+        -- Ontwerpbesluit-scope: we lopen alleen door tekst_elementen van dit
+        -- ontwerp (wids zijn stabiel over versies).
+        walk AS (
+          SELECT s.ann_id, te.id AS current_id, te.parent_id, te.wid, te.element_type,
+                 CASE WHEN te.element_type = 'Artikel' THEN te.wid END AS artikel_wid
+          FROM   starts s
+          JOIN   p2pwijziging.tekst_element te
+            ON   te.wid = s.regeltekst_wid
+           AND   te.ontwerpbesluit_id = %(ob)s
+          UNION ALL
+          SELECT w.ann_id, p.id, p.parent_id, p.wid, p.element_type,
+                 COALESCE(w.artikel_wid,
+                          CASE WHEN p.element_type = 'Artikel' THEN p.wid END)
+          FROM   walk w
+          JOIN   p2pwijziging.tekst_element p ON p.id = w.parent_id
+          WHERE  w.artikel_wid IS NULL
+        )
+        SELECT ann_id, ARRAY_AGG(DISTINCT artikel_wid) AS artikel_wids
+        FROM   walk
+        WHERE  artikel_wid IS NOT NULL
+        GROUP  BY ann_id
+        """,
+        {"ob": ontwerpbesluit_id},
+    )
+    return {row["ann_id"]: row["artikel_wids"] for row in cur.fetchall()}
 
 
 def _row_to_locatie_delta(r: dict) -> dict:
@@ -4406,13 +4539,14 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
     hoeveel er verborgen zijn. `include_verouderd=true` toont ze alsnog."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT frbr_work FROM p2p.regeling WHERE frbr_expression = %s",
+            "SELECT frbr_work, opschrift FROM p2p.regeling WHERE frbr_expression = %s",
             (expression,),
         )
         reg = cur.fetchone()
         if not reg:
             raise HTTPException(404, "Regeling niet gevonden")
         regeling_work = reg["frbr_work"]
+        regeling_opschrift = reg["opschrift"]
 
         # Bronnen — exclusief vervangRegeling-besluiten (die zijn geen
         # renvooi-overlay; volledige nieuwe regeling).
@@ -4445,6 +4579,12 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
             verouderd_verborgen = len(alle_besluiten) - len(besluiten)
 
         wijzigingen = []
+        # Alle artikel-wids die ergens in de tour genoemd worden — via de
+        # tekst-mirror OF via de artikel-ankers van annotaties. Aan het eind
+        # halen we nummer/opschrift op uit p2p.tekst_element voor de wids
+        # die in de p2pwijziging-mirror nummer/opschrift missen (artikelen
+        # die zelf niet wijzigen maar wel een annotatie geraakt zien).
+        alle_artikel_wids: set[str] = set()
         for b in besluiten:
             ob_id = b["ontwerpbesluit_id"]
 
@@ -4473,10 +4613,17 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
             )
             ann_rows = cur.fetchall()
 
+            # Fase 1 sub 1.2: artikel-ankers per annotatie ophalen. Eén
+            # recursive CTE die zowel binding-annotaties (activiteit/norm/
+            # gebiedsaanwijzing) als tekstdeel-annotaties naar hun artikel-
+            # wid klimt. Frontend groepeert de tour op deze wids.
+            artikel_wids_per_ann = _artikel_wids_per_annotatie(cur, ob_id)
+
             cur.execute(
                 """
                 SELECT locatie_id, bewerking, locatie_type, noemer,
-                       ST_AsGeoJSON(geometrie) AS geometrie_json
+                       -- 0 decimalen — RD is in meters, zie _viewer_geometrie.
+                       ST_AsGeoJSON(geometrie, 0) AS geometrie_json
                 FROM   p2pwijziging.locatie_delta
                 WHERE  ontwerpbesluit_id = %s
                 """,
@@ -4486,15 +4633,168 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
 
             wijziging = _row_to_besluit_meta(b)
             wijziging["tekstElementen"] = [_row_to_tekst_element(r) for r in tekst_kept]
-            wijziging["annotatieDeltas"] = [_row_to_annotatie_delta(r) for r in ann_rows]
+            wijziging["annotatieDeltas"] = [
+                _row_to_annotatie_delta(r, artikel_wids_per_ann.get(r["identificatie"]))
+                for r in ann_rows
+            ]
             wijziging["locatieDeltas"] = [_row_to_locatie_delta(r) for r in loc_rows]
             wijzigingen.append(wijziging)
 
+            for r in tekst_rows:
+                if r["element_type"] == "Artikel":
+                    alle_artikel_wids.add(r["wid"])
+            for wids in artikel_wids_per_ann.values():
+                alle_artikel_wids.update(wids)
+
+        # Titel-fallback uit p2p.tekst_element (fase 1 sub 1.5). Wids zijn
+        # STOP-stabiel over versies; label ophalen bij de geldende expression
+        # dekt alle artikelen — ook die in dit ontwerp niet wijzigen. UI
+        # gebruikt dit als fallback wanneer de p2pwijziging-mirror nummer/
+        # opschrift missen (wat bij anker-artikelen normaal is).
+        artikel_titels: dict[str, dict] = {}
+        if alle_artikel_wids:
+            cur.execute(
+                """
+                SELECT wid, nummer, opschrift
+                FROM   p2p.tekst_element
+                WHERE  regeling_expression = %s
+                  AND  element_type = 'Artikel'
+                  AND  wid = ANY(%s)
+                """,
+                (expression, list(alle_artikel_wids)),
+            )
+            for r in cur.fetchall():
+                artikel_titels[r["wid"]] = {
+                    "nummer": r["nummer"],
+                    "opschrift": r["opschrift"],
+                }
+
     return {
         "regelingWork": regeling_work,
+        "regelingOpschrift": regeling_opschrift,
         "wijzigingen": wijzigingen,
         "verouderdVerborgen": verouderd_verborgen,
+        "artikelTitels": artikel_titels,
     }
+
+
+@app.get("/v1/viewer/regeling/{expression:path}/artikel/{wid}/inhoud",
+        dependencies=[Depends(verify_key)])
+def viewer_artikel_inhoud(expression: str, wid: str):
+    """Inhoud van één artikel uit de geldende regeling, voor de uitklap in
+    de verval-lijst van de wijzigingen-tour. Concatenatie van alle descendant-
+    inhoud (Leden/Al's) in leesvolgorde, plus meta (nummer/opschrift).
+
+    Gebruik dit alleen voor artikelen die als vervallen in de tour verschijnen —
+    voor de leestekst-view heeft de viewer al z'n eigen document-endpoints."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH RECURSIVE walk AS (
+              SELECT id, parent_id, wid, element_type, nummer, opschrift, inhoud,
+                     volgorde, 0 AS diepte
+              FROM   p2p.tekst_element
+              WHERE  regeling_expression = %s AND wid = %s
+              UNION ALL
+              SELECT c.id, c.parent_id, c.wid, c.element_type, c.nummer, c.opschrift,
+                     c.inhoud, c.volgorde, w.diepte + 1
+              FROM   p2p.tekst_element c
+              JOIN   walk w ON c.parent_id = w.id
+            )
+            SELECT diepte, element_type, nummer, opschrift, inhoud
+            FROM   walk
+            ORDER  BY diepte, volgorde
+            """,
+            (expression, wid),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            raise HTTPException(404, "Artikel niet gevonden")
+        root = rows[0]
+        body_parts = [r["inhoud"] for r in rows if r["inhoud"]]
+        body = "\n".join(body_parts)
+        return {
+            "wid": wid,
+            "nummer": root["nummer"],
+            "opschrift": root["opschrift"],
+            "inhoud": body,
+            "isLeeg": body.strip() == "",
+        }
+
+
+@app.get("/v1/viewer/regeling/{expression:path}/tekstelement/{wid}/kinderen",
+        dependencies=[Depends(verify_key)])
+def viewer_tekstelement_kinderen(expression: str, wid: str, ontwerp_id: str | None = None):
+    """Artikel-descendants van een container-tekstelement (Afdeling, Hoofdstuk,
+    Paragraaf, …). Voor de uitklap in de "Algemene wijzigingen"-bucket van de
+    tour: gebruiker klikt op een gewijzigde container en ziet welke artikelen
+    er onder hangen.
+
+    Bron-keuze: probeert eerst `p2p.tekst_element` (geldende regeling — voor
+    vervallen of gewijzigde containers). Als daar niets staat en er is een
+    `ontwerp_id` meegegeven, valt terug op `p2pwijziging.tekst_element` voor
+    dat besluit (nodig voor nieuwe containers die nog niet in het geldende
+    plan bestaan). Retour is dus wat er *nu* onder valt of *straks* onder komt,
+    afhankelijk van of de container vervalt of nieuw is.
+
+    Returned volgorde: tree-walk (breadth-first). Frontend sorteert desnoods
+    op nummer met natural sort."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH RECURSIVE walk AS (
+              SELECT id, parent_id, wid, element_type, nummer, opschrift, volgorde,
+                     0 AS diepte
+              FROM   p2p.tekst_element
+              WHERE  regeling_expression = %s AND wid = %s
+              UNION ALL
+              SELECT c.id, c.parent_id, c.wid, c.element_type, c.nummer, c.opschrift,
+                     c.volgorde, w.diepte + 1
+              FROM   p2p.tekst_element c
+              JOIN   walk w ON c.parent_id = w.id
+            )
+            SELECT wid, nummer, opschrift
+            FROM   walk
+            WHERE  element_type = 'Artikel' AND diepte > 0
+            ORDER  BY diepte, volgorde
+            """,
+            (expression, wid),
+        )
+        rows = cur.fetchall()
+        bron = "p2p"
+
+        if not rows and ontwerp_id:
+            cur.execute(
+                """
+                WITH RECURSIVE walk AS (
+                  SELECT id, parent_id, wid, element_type, nummer, opschrift, volgorde,
+                         0 AS diepte
+                  FROM   p2pwijziging.tekst_element
+                  WHERE  ontwerpbesluit_id = %s AND wid = %s
+                  UNION ALL
+                  SELECT c.id, c.parent_id, c.wid, c.element_type, c.nummer, c.opschrift,
+                         c.volgorde, w.diepte + 1
+                  FROM   p2pwijziging.tekst_element c
+                  JOIN   walk w ON c.parent_id = w.id
+                )
+                SELECT wid, nummer, opschrift
+                FROM   walk
+                WHERE  element_type = 'Artikel' AND diepte > 0
+                ORDER  BY diepte, volgorde
+                """,
+                (ontwerp_id, wid),
+            )
+            rows = cur.fetchall()
+            bron = "p2pwijziging"
+
+        return {
+            "wid": wid,
+            "bron": bron,
+            "kinderen": [
+                {"wid": r["wid"], "nummer": r["nummer"], "opschrift": r["opschrift"]}
+                for r in rows
+            ],
+        }
 
 
 @app.get("/v1/overzicht", dependencies=[Depends(verify_key)])
