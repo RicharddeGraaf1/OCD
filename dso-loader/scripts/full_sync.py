@@ -60,8 +60,11 @@ if hasattr(sys.stdout, "reconfigure"):
 from src.db import get_conn  # noqa: E402
 
 VANDAAG = datetime.date.today().isoformat()
-REPORT_PATH = ROOT / "scripts" / f"SYNC-REPORT-{VANDAAG}.md"
 LOG_PATH = ROOT / "scripts" / f"full_sync_{VANDAAG}.log"
+# Pad wordt in main() verfijnd met het label: op één dag draaien we vaak zowel
+# een lokale als een prod-run, en die overschreven elkaars rapport (2026-08-01:
+# het lokale rapport was weg voordat iemand het gelezen had).
+REPORT_PATH = ROOT / "scripts" / f"SYNC-REPORT-{VANDAAG}.md"
 
 report: list[str] = [f"# Sync-rapport {VANDAAG}", ""]
 fouten: list[str] = []
@@ -224,7 +227,14 @@ def bepaal_sinds() -> str:
     return sinds
 
 
-def fase_p2p(bronhouders, sinds: str | None = None, full: bool = False) -> dict[str, str]:
+def fase_p2p(bronhouders, sinds: str | None = None, full: bool = False,
+             gewijzigd: set[str] | None = None) -> dict[str, str]:
+    """Harvest de Ow-regelingen. Rekenwerk (subdiv) gaat naar de post-fase.
+
+    `gewijzigd` wordt gevuld met de bronhouder-codes die daadwerkelijk iets
+    geladen hebben, zodat `fase_post` de `locatie_subdiv`-herbouw gebundeld en
+    alleen voor die bronhouders draait.
+    """
     from src.pipeline import p2p
     from src.run_log import load_run
     if full:
@@ -236,9 +246,10 @@ def fase_p2p(bronhouders, sinds: str | None = None, full: bool = False) -> dict[
         scope = f"delta:sinds {sinds}"
     with load_run("ozon-regelingen", scope=scope) as run:
         if full:
-            resultaten = p2p.run(bronhouders)
+            resultaten = p2p.run(bronhouders, uitstel_subdiv=True, gewijzigd=gewijzigd)
         else:
-            resultaten = p2p.run_delta(bronhouders, sinds)
+            resultaten = p2p.run_delta(bronhouders, sinds,
+                                       uitstel_subdiv=True, gewijzigd=gewijzigd)
         ok = sum(1 for v in resultaten.values() if v == "ok")
         err = {k: v for k, v in resultaten.items() if v != "ok"}
         run.set(n_fout=len(err), n_verwerkt=len(resultaten))
@@ -297,13 +308,11 @@ def fase_vth():
         ok2 = subproc([py, "-m", "src.cli", "enrich-koop", "--loop",
                        "--sleep", "60", "--stop-after-empty", "2"],
                       "enrich-koop", timeout=4 * 3600)
-        backfill = ROOT / "scripts" / "koop-poc" / "backfill_geometrie.py"
-        ok3 = True
-        if backfill.exists():
-            ok3 = subproc([py, str(backfill), "--apply"], "vth geometrie-backfill")
+        # De geometrie-backfill is rekenwerk en draait in fase_post — anders
+        # zit er een rekenstap tussen twee harvest-stappen (enrich → load-ovg).
         regels.append(
             f"- KOOP-kennisgevingen {vanaf}..{vandaag}: load {'ok' if ok1 else 'FOUT'}, "
-            f"enrich {'ok' if ok2 else 'FOUT'}, geometrie-backfill {'ok' if ok3 else 'FOUT'}")
+            f"enrich {'ok' if ok2 else 'FOUT'} (geometrie-backfill draait in post)")
 
     # DSO-afwijkvergunningen (BOPA): full-snapshot, idempotent — altijd verversen.
     ok_ovg = subproc([py, "-m", "src.cli", "load-ovg"], "load-ovg (afwijkvergunningen)")
@@ -329,9 +338,45 @@ ON CONFLICT (frbr_expression) DO UPDATE
 """
 
 
-def fase_post(run_start: datetime.datetime):
+def fase_post(run_start: datetime.datetime, gewijzigd: set[str] | None = None):
+    """Alle afgeleide berekeningen, ná het harvesten.
+
+    Principe "harvest eerst, rekenen later": zolang de post-fase draait is er
+    geen enkele bron meer nodig. Dat sluit het API-venster vroeg (minder kans
+    op de 503's die de DSO 's nachts geeft), laat harvest-fouten meteen boven
+    komen, en maakt het rekenwerk apart plan- en overslaanbaar.
+    """
     from src.run_log import load_run
     py = sys.executable
+
+    # 1. Uitgestelde subdiv-herbouw, gebundeld en alleen voor bronhouders die
+    #    daadwerkelijk iets geladen hebben (zie fase_p2p / gaps G-93).
+    if gewijzigd:
+        with load_run("locatie-subdiv", scope=f"{len(gewijzigd)} gewijzigde bronhouders") as run:
+            from src.loaders.subdiv import refresh_locatie_subdiv
+            conn = get_conn()
+            n_fout = 0
+            totaal = 0
+            for code in sorted(gewijzigd):
+                try:
+                    totaal += refresh_locatie_subdiv(conn, code)
+                except Exception as e:
+                    n_fout += 1
+                    fouten.append(f"locatie_subdiv {code}: {e}")
+            conn.close()
+            run.set(n_verwerkt=len(gewijzigd), n_fout=n_fout)
+        log(f"locatie_subdiv gebundeld ververst: {len(gewijzigd)} bronhouders, {totaal} stukjes")
+        rapporteer("locatie_subdiv (uitgesteld naar post)", [
+            f"- {len(gewijzigd)} bronhouders herbouwd, {totaal} stukjes",
+        ])
+
+    # 2. Vth-geometrie-backfill: rekenwerk, hoort dus hier en niet tussen twee
+    #    harvest-stappen van fase_vth in.
+    backfill = ROOT / "scripts" / "koop-poc" / "backfill_geometrie.py"
+    if backfill.exists():
+        ok_bf = subproc([py, str(backfill), "--apply"], "vth geometrie-backfill")
+        rapporteer("vth geometrie-backfill", [f"- {'ok' if ok_bf else 'FOUT'}"])
+
     conn = get_conn()
     cur = conn.cursor()
     # geladen_op van bestaande rijen blijft staan (DO UPDATE raakt alleen
@@ -501,9 +546,28 @@ def main():
     ap.add_argument("--yes", action="store_true",
                     help="sla de prod-bevestiging over (voor cron/non-interactief)")
     ap.add_argument("--label", default=f"full-sync-{VANDAAG}")
+    ap.add_argument("--preview", action="store_true",
+                    help="READ-ONLY: toon per bron wat er geladen zou worden en stop. "
+                         "Raakt de database niet (geen snapshot, geen load_run, "
+                         "geen rapport); alleen de logregel wordt weggeschreven.")
     args = ap.parse_args()
 
+    # Rapportnaam uniek per run: datum + label. Zonder dit overschrijft een
+    # tweede run van dezelfde dag (typisch: eerst lokaal, dan prod) het rapport
+    # van de eerste.
+    global REPORT_PATH
+    veilig_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", args.label).strip("-")
+    if veilig_label and veilig_label != f"full-sync-{VANDAAG}":
+        REPORT_PATH = ROOT / "scripts" / f"SYNC-REPORT-{VANDAAG}-{veilig_label}.md"
+
     kies_doelwit_db(args)
+
+    if args.preview:
+        # Read-only pre-flight: zie scripts/preview_sync.py. Bewust vóór elke
+        # schrijfactie — de sync begint anders met een snapshot + load_run-rij.
+        import preview_sync
+        preview_sync.main_vanuit_sync(args)
+        return
 
     run_start = datetime.datetime.now(datetime.timezone.utc)
     t0 = time.monotonic()
@@ -518,14 +582,21 @@ def main():
     run_id = snapshot_en_dedup(args.label)
 
     bronhouders = bouw_bronhouderlijst()
+    # Harvest eerst (p2p → i2a → vth), dan pas rekenen (post → embed).
+    gewijzigd: set[str] = set()
     if not args.skip_p2p:
-        fase_p2p(bronhouders, sinds=args.sinds, full=args.full_p2p)
+        fase_p2p(bronhouders, sinds=args.sinds, full=args.full_p2p, gewijzigd=gewijzigd)
     if not args.skip_i2a:
         fase_i2a(bronhouders)
     if not args.skip_vth:
         fase_vth()
     if not args.skip_post:
-        fase_post(run_start)
+        fase_post(run_start, gewijzigd=gewijzigd)
+    elif gewijzigd:
+        log(f"LET OP: --skip-post, maar {len(gewijzigd)} bronhouders wachten nog "
+            f"op een locatie_subdiv-herbouw ({', '.join(sorted(gewijzigd))})")
+        fouten.append(f"locatie_subdiv niet ververst voor {len(gewijzigd)} bronhouders "
+                      f"(--skip-post); draai `python -m src.cli refresh-subdiv`")
     if not args.skip_embed:
         fase_embed()
 

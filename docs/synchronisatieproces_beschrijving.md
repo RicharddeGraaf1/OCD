@@ -1,15 +1,25 @@
 # Synchronisatieproces OCD — beschrijving, timings & efficiëntie
 
-*Laatst bijgewerkt: 2026-07-25*
+*Laatst bijgewerkt: 2026-08-01*
 
 Dit document beschrijft hoe de nachtelijke synchronisatie van de OCD-database
 werkt, wat elke fase doet, **hoe lang elke stap duurt**, en — kritisch — **hoe
 we de DSO-API zuinig bevragen** zodat de API-key niet geblokkeerd raakt.
 
+> **Ga je daadwerkelijk syncen?** Volg dan
+> [synchronisatie-runbook.md](synchronisatie-runbook.md) — dat is het draaiboek
+> (volgorde, go/no-go, prod, downstream, nazorg). Dit document is de referentie
+> eronder.
+
 ```bash
 cd c:/GIT/OCD/dso-loader
+python scripts/full_sync.py --preview            # eerst kijken (schrijft niets)
 python scripts/full_sync.py --label "sync-<datum>"
 ```
+
+> **`full_sync` laadt niets "vol".** De naam slaat op de orkestratie (alle
+> bronnen in één run), niet op de omvang. Elke fase is incrementeel; alleen
+> `--full-p2p` haalt bewust alles opnieuw op.
 
 | Vlag | Effect |
 |---|---|
@@ -19,6 +29,42 @@ python scripts/full_sync.py --label "sync-<datum>"
 | `--target local` (default) `\| prod` | DB-doelwit; `prod` draait de sync **direct tegen de Railway-prod-DB** (`PROD_DB_URL` uit `.env`, via de TCP-proxy) |
 | `--dsn <connectstring>` | expliciete doel-DB; overschrijft `--target` |
 | `--yes` | sla de prod-typbevestiging over (voor cron/non-interactief) |
+| `--preview` | READ-ONLY: toon per bron wát er geladen zou worden, en stop |
+
+---
+
+## Eerst kijken, dan laden — `preview_sync.py`
+
+**Draai altijd eerst een preview.** Een sync die "0 fouten" meldt zegt niets
+over of hij het júíste heeft geladen; de delta-bug hieronder (G-98) leefde
+maanden onder precies zo'n groene rapportage. De preview raakt de database niet
+en bevraagt de bronnen alleen met lichte lijst-calls.
+
+```bash
+python scripts/preview_sync.py                    # lokale DB
+python scripts/preview_sync.py --target prod      # tegen prod (read-only)
+python scripts/preview_sync.py --vergelijk-prod   # toont er ook bij wat prod mist
+python scripts/preview_sync.py --i2a              # inclusief de i2a-poll
+python scripts/preview_sync.py --json             # machineleesbaar
+python scripts/full_sync.py --preview             # zelfde, met de skip-vlaggen van de sync
+```
+
+| Bron | Preview-kost | Wat je te zien krijgt |
+|---|---|---|
+| p2p | ~10 lijst-calls | per regeling: **nieuw** / **nieuwe versie** / **verdrongen** / **verdwenen** |
+| vth | 1 SRU-call per open dag | aantal kennisgevingen per openstaande dag + enrich-achterstand |
+| i2a | ~342 calls (opt-in) | RTR-activiteiten per gemeente vs. wat in de DB zit |
+| embed | alleen DB | tekst_elementen zonder embedding |
+
+De preview kijkt **beide kanten op**: wat de DSO heeft en wij niet (te laden),
+én wat wij vigerend hebben terwijl de DSO het niet meer toont. Die tweede groep
+splitst hij in *verdrongen* (het work bestaat nog, er is een nieuwere expressie
+→ na het laden `markeer_verouderde_expressies.py`) en *verdwenen* (het work is
+weg → intrekking, G-91, wordt door de sync **niet** opgeruimd).
+
+Standaard kijkt de p2p-preview naar de **volledige lijst**, niet vanaf de
+watermark: dat kost dezelfde ~10 calls en laat ook achterstand zien die van
+vóór de laatste sync dateert. Met `--sinds` beperk je alsnog het venster.
 
 ---
 
@@ -137,31 +183,69 @@ seconden.
   alleen bronhouders met nieuwe registraties; een niks-nieuw-sync doet daarmee
   vrijwel geen API-calls.
 - **Retries met mate.** Transiënte 503's (de DSO geeft er af en toe een) worden
-  beperkt herprobeerd, niet in een strakke lus.
+  beperkt herprobeerd, niet in een strakke lus: `src/http_retry.py`, backoff
+  2/5/15/30 s, alleen bij 5xx en timeouts — een 4xx gaat direct door. Elke retry
+  loopt opnieuw door de rate-limiter.
+
+  > **Dit gold tot 2026-08-01 alleen voor de KOOP-loader.** De
+  > Presenteren-calls (`api_loader._get`, `dso_omgevingsvergunning._fetch_page`)
+  > hadden géén retry, terwijl dit document het tegendeel beweerde. In de
+  > sync-run van 2026-08-01 kostte dat twee fasen: de BOPA-snapshot brak af op
+  > pagina 62 van 78 en één gemeente viel uit de i2a-fase — beide door één
+  > losse 503. Nu gedekt, met tests in `tests/test_http_retry.py`.
 
 ---
 
 ## p2p incrementeel: de registratietijdstip-delta
 
-De Presenteren v8 `/regelingen`-lijst accepteert `_sort`:
-`GET /regelingen?_sort=-registratietijdstip&size=200` geeft **alle regelingen,
-nieuwste eerst**, met per regeling `geregistreerdMet.tijdstipRegistratie`.
+De Presenteren v8 `/regelingen`-lijst geeft alle regelingen (~1966, 10 pagina's
+van 200) met per regeling `geregistreerdMet.tijdstipRegistratie`.
 
-> **Naamgeving:** sorteersleutel = `registratietijdstip` (query-param `_sort`);
-> antwoordveld = `geregistreerdMet.tijdstipRegistratie`. Niet verwarren.
+> **Naamgeving:** sorteersleutel heet `registratietijdstip` (query-param
+> `_sort`); het antwoordveld heet `geregistreerdMet.tijdstipRegistratie`.
+> Niet verwarren.
 
 Algoritme (`find_regelingen_delta` → `load_delta` in `api_loader.py`, via
 `p2p.run_delta`; `fase_p2p`/`bepaal_sinds` in `full_sync.py`):
 
 1. `sinds` = start vorige geslaagde sync − 2 dagen (overlap onschadelijk dankzij
    de skip-guard).
-2. Pagineer nieuwste-eerst; stop bij het eerste tijdstip < `sinds`.
+2. Pagineer de **volledige** lijst en houd de registraties `>= sinds` over.
+   Per work wint de nieuwst geregistreerde expressie.
 3. Filter op de geconfigureerde bronhouder-codes (scope gelijk aan de reguliere
    sweep), groepeer per bronhouder, laad alleen die subset.
 
-**Beperking**: detecteert geen intrekkingen/verwijderingen (een verdwenen
-regeling zakt niet naar boven). Aparte diff (`diff_dso_bronhouder_coverage.py`)
-blijft nodig — bestaand hiaat, geen regressie.
+### ⚠️ Waarom de hele lijst en niet "stoppen bij de eerste oudere"
+
+Tot 2026-08-01 vroeg de sweep `_sort=-registratietijdstip` en **brak af** bij
+het eerste item ouder dan `sinds` — "nieuwste eerst, dus de rest is ouder".
+**Die aanname is fout.** De lijst is niet strikt gesorteerd; gemeten op
+2026-08-01 gaf pagina 1:
+
+```
+1  2026-07-30  gm0779
+2  2024-08-07  gm0984   ← hier brak de sweep af
+3  2026-07-29  gm1963
+4  2026-07-28  gm1900
+5  2026-07-28  gm1681
+```
+
+Elke run pakte daardoor alleen de éérste registratie op. Resultaat: **16 gemiste
+regelingen** over ruim een maand (4 omgevingsplannen, 5 programma's, 2
+projectbesluiten, 2 omgevingsvisies, waterschapsverordening,
+aanwijzingsbesluit N2000, voorbeschermingsregels) — terwijl elke sync netjes
+"0 fouten" rapporteerde. Zie vault `gaps.md` G-98.
+
+De volledige sweep kost ~10 calls — mínder dan de 381 van de per-bronhouder-
+sweep — dus er is geen reden om op sortering te vertrouwen. `_sort` wordt
+bewust niet meer meegestuurd: een instabiele sortering kan over paginagrenzen
+items dubbelen of overslaan. Regressietests staan in
+`tests/test_regelingen_delta.py`.
+
+**Beperking**: de sweep detecteert nog steeds geen intrekkingen/verwijderingen
+— die staan simpelweg niet meer in de lijst. `preview_sync.py` doet die
+omgekeerde diff wél (en splitst *verdrongen* van *verdwenen*);
+`diff_dso_bronhouder_coverage.py` blijft de zwaardere variant. Zie G-91.
 
 ---
 
@@ -212,3 +296,15 @@ zit een reguliere incrementele sync ruim onder het uur, gedomineerd door vth.
    gebundelde refresh na afloop voor alléén de gewijzigde bronhouders.
 2. **i2a-delta**: i2a is nu ~3 min, maar pollt nog per gemeente; bij groei
    dezelfde delta-behandeling als p2p mogelijk.
+
+## Bekende zwakke plekken (nog niet opgelost)
+
+- **i2a bevraagt de RTR/STTR met een hardgecodeerde `datum: "10-04-2026"`**
+  (`imtr_loader.py`, drie plekken). Een sync in augustus haalt dus de
+  toestand van 10 april op. `preview_sync.py --i2a` gebruikt dezelfde datum,
+  zodat de preview toont wat de loader zóú zien — niet wat vandaag geldt.
+- **Geen delta voor i2a en vth op prod** (G-94): daarom `--skip-i2a --skip-vth`
+  bij een prod-directe run; vth loopt via `refresh-koop-to-prod.ps1`.
+- **De vectorindex hangt niet aan de pipeline** (G-97): nieuwe regelingen zijn
+  pas semantisch vindbaar na een aparte embed-run, en `run_overnight.py`
+  herbouwt `chunk_annotatie`/`chunk_categorie` volledig.

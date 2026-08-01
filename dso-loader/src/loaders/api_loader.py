@@ -21,6 +21,7 @@ from rich.console import Console
 from src.canonieke_bronhouders import upsert_bronhouder
 from src.config import cfg
 from src.db import get_conn
+from src.http_retry import met_retry
 from src.rate_limiter import limiter
 from src.versie_status import markeer_siblings_inactief
 
@@ -44,10 +45,18 @@ def _headers():
 
 
 def _get(url, params=None, timeout=60):
-    with limiter:
-        resp = httpx.get(url, headers=_headers(), params=params, timeout=timeout)
-    resp.raise_for_status()
-    return resp.json()
+    """GET op de Presenteren-API, met beperkte retry op transiënte fouten.
+
+    De DSO geeft af en toe een losse 503; zonder retry breekt die een hele fase
+    af (gemeten 2026-08-01). Zie `src/http_retry.py`.
+    """
+    def _poging():
+        with limiter:
+            resp = httpx.get(url, headers=_headers(), params=params, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    return met_retry(_poging, omschrijving=url.rsplit("/", 1)[-1])
 
 
 def _get_geometry(geom_id: str) -> dict | None:
@@ -100,15 +109,29 @@ def find_regelingen(overheid_code: str, naam: str,
 def find_regelingen_delta(sinds: str | None,
                           doc_types: list[str] | None = None,
                           bronhouder_codes: set[str] | None = None) -> list[dict]:
-    """Globale delta-sweep: één gesorteerde lijst i.p.v. per bronhouder pollen.
+    """Globale delta-sweep: één lijst-inventarisatie i.p.v. per bronhouder pollen.
 
-    Vraagt `GET /regelingen?_sort=-registratietijdstip` (nieuwste eerst) en
-    pagineert tot het eerste `geregistreerdMet.tijdstipRegistratie` dat ouder is
-    dan `sinds` — dan stoppen, want alles daaronder is ouder en hebben we al.
+    Pagineert de **volledige** `GET /regelingen`-lijst (~10 pagina's van 200) en
+    houdt de regelingen over met `geregistreerdMet.tijdstipRegistratie >= sinds`.
+
+    **Waarom de hele lijst en niet stoppen bij de eerste oudere registratie?**
+    De eerdere implementatie vroeg `_sort=-registratietijdstip` en brak af bij
+    het eerste item ouder dan `sinds` ("nieuwste eerst, dus de rest is ouder").
+    Die aanname is fout: de lijst is **niet strikt gesorteerd** — gemeten
+    2026-08-01 stond op positie 2 van pagina 1 een registratie uit 2024, tussen
+    twee registraties van eind juli in. De sweep stopte daardoor na één item en
+    miste stilzwijgend alle latere nieuwe regelingen (16 achterstand over ruim
+    een maand, terwijl de sync "0 fouten" rapporteerde). Zie vault `gaps.md`
+    G-98.
+
+    De volledige sweep kost ~10 API-calls — minder dan de 381 calls van de
+    per-bronhouder-sweep — dus er is geen reden meer om op sortering te
+    vertrouwen. `_sort` wordt bewust niet meer meegestuurd: de sorteervolgorde
+    is niet betrouwbaar en een instabiele sortering over paginagrenzen kan
+    items dubbel opleveren of overslaan.
 
     `sinds`            — ISO-8601 UTC-tijdstip (bv. "2026-07-15T00:00:00Z");
-                         None = geen ondergrens (haalt alles op = volledige
-                         herbouw, duur).
+                         None = geen ondergrens (volledige inventarisatie).
     `doc_types`        — optioneel filter op regeling-type.
     `bronhouder_codes` — optioneel: alleen regelingen van deze overheid-codes
                          (bv. de geconfigureerde 381 bronhouders), zodat de
@@ -118,26 +141,34 @@ def find_regelingen_delta(sinds: str | None,
     Returns list of regeling-dicts (zelfde velden als `find_regelingen`) plus
     `bronhouder_code`, `bronhouder_naam` en `tijdstipRegistratie`.
 
-    Let op: `_sort=registratietijdstip` is de sorteersleutel (query-param
-    `_sort`), maar in het antwoord heet het veld
-    `geregistreerdMet.tijdstipRegistratie` — niet verwarren.
+    Let op: `registratietijdstip` is de naam van de sorteersleutel, maar in het
+    antwoord heet het veld `geregistreerdMet.tijdstipRegistratie` — niet
+    verwarren.
+
+    Let op 2: dit levert alleen wat de DSO *heeft*. Wat wij hebben en de DSO
+    niet meer toont (intrekkingen/verdwenen regelingen) volgt hier niet uit;
+    daarvoor is de omgekeerde diff nodig — zie `scripts/preview_sync.py` en
+    `gaps.md` G-91.
     """
-    results: list[dict] = []
-    console.print(
-        f"  [bold]Delta-sweep[/bold] (_sort=-registratietijdstip, sinds {sinds or 'begin'})...")
+    # per work (identificatie) de nieuwst geregistreerde expressie; de lijst is
+    # niet gesorteerd, dus "eerste die we zien" is géén veilige keuze meer.
+    per_work: dict[str, dict] = {}
+    n_totaal = 0
+    console.print(f"  [bold]Delta-sweep[/bold] (volledige lijst, sinds {sinds or 'begin'})...")
     for page in range(1, 1000):
         data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen",
-                    params={"page": page, "size": 200, "_sort": "-registratietijdstip"})
+                    params={"page": page, "size": 200})
         regs = data.get("_embedded", {}).get("regelingen", [])
         if not regs:
             break
-        stop = False
+        n_totaal += len(regs)
         for reg in regs:
             ts = (reg.get("geregistreerdMet") or {}).get("tijdstipRegistratie", "") or ""
-            # Nieuwste-eerst: zodra we ouder dan `sinds` zien, is de rest ook ouder.
+            # Geen vroegtijdige stop: filteren, niet afbreken. Een item zonder
+            # tijdstip laten we door (liever een overbodige skip-guard-hit dan
+            # een gemiste regeling).
             if sinds and ts and ts < sinds:
-                stop = True
-                break
+                continue
             gg = reg.get("aangeleverdDoorEen", {}) or {}
             code = gg.get("code", "")
             if bronhouder_codes is not None and code not in bronhouder_codes:
@@ -146,9 +177,10 @@ def find_regelingen_delta(sinds: str | None,
             if doc_types and reg_type not in doc_types:
                 continue
             ident = reg["identificatie"]
-            if any(r["identificatie"] == ident for r in results):
+            bestaand = per_work.get(ident)
+            if bestaand and bestaand["tijdstipRegistratie"] >= ts:
                 continue
-            results.append({
+            per_work[ident] = {
                 "identificatie": ident,
                 "titel": reg.get("officieleTitel", ""),
                 "type": reg_type,
@@ -157,19 +189,21 @@ def find_regelingen_delta(sinds: str | None,
                 "bronhouder_code": code,
                 "bronhouder_naam": gg.get("naam", "") or code,
                 "tijdstipRegistratie": ts,
-            })
-        if stop:
-            break
+            }
         if not data.get("_links", {}).get("next", {}).get("href"):
             break
-    console.print(f"  [green]Delta: {len(results)} regelingen geregistreerd sinds {sinds or 'begin'}[/green]")
+    results = list(per_work.values())
+    console.print(f"  [green]Delta: {len(results)} regelingen geregistreerd sinds "
+                  f"{sinds or 'begin'}[/green] (uit {n_totaal} in de DSO-lijst)")
     return results
 
 
 def load_delta(sinds: str | None,
                bronhouder_map: dict[str, tuple[str, str]] | None = None,
                doc_types: list[str] | None = None,
-               force: bool = False) -> dict[str, str]:
+               force: bool = False,
+               uitstel_subdiv: bool = False,
+               gewijzigd: set[str] | None = None) -> dict[str, str]:
     """Incrementele p2p-sync via één globale registratietijdstip-delta-sweep.
 
     Vervangt het per-bronhouder pollen: haalt de nieuw-geregistreerde
@@ -200,7 +234,8 @@ def load_delta(sinds: str | None,
         console.rule(f"[bold]delta {i}/{total}[/bold] {naam} ({overheid_code}) — {len(regs)} nieuw")
         try:
             load_via_api(overheid_code, naam, bronhouder_code=bronhouder_code,
-                         doc_types=doc_types, force=force, regelingen=regs)
+                         doc_types=doc_types, force=force, regelingen=regs,
+                         uitstel_subdiv=uitstel_subdiv, gewijzigd=gewijzigd)
             results[bronhouder_code] = "ok"
         except Exception as e:
             console.print(f"[red]delta fout {bronhouder_code}: {e}[/red]")
@@ -961,7 +996,9 @@ def load_via_api(overheid_code: str, naam: str,
                  bronhouder_code: str | None = None,
                  doc_types: list[str] | None = None,
                  force: bool = False,
-                 regelingen: list[dict] | None = None):
+                 regelingen: list[dict] | None = None,
+                 uitstel_subdiv: bool = False,
+                 gewijzigd: set[str] | None = None):
     """Load all regelingen for an overheid via API pipeline.
 
     Een FRBR-expressie is immutabel; expressies waarvoor al tekst-elementen
@@ -971,6 +1008,15 @@ def load_via_api(overheid_code: str, naam: str,
     als `find_regelingen` levert). Wordt gebruikt door de delta-sweep
     (`load_delta`) om de per-bronhouder `find_regelingen`-poll over te slaan;
     None = zelf ophalen via `find_regelingen`.
+
+    `uitstel_subdiv` — de `locatie_subdiv`-herbouw NIET hier draaien maar de
+    bronhouder aanmelden in `gewijzigd`, zodat de sync hem gebundeld in de
+    post-fase kan doen ("harvest eerst, rekenen later"). Default False, zodat
+    losse aanroepen (CLI, herstelscripts) zichzelf blijven bedruipen.
+    `gewijzigd` — set die met de bronhouder-codes gevuld wordt die daadwerkelijk
+    iets geladen hebben.
+
+    Returns het aantal nieuw geladen regelingen.
     """
     if bronhouder_code is None:
         bronhouder_code = overheid_code
@@ -1077,14 +1123,22 @@ def load_via_api(overheid_code: str, naam: str,
         # locaties ongewijzigd, dus is de subdiv-tabel al actueel.
         n_geladen = len(regelingen) - n_skipped
         if n_geladen > 0 or force:
-            from src.loaders.subdiv import refresh_locatie_subdiv
-            n_sub = refresh_locatie_subdiv(conn, bronhouder_code)
-            console.print(f"  locatie_subdiv ververst: {n_sub} stukjes")
+            if uitstel_subdiv:
+                # Harvest eerst, rekenen later: de herbouw gaat gebundeld naar de
+                # post-fase, zodat het API-venster niet openblijft voor rekenwerk.
+                if gewijzigd is not None:
+                    gewijzigd.add(bronhouder_code)
+                console.print("  [dim]locatie_subdiv: uitgesteld naar de post-fase[/dim]")
+            else:
+                from src.loaders.subdiv import refresh_locatie_subdiv
+                n_sub = refresh_locatie_subdiv(conn, bronhouder_code)
+                console.print(f"  locatie_subdiv ververst: {n_sub} stukjes")
         else:
             console.print("  [dim]locatie_subdiv: overgeslagen (niets nieuw geladen)[/dim]")
 
         console.print(f"\n[green]Done: {n_geladen} nieuw geladen, "
                       f"{n_skipped} overgeslagen (al geladen) voor {naam}[/green]")
+        return n_geladen
 
     finally:
         conn.close()

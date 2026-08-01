@@ -2,8 +2,11 @@
 
 Resumable (per-chunk idempotent: al-geembedde tekst_elementen worden overgeslagen),
 fout-tolerant per fase (kern eerst, randfases laatst), en schrijft een
-MORNING-REPORT.md + logfile. Sluit af met een git-commit op een nieuwe branch
-(GEEN push). Zie vault: analysis/Per-chunk werkingsgebied- en objectkoppeling...
+MORNING-REPORT.md + logfile. **Raakt git niet** — het toont alleen de stand van
+de werkboom; committen doe je zelf, op `main`. (Tot 2026-08-01 deed dit script
+`git checkout -b feat/vector-chunk-lagen` + commit, wat van branch wisselde
+onder ongecommit werk door en die branch maanden naast main hield.)
+Zie vault: analysis/Per-chunk werkingsgebied- en objectkoppeling...
 
 Draai:  python scripts/run_overnight.py   (bedoeld voor run_in_background)
 """
@@ -17,7 +20,6 @@ REPO = r"C:\GIT\OCD"
 SCRIPTS = r"C:\GIT\OCD\dso-loader\scripts"
 LOG = os.path.join(SCRIPTS, "overnight.log")
 REPORT = os.path.join(SCRIPTS, "MORNING-REPORT.md")
-BRANCH = "feat/vector-chunk-lagen"
 BATCH = 64
 t0 = time.monotonic()
 report_lines = []
@@ -243,34 +245,27 @@ def coverage_report():
     rep("- per bron_soort: " + ", ".join(f"{r['bron_soort']}={r['n']}" for r in soort))
 
 
-def git_commit():
-    log("GIT — commit op branch (geen push)")
-    files = [
-        "ocd-api/semantisch.py",
-        "dso-loader/scripts/2026-07-add-chunk-annotatie.sql",
-        "dso-loader/scripts/2026-07-add-categorie.sql",
-        "dso-loader/scripts/2026-07-add-chunk-canoniek.sql",
-        "dso-loader/scripts/build_categorie.py",
-        "dso-loader/scripts/run_overnight.py",
-    ]
-    msg = ("vector-chunk-lagen: werkingsgebied-filter + chunk_annotatie + categorie + corpus-embed\n\n"
-           "Fase 3 canonieke v2a.chunk-laag (G-88), Fase 4a Artikel-zonder-Lid, Fase 5 volledig\n"
-           "corpus-embed, chunk_annotatie tripels, categorie-v1. Overnight-run.\n\n"
-           "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>")
-    def g(*a):
-        return subprocess.run(["git", "-C", REPO, *a], capture_output=True, text=True)
+def toon_werkboom_status():
+    """Meld welke bestanden gewijzigd zijn — commit NIET zelf.
+
+    Dit script deed hier eerder `git checkout -b feat/vector-chunk-lagen` +
+    een commit van zes vaste bestanden. Dat is er bewust uitgehaald
+    (2026-08-01): een datapijplijn hoort niet aan release-beheer te doen. Het
+    wisselde bovendien van branch onder ongecommit werk door, en het voedde
+    telkens opnieuw een branch die daardoor maanden naast `main` bleef leven.
+
+    Committen doe je zelf, op `main`.
+    """
     try:
-        cur = g("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-        g("checkout", "-b", BRANCH)  # nieuwe branch; faalt stil als bestaat
-        g("checkout", BRANCH)
-        for f in files:
-            g("add", f)
-        r = g("commit", "-m", msg)
-        log(f"  git: {r.stdout.strip()[:200]} {r.stderr.strip()[:120]}")
-        rep(f"\n## Git\nBranch `{BRANCH}` (was `{cur}`), commit van {len(files)} bestanden. **Niet gepusht** — doe jij 's ochtends.\n")
+        r = subprocess.run(["git", "-C", REPO, "status", "--short"],
+                           capture_output=True, text=True)
+        gewijzigd = [ln for ln in r.stdout.splitlines() if ln.strip()]
+        log(f"GIT — werkboom heeft {len(gewijzigd)} gewijzigde/nieuwe bestanden (niet gecommit)")
+        rep("\n## Git\nDit script commit niets meer — het toont alleen de stand. "
+            f"Werkboom: {len(gewijzigd)} gewijzigde/nieuwe bestanden. "
+            "Committen doe je zelf, op `main`.\n")
     except Exception as e:
-        log(f"  git FOUT: {e}")
-        rep(f"\n## Git\nCommit faalde: {e}. Bestanden staan als working-tree op dev.\n")
+        log(f"  git-status FOUT: {e}")
 
 
 def main():
@@ -288,7 +283,7 @@ def main():
         coverage_report()
     except Exception as e:
         log(f"coverage faalde: {e}")
-    git_commit()
+    toon_werkboom_status()
     total_min = (time.monotonic() - t0) / 60
     log(f"=== KLAAR in {total_min:.0f} min ===")
     rep(f"\n---\n_Totale looptijd: {total_min:.0f} min. Zie overnight.log voor details._")

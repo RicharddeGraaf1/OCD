@@ -13,11 +13,16 @@ console = Console()
 
 
 def run(bronhouders: list[Bronhouder],
-        doc_types: list[str] | None = None) -> dict[str, str]:
+        doc_types: list[str] | None = None,
+        uitstel_subdiv: bool = False,
+        gewijzigd: set[str] | None = None) -> dict[str, str]:
     """Laad Ow-content voor elke bronhouder.
 
     `doc_types` filter (bv. ['Omgevingsplan','Omgevingsvisie']) wordt aan
     de DSO-API doorgegeven; None = alles.
+
+    `uitstel_subdiv`/`gewijzigd` — zie `api_loader.load_via_api`: de
+    subdiv-herbouw uitstellen naar de post-fase i.p.v. tijdens het harvesten.
 
     Returns dict {code: 'ok'|'error: ...'}.
     """
@@ -27,7 +32,8 @@ def run(bronhouders: list[Bronhouder],
         console.rule(f"[bold]p2p {i}/{total}[/bold] {bh.naam} ({bh.overheid_code})")
         try:
             load_via_api(bh.overheid_code, bh.naam,
-                         bronhouder_code=bh.code, doc_types=doc_types)
+                         bronhouder_code=bh.code, doc_types=doc_types,
+                         uitstel_subdiv=uitstel_subdiv, gewijzigd=gewijzigd)
             results[bh.code] = "ok"
         except Exception as e:
             console.print(f"[red]p2p fout {bh.code}: {e}[/red]")
@@ -37,7 +43,9 @@ def run(bronhouders: list[Bronhouder],
 
 def run_delta(bronhouders: list[Bronhouder],
               sinds: str | None,
-              doc_types: list[str] | None = None) -> dict[str, str]:
+              doc_types: list[str] | None = None,
+              uitstel_subdiv: bool = False,
+              gewijzigd: set[str] | None = None) -> dict[str, str]:
     """Incrementele p2p via één globale registratietijdstip-delta-sweep.
 
     I.p.v. alle bronhouders volledig te pollen, haalt dit alleen de regelingen
@@ -51,4 +59,5 @@ def run_delta(bronhouders: list[Bronhouder],
     """
     bronhouder_map = {bh.overheid_code: (bh.code, bh.naam) for bh in bronhouders}
     console.rule(f"[bold]p2p delta-sweep[/bold] over {len(bronhouders)} bronhouders, sinds {sinds or 'begin'}")
-    return load_delta(sinds, bronhouder_map=bronhouder_map, doc_types=doc_types)
+    return load_delta(sinds, bronhouder_map=bronhouder_map, doc_types=doc_types,
+                      uitstel_subdiv=uitstel_subdiv, gewijzigd=gewijzigd)

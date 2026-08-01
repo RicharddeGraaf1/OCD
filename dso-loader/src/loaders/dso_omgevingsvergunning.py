@@ -24,6 +24,7 @@ from src.canonieke_bronhouders import upsert_bronhouder
 from src.config import cfg
 from src.db import get_conn
 from src.ddl import OVG_DDL
+from src.http_retry import met_retry
 from src.rate_limiter import limiter
 
 console = Console()
@@ -36,13 +37,23 @@ def _headers() -> dict:
 
 
 def _fetch_page(page: int) -> dict:
+    """Eén pagina van de BOPA-snapshot, met beperkte retry.
+
+    Zonder retry breekt één losse 503 de hele snapshot af: op 2026-08-01
+    sneuvelde de run op pagina 62 van 78. De snapshot is idempotent (upsert),
+    maar een halve run laat wél een onvolledig beeld achter.
+    """
     url = f"{cfg.PRESENTEREN_BASE}/omgevingsvergunningen"
-    with limiter:
-        r = httpx.get(url, headers=_headers(),
-                      params={"page": page, "size": _PAGE_SIZE, "_expand": "true"},
-                      timeout=30)
-    r.raise_for_status()
-    return r.json()
+
+    def _poging():
+        with limiter:
+            r = httpx.get(url, headers=_headers(),
+                          params={"page": page, "size": _PAGE_SIZE, "_expand": "true"},
+                          timeout=30)
+        r.raise_for_status()
+        return r.json()
+
+    return met_retry(_poging, omschrijving=f"omgevingsvergunningen p{page}")
 
 
 def _valid_uuid(val):
