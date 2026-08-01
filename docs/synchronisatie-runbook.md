@@ -322,7 +322,7 @@ Noodroute als prod onherstelbaar afwijkt: `restore-dev-naar-prod.ps1`
 | G-94 | geen delta voor i2a/vth op prod; geen scheduling | stap 4 en 5 blijven handwerk |
 | — | i2a-datum hardgecodeerd op `10-04-2026` | i2a laadt de april-toestand |
 | — | rapportage meet exceptions, geen volledigheid | "0 fouten" gaf jarenlang valse geruststelling |
-| — | drieslag-MV's worden onvoorwaardelijk volledig herbouwd | ~1,5 u per sync, ook bij 16 nieuwe regelingen op 1.990 — dezelfde fout-vorm als de subdiv-storm van G-93, maar dan in de post-fase |
+| — | *opgelost 2026-08-01* — drieslag kostte ~1,5 u door een ongescopete naam-match | nu 5,5 min lokaal / 11 min prod; zie hieronder |
 
 ### Refresh-modus van de MV's
 
@@ -335,11 +335,32 @@ tweede kopie en verschilt die daarna. Gemeten op prod: `naammatch_signaal`
 
 Draai je overdag, terwijl viewer/bot moeten doorlezen: `--concurrently`.
 
-**Dit is een pleister, geen oplossing.** De echte ingreep is de view
-incrementeel maken: 6,2M rijen over 1.990 regelingen is ~3.100 rijen per
-regeling, dus voor 16 gewijzigde regelingen ~50.000 rijen in plaats van alles.
-Dat vraagt de matview te vervangen door een echte tabel met per-regeling
-verwijderen-en-invoegen, en wint dan zowel lokaal als op prod.
+### De echte oplossing: intra-scoping (uitgevoerd 2026-08-01)
+
+De refresh was niet traag omdat hij veel moest doen, maar omdat hij het
+**verkeerde** deed. `naammatch_signaal` vergeleek élke tekst in Nederland met
+élke objectnaam in Nederland (6,3M treffers), waarna de volgende laag daar 99,3%
+van weggooide en 43.045 overhield — de treffers binnen dezelfde regeling.
+
+De intra-gescopete definitie stond al in
+`scripts/2026-05-add-naammatch-signaal.sql` (gebruiker-keuze 2026-05-08) maar was
+nooit toegepast; de database draaide nog v1. Migratie:
+`scripts/2026-08-naammatch-intra-scoping.py`.
+
+| | Vóór | Na |
+|---|---|---|
+| Rijen in de basis | 6.324.956 | **43.045** |
+| Uitkomst downstream | 43.045 / 496.931 | **identiek** |
+| Hele drieslag-fase lokaal | ~82 min | **5,5 min** |
+| Op prod | haalde de 3-uurs-timeout niet | **11,1 min** |
+
+De landelijke kruisvergelijking is niet verdwenen maar on-demand geworden:
+`scripts/analyse-naammatch-cross-regeling.sql`. Niets in de codebase las haar
+(geverifieerd).
+
+Daarmee is incrementeel verversen niet meer nodig: een volledige herbouw van
+5 minuten is prima, ook nachtelijks. Incrementeel maken bovenop een berekening
+die 147× te veel deed, zou het echte probleem juist hebben verstopt.
 
 **De laatste is de belangrijkste openstaande verbetering.** Het rapport zou
 *verwacht* (preview) naast *daadwerkelijk geladen* moeten zetten en afwijkingen

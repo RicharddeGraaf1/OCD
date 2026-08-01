@@ -1,0 +1,14 @@
+{
+ "naammatch_signaal": 6203427,
+ "naammatch_signaal_intra": 40801,
+ "tekst_object_consistentie": 495391,
+ "tekst_object_consistentie_mv": 487881,
+ "klassen": {
+  "annotatie_zonder_naam_match": 440180,
+  "consistent_aanwezig": 12158,
+  "intioref_zonder_annotatie_of_naam": 6477,
+  "niet_annoteerbaar": 20698,
+  "tegenstrijdige_doelen": 725,
+  "vermoedelijk_vergeten_annotatie": 7643
+ }
+}
