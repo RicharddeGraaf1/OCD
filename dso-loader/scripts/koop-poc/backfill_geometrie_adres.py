@@ -118,7 +118,8 @@ WHERE raw_xml IS NOT NULL
 """
 
 
-def verzamel(conn, geocoder: Geocoder, postcode: str | None, maximum: int | None):
+def verzamel(conn, geocoder: Geocoder, postcode: str | None, maximum: int | None,
+             steekproef: int | None = None):
     """Fase 1 — read-only: bepaal welke records een betere kandidaat hebben."""
     sql = SELECT_SQL
     params: list = []
@@ -130,17 +131,25 @@ def verzamel(conn, geocoder: Geocoder, postcode: str | None, maximum: int | None
         sql += " AND (postcode LIKE %s OR huisnummertoevoeging LIKE %s)"
         pat = postcode.rstrip("%") + "%"
         params.extend([pat, pat])
-    sql += " ORDER BY koop_id"
-    if maximum:
-        sql += f" LIMIT {int(maximum)}"
+    if steekproef:
+        # Willekeurige trekking voor een landelijke schatting. Sorteren op
+        # koop_id zou een enkele bronhouder opleveren (de id's beginnen met
+        # bgr-/gmb-/prb-/wsb-), en dat zegt niets over het landelijk beeld.
+        sql += f" ORDER BY md5(koop_id) LIMIT {int(steekproef)}"
+    else:
+        sql += " ORDER BY koop_id"
+        if maximum:
+            sql += f" LIMIT {int(maximum)}"
 
     lees = get_conn()  # aparte leesconnectie: de geocoder commit op de zijne
     cur = lees.cursor()
     wijzigingen: list[dict] = []
-    stats = {"bekeken": 0, "geen_adres": 0, "geen_geocode": 0,
+    stats = {"bekeken": 0, "geen_adres": 0, "geen_geocode": 0, "dicht_bijeen": 0,
              "al_goed": 0, "te_klein": 0, "buiten_bereik": 0}
     try:
-        for rij in cur.stream(sql, params) if not maximum else cur.execute(sql, params).fetchall():
+        rijen = (cur.execute(sql, params).fetchall()
+                 if (maximum or steekproef) else cur.stream(sql, params))
+        for rij in rijen:
             stats["bekeken"] += 1
             vraag = bouw_vraag(rij["straatnaam"], rij["huisnummer"], rij["huisletter"],
                                rij["huisnummertoevoeging"], rij["postcode"],
@@ -159,6 +168,21 @@ def verzamel(conn, geocoder: Geocoder, postcode: str | None, maximum: int | None
                     if c:
                         cands.append(c)
             if len(cands) < 2:
+                continue
+
+            # Voorfilter zónder netwerk: liggen alle kandidaten binnen MIN_WINST_M
+            # van elkaar, dan kan de winst per definitie niet groter zijn dan die
+            # drempel en zou de geocode toch niets veranderen. Dat scheelt de
+            # helft van de PDOK-aanroepen — de duurste stap van de hele backfill.
+            met_coords = [c for c in cands
+                          if c.get("rd_x") is not None and c.get("rd_y") is not None]
+            if len(met_coords) < 2:
+                continue
+            spreiding = max(
+                ((a["rd_x"] - b["rd_x"]) ** 2 + (a["rd_y"] - b["rd_y"]) ** 2) ** 0.5
+                for i, a in enumerate(met_coords) for b in met_coords[i + 1:])
+            if spreiding < MIN_WINST_M:
+                stats["dicht_bijeen"] += 1
                 continue
 
             geo = geocoder(vraag)
@@ -242,6 +266,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--postcode", help="beperk tot postcodes die hiermee beginnen, bv. 1097")
     p.add_argument("--limit", type=int, help="maximaal aantal records bekijken")
+    p.add_argument("--sample", type=int, help="willekeurige steekproef van N records (schatting)")
     p.add_argument("--apply", action="store_true", help="wijzigingen wegschrijven")
     p.add_argument("--rollback", action="store_true", help="vorige ronde terugdraaien")
     args = p.parse_args()
@@ -259,12 +284,14 @@ def main() -> None:
         return
 
     geocoder = Geocoder(conn)
-    bereik = f"postcode {args.postcode}*" if args.postcode else "HELE DATASET"
+    bereik = (f"steekproef van {args.sample}" if args.sample
+              else f"postcode {args.postcode}*" if args.postcode else "HELE DATASET")
     print(f"Fase 1 — kandidaten herwegen ({bereik})…", flush=True)
-    wijzigingen, stats = verzamel(conn, geocoder, args.postcode, args.limit)
+    wijzigingen, stats = verzamel(conn, geocoder, args.postcode, args.limit, args.sample)
 
     print(f"\nBekeken records met >=2 markeringen : {stats['bekeken']:,}")
     print(f"  geen bruikbaar adres              : {stats['geen_adres']:,}")
+    print(f"  kandidaten <{MIN_WINST_M:.0f} m uiteen (geen geocode nodig): {stats['dicht_bijeen']:,}")
     print(f"  adres niet gevonden bij PDOK      : {stats['geen_geocode']:,}")
     print(f"  keuze was al de dichtste          : {stats['al_goed']:,}")
     print(f"  winst < {MIN_WINST_M:.0f} m, niet aangeraakt      : {stats['te_klein']:,}")
@@ -279,6 +306,11 @@ def main() -> None:
         print("\nvoorbeelden:")
         for w in sorted(wijzigingen, key=lambda x: -(x["voor"] or 0))[:12]:
             print(f"  {w['id']:<18} {w['voor']:>6.0f} m -> {w['na']:>4.0f} m   {w['titel'][:58]}")
+
+    if args.sample and args.apply:
+        print("\n--sample is bedoeld om te schatten; combineer het niet met --apply.")
+        conn.close()
+        return
 
     if args.apply and wijzigingen:
         print(f"\nFase 2 — {len(wijzigingen):,} records bijwerken…", flush=True)
