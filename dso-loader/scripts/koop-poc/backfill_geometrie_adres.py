@@ -53,7 +53,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.db import get_conn  # noqa: E402
 from src.loaders.adres_geocode import (  # noqa: E402
-    MIN_WINST_M, Geocoder, bouw_vraag, kies_op_adres, zorg_voor_cache,
+    MIN_WINST_M, Geocoder, bouw_vraag, kies_op_adres, straat_komt_overeen,
+    verschuiving_is_verantwoord, zorg_voor_cache,
 )
 from src.loaders.koop_vergunning import NS, _extract_candidate  # noqa: E402
 
@@ -145,7 +146,8 @@ def verzamel(conn, geocoder: Geocoder, postcode: str | None, maximum: int | None
     cur = lees.cursor()
     wijzigingen: list[dict] = []
     stats = {"bekeken": 0, "geen_adres": 0, "geen_geocode": 0, "dicht_bijeen": 0,
-             "al_goed": 0, "te_klein": 0, "buiten_bereik": 0}
+             "andere_straat": 0, "al_goed": 0, "te_klein": 0, "buiten_bereik": 0,
+             "te_ver_te_zwak": 0}
     try:
         rijen = (cur.execute(sql, params).fetchall()
                  if (maximum or steekproef) else cur.stream(sql, params))
@@ -190,6 +192,12 @@ def verzamel(conn, geocoder: Geocoder, postcode: str | None, maximum: int | None
                 stats["geen_geocode"] += 1
                 continue
 
+            # PDOK geeft altijd een beste treffer, ook op vervuilde invoer.
+            # Gaat die over een andere straat, dan is de koppeling waardeloos.
+            if not straat_komt_overeen(rij["straatnaam"], geo):
+                stats["andere_straat"] += 1
+                continue
+
             huidig = None
             if rij["cur_x"] is not None:
                 huidig = (rij["cur_x"], rij["cur_y"])
@@ -209,6 +217,9 @@ def verzamel(conn, geocoder: Geocoder, postcode: str | None, maximum: int | None
             if huidig is not None:
                 verschuiving = ((beste["rd_x"] - huidig[0]) ** 2
                                 + (beste["rd_y"] - huidig[1]) ** 2) ** 0.5
+            if not verschuiving_is_verantwoord(verschuiving, na):
+                stats["te_ver_te_zwak"] += 1
+                continue
             wijzigingen.append({
                 "id": rij["koop_id"], "gt": beste["geometrie_type"],
                 "rdpt": f"POINT({beste['rd_x']} {beste['rd_y']})",
@@ -295,10 +306,13 @@ def main() -> None:
     print(f"  adres niet gevonden bij PDOK      : {stats['geen_geocode']:,}")
     print(f"  keuze was al de dichtste          : {stats['al_goed']:,}")
     print(f"  winst < {MIN_WINST_M:.0f} m, niet aangeraakt      : {stats['te_klein']:,}")
+    print(f"  geocode wees naar andere straat    : {stats['andere_straat']:,}")
     print(f"  geen kandidaat binnen bereik      : {stats['buiten_bereik']:,}")
+    print(f"  grote sprong op zwak bewijs        : {stats['te_ver_te_zwak']:,}")
     print(f"  TE CORRIGEREN                     : {len(wijzigingen):,}")
     print(f"\ngeocache: {geocoder.uit_cache:,} uit cache, "
-          f"{geocoder.opgehaald:,} opgehaald, {geocoder.niet_gevonden:,} niet gevonden")
+          f"{geocoder.opgehaald:,} opgehaald, {geocoder.niet_gevonden:,} niet gevonden, "
+          f"{geocoder.mislukt:,} mislukt (niet gecached, komen bij een volgende ronde terug)")
 
     if wijzigingen:
         gem = sum(w["voor"] - w["na"] for w in wijzigingen if w["voor"]) / len(wijzigingen)

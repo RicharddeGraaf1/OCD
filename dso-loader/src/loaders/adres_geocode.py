@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from typing import Optional
@@ -53,6 +54,29 @@ MAX_ADRES_AFSTAND_M = 250.0
 # Alleen ingrijpen als het echt uitmaakt. Onder deze winst is de verschuiving
 # ruis (punt versus omhullend vlak van hetzelfde pand).
 MIN_WINST_M = 15.0
+
+# Proportionaliteit: een pin honderden meters of kilometers verplaatsen mag
+# alleen als de gekozen kandidaat daadwerkelijk óp het adres ligt. Ligt hij er
+# nog tientallen meters vanaf, dan weten we eigenlijk niet waar het over gaat
+# en is stilzitten veiliger.
+#
+# Aanleiding: stcrt-2025-21800 (Rijkswaterstaat) zou 112 km verschuiven naar
+# "Regulierenring 2b, Bunnik" en dan nog 207 m van dat adres liggen. Bij
+# rijks- en provinciebekendmakingen is het adres in de titel vaak het
+# kantooradres van de aanvrager en niet de plek van het werk; zo'n pin naar
+# het kantoor verplaatsen maakt het beeld slechter, niet beter.
+GROTE_VERSCHUIVING_M = 250.0
+STERK_BEWIJS_M = 50.0
+
+
+def verschuiving_is_verantwoord(verschuiving_m: float | None,
+                                afstand_na_m: float | None) -> bool:
+    """Mag deze correctie doorgaan, gegeven hoe ver hij de pin verplaatst?"""
+    if verschuiving_m is None or afstand_na_m is None:
+        return True
+    if verschuiving_m <= GROTE_VERSCHUIVING_M:
+        return True
+    return afstand_na_m <= STERK_BEWIJS_M
 
 _PAUZE_S = 0.1  # PDOK is een gratis publieke dienst; niet rammen.
 _POSTCODE_RE = re.compile(r"^\s*(\d{4})\s*([A-Za-z]{2})\s*$")
@@ -130,16 +154,35 @@ def bouw_vraag(
     return ", ".join(delen)
 
 
-def _bevraag_pdok(vraag: str) -> Optional[dict]:
+class PdokOnbereikbaar(RuntimeError):
+    """De dienst gaf geen antwoord — dat is iets anders dan 'niet gevonden'."""
+
+
+def _bevraag_pdok(vraag: str, pogingen: int = 3) -> Optional[dict]:
+    """Vraag PDOK om één adres.
+
+    Geeft None als PDOK het adres niet kent, en werpt PdokOnbereikbaar als de
+    dienst zelf niet antwoordt. Dat onderscheid is essentieel: een netwerkhik
+    zou anders als "bestaat niet" in de cache belanden, en dan is dat adres
+    permanent verloren voor correctie — ook bij een herstart, want de cache
+    wordt juist geraadpleegd om niet opnieuw te vragen.
+    """
     url = PDOK_URL + "?" + urllib.parse.urlencode({
         "q": vraag, "fq": "type:adres", "rows": 1,
         "fl": "weergavenaam,centroide_ll,centroide_rd",
     })
-    try:
-        with urllib.request.urlopen(url, timeout=20) as r:
-            data = json.load(r)
-    except Exception:
-        return None
+    laatste: Exception | None = None
+    for poging in range(pogingen):
+        try:
+            with urllib.request.urlopen(url, timeout=20) as r:
+                data = json.load(r)
+            break
+        except Exception as exc:  # netwerk, time-out, 5xx, kapotte JSON
+            laatste = exc
+            time.sleep(1.5 * (poging + 1))
+    else:
+        raise PdokOnbereikbaar(f"{vraag}: {laatste}")
+
     docs = data.get("response", {}).get("docs") or []
     if not docs:
         return None
@@ -170,6 +213,7 @@ class Geocoder:
         self.uit_cache = 0
         self.opgehaald = 0
         self.niet_gevonden = 0
+        self.mislukt = 0
 
     def __call__(self, vraag: Optional[str]) -> Optional[dict]:
         if not vraag:
@@ -186,7 +230,14 @@ class Geocoder:
         if not self.sta_netwerk_toe:
             return None
 
-        res = _bevraag_pdok(vraag)
+        try:
+            res = _bevraag_pdok(vraag)
+        except PdokOnbereikbaar:
+            # Niet cachen: bij een volgende ronde moet dit adres opnieuw
+            # geprobeerd worden. Dit record slaan we nu gewoon over.
+            self.mislukt += 1
+            time.sleep(_PAUZE_S)
+            return None
         time.sleep(_PAUZE_S)
         with self.conn.cursor() as cur:
             cur.execute(
@@ -204,6 +255,40 @@ class Geocoder:
         else:
             self.opgehaald += 1
         return res
+
+
+def _normaliseer(s: Optional[str]) -> str:
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _straat_uit_weergavenaam(w: Optional[str]) -> str:
+    """'Jacob van Wassenaerlaan 2, 3951CM Maarn' -> 'Jacob van Wassenaerlaan'."""
+    if not w:
+        return ""
+    return re.sub(r"\s+\d.*$", "", w.split(",")[0]).strip()
+
+
+def straat_komt_overeen(straatnaam: Optional[str], geocode: Optional[dict]) -> bool:
+    """Gaat de gevonden geocode wel over dezelfde straat?
+
+    PDOK geeft altijd een beste treffer, ook als de vraag rommel bevat. Zonder
+    deze toets verschoof `Soesterdijkweg` 9,5 km naar `Soestdijkerweg` en
+    `Sappemeesterweg` 6,7 km naar `Sappemeersterweg` — gelijkende namen, heel
+    andere plek. Dat komt doordat het adresveld bij publicaties over meerdere
+    adressen vervuild raakt: `straatnaam` bevat dan "Handmatig", "op" of
+    "Bathmen A", of `woonplaats` bevat een tweede straatnaam.
+
+    Bewust een strikte vergelijking (genormaliseerd gelijk of bevat-elkaar) en
+    geen fuzzy match: bij twijfel liever de bestaande pin laten staan dan hem
+    kilometers verplaatsen op een gelijkende naam. Kost ~1,3% van de anders
+    gevonden correcties.
+    """
+    a = _normaliseer(straatnaam)
+    b = _normaliseer(_straat_uit_weergavenaam(geocode.get("weergavenaam") if geocode else None))
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
 
 
 def kies_op_adres(
