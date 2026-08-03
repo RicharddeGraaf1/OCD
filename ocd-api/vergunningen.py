@@ -13,7 +13,8 @@ Endpoints:
     GET  /v1/vergunningen/{koop_id} — volledige record-details
 
 Filter-conventie (gedeeld door list / pins / facets):
-    q       full-text (ILIKE op titel + beschrijving + inhoud_tekst)
+    q       full-text over titel + beschrijving + inhoud_tekst + adres
+            (tsvector 'dutch' met prefix-match, via idx_vk_tsv)
     tb      type_besluit, repeatable (?tb=aanvraag&tb=verleend)
     ac      activiteit_code, repeatable
     bg      bg_naam, repeatable
@@ -33,6 +34,7 @@ Filter-conventie (gedeeld door list / pins / facets):
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import date, datetime
 from typing import Any, Literal
@@ -111,6 +113,15 @@ class VergunningDetail(VergunningSummary):
 class ListResponse(BaseModel):
     records: list[VergunningSummary]
     total: int
+    total_capped: bool = Field(
+        False,
+        description=(
+            "True als `total` op COUNT_CAP is afgetopt — het echte aantal is hoger. "
+            "Een exacte count is alleen goedkoop zolang hij index-only kan; met een "
+            "bbox- of tekstfilter moet Postgres de heap in en kost hij tientallen "
+            "seconden (zie docstring bij _count_sql)."
+        ),
+    )
     limit: int
     offset: int
     took_ms: int
@@ -126,6 +137,9 @@ class Pin(BaseModel):
 class PinsResponse(BaseModel):
     pins: list[Pin]
     total_matching: int
+    total_capped: bool = Field(
+        False, description="True als total_matching op COUNT_CAP is afgetopt"
+    )
     returned: int
     truncated: bool
     cap: int
@@ -279,6 +293,55 @@ class DoorlooptijdResponse(BaseModel):
 PINS_CAP = 10_000
 LIST_MAX_LIMIT = 500
 
+# Bovengrens voor count(*) op filtersets die niet index-only te beantwoorden
+# zijn (bbox / tekstzoek). Gelijk aan PINS_CAP zodat de UI één idioom houdt:
+# "10.000 van …" op de kaart, "10.000+" in de lijst.
+COUNT_CAP = 10_000
+
+# Lagere pin-cap zodra de zoekterm in meer dan COUNT_CAP records voorkomt.
+# Bij zo'n term moet Postgres de datum-index aflopen en per rij de tsvector
+# opnieuw uitrekenen over inhoud_tekst; die kosten schalen lineair met de cap.
+# Gemeten op prod: 'woning' met cap 10.000 = 16,7 s (koud over de timeout),
+# met cap 2.000 = 1,1 s. De kaart is bij zo'n zoekopdracht toch afgetopt en
+# meldt dat ook — dan liever 2.000 pins snel dan 10.000 pins niet.
+PINS_BREED_CAP = 2_000
+
+# Kolommen waaruit het zoekveld is opgebouwd. Deze expressie moet **letterlijk**
+# gelijk zijn aan die van idx_vk_tsv (GIN, 305 MB), anders valt de planner terug
+# op een seq scan met to_tsvector() per rij en loopt elke zoekopdracht in de
+# statement_timeout. Controleer bij wijziging:
+#   SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_vk_tsv';
+_TSV_EXPR = (
+    "to_tsvector('dutch', coalesce(titel,'') || ' ' || coalesce(beschrijving,'')"
+    " || ' ' || coalesce(inhoud_tekst,'') || ' ' || coalesce(straatnaam,'')"
+    " || ' ' || coalesce(woonplaats,''))"
+)
+
+
+# Publicatie-id zoals KOOP ze uitgeeft: gmb-2026-173404, prb-2025-1234,
+# wsb-2026-20411. Het zoekveld belooft in zijn placeholder dat je hierop kunt
+# zoeken, maar koop_id en zaaknummer_bg zitten niet in de tsvector — en met de
+# oude ILIKE-implementatie liep zo'n zoekopdracht sowieso in de timeout. Zoekt
+# de gebruiker op zo'n code, dan gaan we exact op de PK/btree-index af.
+_ID_PATROON = re.compile(r"^[A-Za-z]{2,5}-\d{4}-\d+$")
+
+
+def _tsquery_arg(q: str) -> str | None:
+    """Zet vrije invoer om in een tsquery-string met prefix-match per woord.
+
+    Prefix (`:*`) omdat de viewer voorheen ILIKE '%term%' deed: wie 'Kalver'
+    typt verwacht Kalverstraat. websearch_to_tsquery() kan geen prefix, dus
+    bouwen we de query zelf — met strikte sanitisatie, want to_tsquery()
+    interpreteert &, |, !, ( ) en : als operatoren.
+
+    Geeft None als er na sanitisatie niets bruikbaars overblijft; de caller
+    laat het q-filter dan weg in plaats van op alles te matchen.
+    """
+    woorden = [w for w in re.split(r"[^0-9A-Za-zÀ-ÿ]+", q) if w]
+    if not woorden:
+        return None
+    return " & ".join(f"{w}:*" for w in woorden[:10])
+
 
 def _parse_bbox(bbox: str | None) -> tuple[float, float, float, float] | None:
     if not bbox:
@@ -300,6 +363,33 @@ def _parse_bbox(bbox: str | None) -> tuple[float, float, float, float] | None:
     return w, s, e, n
 
 
+def _q_filter(q: str | None) -> tuple[str, list[Any], bool] | None:
+    """WHERE-clause voor het vrije zoekveld: (sql, params, is_tekstzoek).
+
+    `is_tekstzoek` onderscheidt de twee regimes. False = exacte code-lookup op
+    een index (altijd goedkoop, altijd exact te tellen). True = full-text, en
+    dan hangt het optimale queryplan af van hoe zeldzaam de term is — zie
+    list_vergunningen.
+    """
+    if not q:
+        return None
+    s = q.strip()
+    if _ID_PATROON.match(s):
+        # Exacte code: publicatie-id of zaaknummer. Beide index-backed
+        # (vergunningkennisgeving_pkey resp. idx_vk_zaaknummer), dus <10 ms.
+        # Full-text zou hier niets vinden: de 'dutch'-parser hakt
+        # gmb-2026-173404 in 'gmb', '-2026', '-173404'.
+        return ("(koop_id = %s OR zaaknummer_bg = %s)", [s, s], False)
+    # Full-text via idx_vk_tsv. Was tot 2026-08 vijf maal ILIKE '%term%', wat
+    # altijd een seq scan over 5,8 GB opleverde: elke zoekopdracht gaf 500 na
+    # de statement_timeout van 20 s. Geen FTS-rank — pure filter, de sortering
+    # blijft op datum.
+    tsq = _tsquery_arg(q)
+    if not tsq:
+        return None
+    return (f"{_TSV_EXPR} @@ to_tsquery('dutch', %s)", [tsq], True)
+
+
 def _build_filters(
     q: str | None,
     tb: list[str],
@@ -319,16 +409,10 @@ def _build_filters(
     clauses: list[str] = []
     params: list[Any] = []
 
-    if q:
-        # ILIKE op gecombineerd zoekveld; geen FTS-rank in v1 — pure filter.
-        clauses.append(
-            "(titel ILIKE %s OR coalesce(beschrijving,'') ILIKE %s "
-            " OR coalesce(inhoud_tekst,'') ILIKE %s "
-            " OR coalesce(straatnaam,'') ILIKE %s "
-            " OR coalesce(woonplaats,'') ILIKE %s)"
-        )
-        like = f"%{q}%"
-        params.extend([like, like, like, like, like])
+    qf = _q_filter(q)
+    if qf:
+        clauses.append(qf[0])
+        params.extend(qf[1])
 
     if tb:
         clauses.append("type_besluit = ANY(%s)")
@@ -376,6 +460,95 @@ def _build_filters(
 
 def _where_sql(clauses: list[str]) -> str:
     return ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+
+def _needs_capped_count(q: str | None, bbox: str | None) -> bool:
+    """Is een exacte count(*) op deze filterset te duur?
+
+    Zonder bbox of tekstfilter kan Postgres de count index-only beantwoorden
+    (idx_vk_geom_notnull_facet dekt alle facetkolommen) — 0,06 s over 883k rijen.
+
+    Mét een bbox kan dat niet: `geometrie_wgs_pt && envelope` moet via de
+    GiST-index en die vraagt altijd een heap-recheck. Gemeten op productie
+    (2026-08-03): landelijke bbox 39,3 s (parallel seq scan, 160.042 blocks),
+    stedelijke bbox 8,8-16,0 s (bitmap heap scan, ~1 treffer per block). Beide
+    over de statement_timeout van 20 s, dus 500 — en juist dát is de call die
+    de viewer bij elke koude start doet, omdat 'binnen kaartbeeld' default aan
+    staat. Een tekstfilter heeft hetzelfde probleem: 'dakkapel' (60.596
+    treffers) kostte 26,0 s.
+
+    Een ander access-pad forceren helpt niet: in een zuivere A/B op verse
+    bboxen was een index scan koud 3,5 s tegen 6,1 s voor de bitmap — dezelfde
+    orde van grootte, want de kosten zitten in het aantal heap-blocks, niet in
+    het plan. Daarom begrenzen we het wérk in plaats van het te versnellen.
+
+    Let op twee randgevallen die géén cap nodig hebben: invoer van enkel
+    spaties/leestekens levert na sanitisatie geen clause op, en een exacte
+    publicatie-id/zaaknummer gaat via een index-equality met hooguit een
+    handvol rijen.
+    """
+    if bbox:
+        return True
+    qf = _q_filter(q)
+    return bool(qf and qf[2])
+
+
+def _count_sql(where: str, capped: bool) -> str:
+    """count(*), eventueel afgetopt op COUNT_CAP.
+
+    De LIMIT in de subquery laat Postgres stoppen zodra er COUNT_CAP+1 rijen
+    gevonden zijn. Op de landelijke bbox — het default kaartbeeld — brengt dat
+    de count van 39,3 s naar 0,07 s terug.
+    """
+    if not capped:
+        return f"SELECT count(*) AS n FROM vth.vergunningkennisgeving {where}"
+    return (
+        "SELECT count(*) AS n FROM ("
+        f"SELECT 1 FROM vth.vergunningkennisgeving {where} LIMIT {COUNT_CAP + 1}"
+        ") s"
+    )
+
+
+def _tel(cur, where: str, params: list[Any], capped: bool) -> tuple[int, bool]:
+    """(totaal, is-afgetopt) — exact waar dat goedkoop kan, anders afgetopt.
+
+    Op een filterset die niet index-only te beantwoorden is (bbox of tekst)
+    vragen we eerst de planner-schatting. Ligt die boven COUNT_CAP, dan slaan
+    we het tellen helemaal over: het antwoord wordt toch "10.000+", en dan is
+    élke seconde die we eraan besteden weggegooid.
+    """
+    if not capped:
+        cur.execute(_count_sql(where, False), params)
+        return cur.fetchone()["n"], False
+    if _geschat_aantal(cur, where, params) > COUNT_CAP:
+        return COUNT_CAP, True
+    cur.execute(_count_sql(where, True), params)
+    n = cur.fetchone()["n"]
+    return (COUNT_CAP, True) if n > COUNT_CAP else (n, False)
+
+
+def _geschat_aantal(cur, where: str, params: list[Any]) -> int:
+    """Geschat aantal treffers uit het queryplan — voert de query niet uit.
+
+    Waarom niet gewoon tellen: bij een tekstfilter helpt de LIMIT in de
+    afgetopte count niets. Een Bitmap Index Scan bouwt eerst de vólledige
+    bitmap over de GIN-index voordat er ook maar één rij uitkomt, dus een
+    brede term als 'woning' kost onverkort tientallen seconden — met of
+    zonder cap. Hetzelfde geldt voor een dichte stedelijke bbox (gemeten:
+    afgetopte count 6,97 s).
+
+    EXPLAIN raakt de tabel niet en kost ~15-30 ms. De schatting wordt nooit
+    aan de gebruiker getoond; hij beslist alleen (a) of een exacte count nog
+    de moeite is en (b) welk queryplan de lijst moet gebruiken. Zit de
+    schatting er een factor naast, dan is het gevolg hooguit dat we net te
+    vroeg of net te laat aftoppen.
+    """
+    cur.execute(
+        "EXPLAIN (FORMAT JSON) SELECT 1 FROM vth.vergunningkennisgeving " + where,
+        params,
+    )
+    plan = list(cur.fetchone().values())[0]
+    return int(plan[0]["Plan"]["Plan Rows"])
 
 
 _SORT_SQL: dict[str, str] = {
@@ -426,20 +599,53 @@ def list_vergunningen(
     clauses, params = _build_filters(q, tb, ac, bg, org, th, vanaf, totd, geom, ontv, zaak, bbox, afwijk)
     where = _where_sql(clauses)
     order = _SORT_SQL[sort]
+    capped = _needs_capped_count(q, bbox)
+    qf = _q_filter(q)
+    tekstzoek = bool(qf and qf[2])
 
-    count_sql = f"SELECT count(*) AS n FROM vth.vergunningkennisgeving {where}"
-    list_sql = (
-        f"SELECT {_LIST_COLS} FROM vth.vergunningkennisgeving "
-        f"{where} ORDER BY {order} LIMIT %s OFFSET %s"
-    )
+    # Twee plannen voor dezelfde tekstzoekopdracht; welk van de twee wint hangt
+    # volledig af van hoe breed de term is:
+    #
+    #   zonder barrière — de planner loopt idx_vk_datum aflopend af en toetst
+    #     per rij de tsvector opnieuw tot hij `limit` treffers heeft. Optimaal
+    #     bij een brede term ('woning' zit in ~1 op de 5 records: klaar na een
+    #     paar honderd rijen). Rampzalig bij een zeldzame term: 'zonnepark'
+    #     (741 van 883k) moet dan tienduizenden rijen toetsen -> 45 s+.
+    #
+    #   met barrière (OFFSET 0 blokkeert het samenvouwen van de subquery) —
+    #     eerst de GIN-scan, dan pas sorteren. Optimaal bij een zeldzame term
+    #     (0,02 s), maar bij een brede term materialiseert hij honderdduizenden
+    #     rijen voordat er gesorteerd wordt -> 500 na de timeout.
+    #
+    # De capped count vertelt ons gratis in welk regime we zitten, dus die
+    # gebruiken we als schakelaar.
+    def _list_sql(met_barriere: bool) -> str:
+        if met_barriere:
+            return (
+                f"SELECT * FROM (SELECT {_LIST_COLS} FROM vth.vergunningkennisgeving "
+                f"{where} OFFSET 0) s ORDER BY {order} LIMIT %s OFFSET %s"
+            )
+        return (
+            f"SELECT {_LIST_COLS} FROM vth.vergunningkennisgeving "
+            f"{where} ORDER BY {order} LIMIT %s OFFSET %s"
+        )
+
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(count_sql, params)
-        total = cur.fetchone()["n"]
-        cur.execute(list_sql, params + [limit, offset])
+        total, total_capped = _tel(cur, where, params, capped)
+        # De plankeuze hangt af van de selectiviteit van de zóekterm, los van
+        # de overige filters: een zeldzame term binnen een landelijke bbox
+        # heeft nog steeds de barrière nodig.
+        breed = tekstzoek and _geschat_aantal(cur, _where_sql([qf[0]]), qf[1]) > COUNT_CAP
+        cur.execute(_list_sql(tekstzoek and not breed), params + [limit, offset])
         records = [VergunningSummary(**dict(r)) for r in cur.fetchall()]
     took = int((time.perf_counter() - t0) * 1000)
     return ListResponse(
-        records=records, total=total, limit=limit, offset=offset, took_ms=took
+        records=records,
+        total=total,
+        total_capped=total_capped,
+        limit=limit,
+        offset=offset,
+        took_ms=took,
     )
 
 
@@ -470,22 +676,41 @@ def list_pins(
         q, tb, ac, bg, org, th, vanaf, totd, True, ontv, zaak, bbox, afwijk
     )
     where = _where_sql(clauses)
-    count_sql = f"SELECT count(*) AS n FROM vth.vergunningkennisgeving {where}"
-    pins_sql = (
-        f"SELECT koop_id AS id, type_besluit AS tb, "
-        f"  ST_X(geometrie_wgs_pt) AS lon, ST_Y(geometrie_wgs_pt) AS lat "
-        f"FROM vth.vergunningkennisgeving {where} "
-        f"ORDER BY datum_publicatie DESC, koop_id DESC LIMIT %s"
+    capped = _needs_capped_count(q, bbox)
+    qf = _q_filter(q)
+    tekstzoek = bool(qf and qf[2])
+    _pin_cols = (
+        "koop_id AS id, type_besluit AS tb, "
+        "ST_X(geometrie_wgs_pt) AS lon, ST_Y(geometrie_wgs_pt) AS lat"
     )
+
+    def _pins_sql(met_barriere: bool) -> str:
+        # Zelfde afweging als in list_vergunningen; zie de toelichting daar.
+        if met_barriere:
+            return (
+                f"SELECT id, tb, lon, lat FROM ("
+                f"SELECT {_pin_cols}, datum_publicatie "
+                f"FROM vth.vergunningkennisgeving {where} OFFSET 0) s "
+                f"ORDER BY datum_publicatie DESC, id DESC LIMIT %s"
+            )
+        return (
+            f"SELECT {_pin_cols} "
+            f"FROM vth.vergunningkennisgeving {where} "
+            f"ORDER BY datum_publicatie DESC, koop_id DESC LIMIT %s"
+        )
+
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(count_sql, params)
-        total = cur.fetchone()["n"]
-        cur.execute(pins_sql, params + [cap])
+        total, total_capped = _tel(cur, where, params, capped)
+        breed = tekstzoek and _geschat_aantal(cur, _where_sql([qf[0]]), qf[1]) > COUNT_CAP
+        if breed:
+            cap = min(cap, PINS_BREED_CAP)
+        cur.execute(_pins_sql(tekstzoek and not breed), params + [cap])
         pins = [Pin(**dict(r)) for r in cur.fetchall()]
     took = int((time.perf_counter() - t0) * 1000)
     return PinsResponse(
         pins=pins,
         total_matching=total,
+        total_capped=total_capped,
         returned=len(pins),
         truncated=total > len(pins),
         cap=cap,
