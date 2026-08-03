@@ -200,6 +200,24 @@ ON CONFLICT ($PK) DO UPDATE SET $setClause;
     if($LASTEXITCODE -ne 0){ throw "upsert op prod faalde (exit $LASTEXITCODE)" }
     Remove-Item $importFile -ErrorAction SilentlyContinue
     Ok "Delta ge-upsert op prod ($nDelta rijen aangeboden)."
+
+    # Vastleggen in de laad-administratie, anders liegt het data-actualiteit-
+    # dashboard over juist de bron die het vaakst ververst. Op 2026-08-01 stond
+    # 'koop-sru-vergunningen' daar op 4 juli terwijl de data t/m 31 juli op prod
+    # stond: de sync-fase registreerde niets, en deze push-route ook niet.
+    # De sync-kant is gerepareerd in full_sync.fase_vth; dit is de prod-kant.
+    $regSql = @"
+INSERT INTO core.load_run (bron, scope, status, started_at, finished_at, n_verwerkt, n_fout)
+VALUES ('koop-sru-vergunningen',
+        'push vanuit lokaal (refresh-koop-to-prod.ps1)',
+        'ok', now(), now(), $nDelta, 0);
+"@
+    & $psql $ProdUrl -v ON_ERROR_STOP=1 -c $regSql | Out-Null
+    if($LASTEXITCODE -ne 0){
+        Warn "kon de push niet vastleggen in core.load_run — dashboard blijft achterlopen"
+    } else {
+        Ok "Push vastgelegd in core.load_run (bron koop-sru-vergunningen)."
+    }
 }
 
 # ---- 3. VACUUM + MATVIEWS OP PROD ----------------------------------------

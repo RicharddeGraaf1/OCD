@@ -287,6 +287,20 @@ def fase_i2a(bronhouders):
 # ── Fase 5: vth ──────────────────────────────────────────────────────
 
 def fase_vth():
+    """KOOP-kennisgevingen + BOPA-snapshot.
+
+    Draait binnen een `load_run` zodat de fase in het data-actualiteit-dashboard
+    verschijnt. Zonder die registratie stond `koop-sru-vergunningen` daar op
+    4 juli terwijl de data t/m 31 juli geladen was (geconstateerd 2026-08-01) —
+    het dashboard loog dus over juist de bron die dagelijks vers is.
+    """
+    from src.run_log import load_run
+    with load_run("koop-sru-vergunningen", scope="sync:dagen sinds watermark") as run:
+        n_fout = _fase_vth_werk()
+        run.set(n_fout=n_fout)
+
+
+def _fase_vth_werk() -> int:
     py = sys.executable
     conn = get_conn()
     cur = conn.cursor()
@@ -299,8 +313,10 @@ def fase_vth():
         vanaf = vandaag - datetime.timedelta(days=7)
 
     regels = []
+    n_fout = 0
     if vanaf > vandaag:
         regels.append("- KOOP-kennisgevingen: al bij (geen nieuwe dagen)")
+        ok1 = ok2 = True
     else:
         ok1 = subproc([py, "-m", "src.cli", "load-koop",
                        "--from", vanaf.isoformat(), "--to", vandaag.isoformat()],
@@ -318,6 +334,7 @@ def fase_vth():
     ok_ovg = subproc([py, "-m", "src.cli", "load-ovg"], "load-ovg (afwijkvergunningen)")
     regels.append(f"- DSO-afwijkvergunningen (BOPA): {'ok' if ok_ovg else 'FOUT'}")
     rapporteer("vth (vergunningen)", regels)
+    return sum(0 if ok else 1 for ok in (ok1, ok2, ok_ovg))
 
 
 # ── Fase 6: post-processing ──────────────────────────────────────────

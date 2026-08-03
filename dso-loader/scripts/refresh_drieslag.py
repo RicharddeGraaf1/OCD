@@ -90,11 +90,25 @@ def main():
                     help="hervat bij stap N (1-based). Elke stap commit apart, "
                          "dus na een afgebroken run hoef je de al geslaagde "
                          "stappen niet over te doen. Zie de nummering hierboven.")
+    ap.add_argument("--registreer", action="store_true",
+                    help="leg deze run vast in core.load_run als bron 'drieslag-mv', "
+                         "zodat hij in het data-actualiteit-dashboard verschijnt. "
+                         "NIET gebruiken vanuit full_sync — die wikkelt de aanroep "
+                         "al in een eigen load_run, en dan krijg je twee regels.")
     args = ap.parse_args()
 
     if not 1 <= args.vanaf <= len(STAPPEN):
         ap.error(f"--vanaf moet tussen 1 en {len(STAPPEN)} liggen")
 
+    if args.registreer:
+        from src.run_log import load_run
+        with load_run("drieslag-mv", scope=f"losse run vanaf stap {args.vanaf}"
+                                           f"{' (concurrently)' if args.concurrently else ''}"):
+            return _draai(args)
+    return _draai(args)
+
+
+def _draai(args):
     # Default is een gewone REFRESH: die neemt een ACCESS EXCLUSIVE lock, dus
     # queries op de view wachten tot hij klaar is. Dat is 's nachts akkoord
     # (gebruikerskeuze 2026-08-01) en aanzienlijk goedkoper. Gemeten op prod:
