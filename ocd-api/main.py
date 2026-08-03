@@ -24,6 +24,7 @@ from planvoorraad import router as planvoorraad_router
 from ponsenkaart import router as ponsenkaart_router
 from regelteksten_bij_vraag import router as regelteksten_router
 from semantisch import router as semantisch_router
+from vergunningen import _tsquery_arg
 from vergunningen import router as vergunningen_router
 from mer import router as mer_router
 
@@ -2907,6 +2908,11 @@ def regelingen_zoek(
     soorten_hoofdlijn = _csv_param(soort_hoofdlijn)
     hoofdlijnen = _csv_param(hoofdlijn)
 
+    # Tekstzoeken gaat via de GIN-index op tekst_element; None wanneer er na
+    # sanitisatie geen bruikbaar woord overblijft. Zie de toelichting bij de
+    # WHERE-clause hieronder.
+    ts_arg = _tsquery_arg(q) if q else None
+
     has_annotation_filter = any([
         activiteitengroepen, typen_gebied, groepen_gebied, normgroepen,
         themas, soorten_hoofdlijn, hoofdlijnen,
@@ -2941,18 +2947,46 @@ def regelingen_zoek(
             # sneller dan JOIN+DISTINCT bij regelingen met honderden artikelen.
             # frbr_work erbij zodat een gebruiker op identifier kan zoeken
             # ('AMS_OP', 'NL.IMRO...') i.p.v. alleen titels.
-            base_where.append("""(
-                r.opschrift ILIKE %s
-                OR r.citeertitel ILIKE %s
-                OR r.frbr_work ILIKE %s
-                OR EXISTS (
-                    SELECT 1 FROM p2p.tekst_element te
-                     WHERE te.regeling_expression = r.frbr_expression
-                       AND te.inhoud_plain ILIKE %s
-                )
-            )""")
+            # Metadata-takken blijven ILIKE: `p2p.regeling` is klein (~1.9k rijen)
+            # en substring-match is daar juist gewenst ('IMRO', 'AMS_OP').
+            #
+            # De tekst-tak MOET full-text zijn. `inhoud_plain ILIKE '%…%'` kan
+            # geen index gebruiken en scande 614k tekst-elementen; dat liep op
+            # productie in `statement_timeout` → HTTP 500 op élke q-zoekvraag.
+            #
+            # Twee dingen zijn kritisch:
+            #  1. De predicaat-expressie is LETTERLIJK gelijk aan die van
+            #     `idx_tekst_element_inhoud_fts` (dso-loader/src/ddl.py). Wijkt
+            #     hij af, dan valt de planner stilzwijgend terug op een seq scan
+            #     en is de timeout terug. Controle:
+            #       SELECT indexdef FROM pg_indexes
+            #        WHERE indexname = 'idx_tekst_element_inhoud_fts';
+            #  2. Prefix-match (`:*` via _tsquery_arg), niet websearch_to_tsquery.
+            #     Voorheen deed ILIKE '%geluid%' ook 'geluidzone'; zonder prefix
+            #     zou dat wegvallen, want de 'dutch'-stemmer splitst Nederlandse
+            #     samenstellingen niet. Zelfde afweging als bij vergunningen
+            #     (commit d0c7fab, 'kalver' moet Kalverstraat blijven vinden).
             pattern = f"%{q}%"
-            base_params.extend([pattern, pattern, pattern, pattern])
+            if ts_arg:
+                base_where.append("""(
+                    r.opschrift ILIKE %s
+                    OR r.citeertitel ILIKE %s
+                    OR r.frbr_work ILIKE %s
+                    OR EXISTS (
+                        SELECT 1 FROM p2p.tekst_element te
+                         WHERE te.regeling_expression = r.frbr_expression
+                           AND to_tsvector('dutch', coalesce(te.inhoud_plain, ''))
+                               @@ to_tsquery('dutch', %s)
+                    )
+                )""")
+                base_params.extend([pattern, pattern, pattern, ts_arg])
+            else:
+                # Alleen leestekens ingetypt: tekst-tak weglaten in plaats van
+                # op alles te matchen.
+                base_where.append(
+                    "(r.opschrift ILIKE %s OR r.citeertitel ILIKE %s OR r.frbr_work ILIKE %s)"
+                )
+                base_params.extend([pattern, pattern, pattern])
 
         # ── Annotatie-filters (Phase B) — EXISTS-clauses ─────
         # Elke actieve filter eist dat de regeling MINSTENS ÉÉN matchend
@@ -3047,20 +3081,39 @@ def regelingen_zoek(
                 b.bestuurslaag,
                 (SELECT COUNT(*) FROM p2p.tekst_element te
                   WHERE te.regeling_expression = r.frbr_expression) AS totaal_artikelen,
-                (CASE WHEN %s = '' THEN NULL ELSE
-                    (SELECT COUNT(*) FROM p2p.tekst_element te
-                      WHERE te.regeling_expression = r.frbr_expression
-                        AND te.inhoud_plain ILIKE %s)
-                END)                                      AS hits_in_tekst
+                -- hits_in_tekst wordt hierna in één gegroepeerde query gevuld,
+                -- niet hier. Als gecorreleerde subquery draaide hij pér
+                -- gevonden regeling: gemeten 5,0 s over 527 regelingen tegen
+                -- 0,03 s voor dezelfde telling in één GROUP BY.
+                NULL::bigint                              AS hits_in_tekst
             FROM p2p.regeling r
             JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
             WHERE {' AND '.join(full_where)}
             ORDER BY r.opschrift, r.frbr_expression DESC
         """
-        # SELECT-clause heeft 2 extra params (q + pattern) voor de count
-        select_params = [q, f"%{q}%" if q else ""]
-        cur.execute(ow_query, select_params + full_params)
+        cur.execute(ow_query, full_params)
         ow_rows = cur.fetchall()
+
+        # Tekst-treffers per regeling: één GROUP BY over de gevonden set in
+        # plaats van een gecorreleerde subquery per rij. Dit vult de kolom die
+        # `sort_by=relevantie` gebruikt, dus hij moet vóór het sorteren staan
+        # en over de hele resultaatset gaan — niet alleen de page-window.
+        if ts_arg and ow_rows:
+            cur.execute(
+                """
+                SELECT te.regeling_expression, COUNT(*) AS n
+                  FROM p2p.tekst_element te
+                 WHERE te.regeling_expression = ANY(%s)
+                   AND to_tsvector('dutch', coalesce(te.inhoud_plain, ''))
+                       @@ to_tsquery('dutch', %s)
+                 GROUP BY te.regeling_expression
+                """,
+                ([r["expression"] for r in ow_rows], ts_arg),
+            )
+            hits_per_expression = {r["regeling_expression"]: r["n"] for r in cur.fetchall()}
+            for row in ow_rows:
+                # 0 wanneer de regeling alleen op titel/identificatie matchte.
+                row["hits_in_tekst"] = hits_per_expression.get(row["expression"], 0)
 
         # ── Bestuurslaag-facets ────────────────────────────────
         # Voor elke laag: hoeveel hits zou je krijgen als ALLEEN deze laag
