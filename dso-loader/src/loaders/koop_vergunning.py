@@ -41,6 +41,10 @@ from xml.etree import ElementTree as ET
 import httpx
 
 from src.db import get_conn
+from src.loaders.adres_geocode import (
+    MIN_WINST_M, bouw_vraag, kies_op_adres, straat_komt_overeen,
+    verschuiving_is_verantwoord,
+)
 from src.loaders.koop_deeplinks import extract_deeplinks, upsert_deeplink
 
 SRU_BASE = "https://repository.overheid.nl/sru"
@@ -590,7 +594,8 @@ def parse_record(record_elem: ET.Element) -> Optional[Record]:
         original.find(".//cup:datumTijdstipWijzigingWork", NS)
     )
 
-    geom = parse_gebiedsmarkering(original.findall(".//ow:gebiedsmarkering", NS))
+    geom = parse_gebiedsmarkering(
+        original.findall(".//ow:gebiedsmarkering", NS), titel=titel)
     beschrijving = text_of(original.find(".//dcterms:abstract", NS))
 
     enriched = record_elem.find(".//gzd:enrichedData", NS)
@@ -790,10 +795,92 @@ def _dominant_gemeente(cands: list[dict[str, object]]) -> Optional[str]:
     return max(counts, key=counts.get)
 
 
+_ADRES_GEOCODER = None
+
+
+def set_adres_geocoder(fn) -> None:
+    """Zet de geocoder die de adres-gestuurde keuze voedt (None = uit).
+
+    Zonder geocoder valt de selectie terug op het gedrag van vóór 2026-08:
+    divergentie-gate, gemeente-centroïde, medoïde, Vlak, eerste. Dat is bewust
+    — tests en offline runs moeten zonder netwerk kunnen draaien.
+    """
+    global _ADRES_GEOCODER
+    _ADRES_GEOCODER = fn
+
+
+def _kies_op_titel_adres(
+    cands: list[dict[str, object]], titel: Optional[str]
+) -> tuple[Optional[dict[str, object]], Optional[float]]:
+    """Kandidaat die hoort bij het adres uit de titel, plus de restafstand.
+
+    Het adres komt uit de **titel**, niet uit de adreskolommen: die worden zelf
+    afgeleid uit de gekozen kandidaat, en dan zou de keuze zichzelf bevestigen.
+    """
+    if _ADRES_GEOCODER is None or not titel:
+        return None, None
+    adres = extract_adres_uit_titel(titel)
+    vraag = bouw_vraag(
+        adres.get("straatnaam"), adres.get("huisnummer"), None,
+        adres.get("huisnummertoevoeging"), adres.get("postcode"),
+        adres.get("woonplaats"),
+    )
+    if not vraag:
+        return None, None
+    try:
+        geo = _ADRES_GEOCODER(vraag)
+    except Exception:  # geocoder mag de ingest nooit laten struikelen
+        log.warning("geocoder faalde voor %r; val terug op de basiskeuze", vraag)
+        return None, None
+    if not geo or not straat_komt_overeen(adres.get("straatnaam"), geo):
+        return None, None
+    beste, _, na = kies_op_adres(cands, geo, None)
+    return beste, na
+
+
 def select_geometry_candidate(
     cands: list[dict[str, object]],
+    titel: Optional[str] = None,
 ) -> Optional[dict[str, object]]:
     """Kies de betrouwbaarste geometrie uit meerdere gebiedsmarkeringen.
+
+    Twee lagen. De **basiskeuze** hieronder is het gedrag van G-87 (juli 2026):
+    hij lost grove misplaatsingen op — een Amsterdams adres met een pin in
+    Woerden — maar grijpt bewust pas in boven 1 km, om geen churn te maken op
+    de ~163k records waar punt en omhullend vlak vlak bij elkaar liggen.
+
+    Daaroverheen komt de **adres-gestuurde keuze**: bij blok-zaken levert KOOP
+    een markering per pand (gmb-2024-503409 heeft er 16) en dan zegt de
+    basiskeuze niets over wélk pand de publicatie betreft. Landelijk bleek 1 op
+    de 6 kandidaat-records daardoor op het verkeerde huisnummer te staan,
+    gemiddeld 114 m mis (gaps G-87, §Vervolg 2026-08-03).
+
+    De adres-stap overschrijft alleen bij een winst van minstens MIN_WINST_M
+    die ook proportioneel is; verder blijft de basiskeuze staan.
+    """
+    basis = _basis_keuze(cands)
+    if basis is None or len(cands) < 2:
+        return basis
+
+    beter, restafstand = _kies_op_titel_adres(cands, titel)
+    if beter is None or beter is basis:
+        return basis
+    if beter.get("rd_x") is None or basis.get("rd_x") is None:
+        return basis
+
+    verschuiving = _rd_dist((basis["rd_x"], basis["rd_y"]),
+                            (beter["rd_x"], beter["rd_y"]))
+    if verschuiving < MIN_WINST_M:
+        return basis
+    if not verschuiving_is_verantwoord(verschuiving, restafstand):
+        return basis
+    return beter
+
+
+def _basis_keuze(
+    cands: list[dict[str, object]],
+) -> Optional[dict[str, object]]:
+    """De selectie zoals die sinds G-87 (juli 2026) werkt, zonder geocoder.
 
     Prioriteit:
       1. Adres — een gestructureerd adres is een expliciete geocode.
@@ -857,6 +944,7 @@ def select_geometry_candidate(
 
 def parse_gebiedsmarkering(
     gebieden: "Optional[ET.Element] | list[ET.Element]",
+    titel: Optional[str] = None,
 ) -> dict[str, object]:
     """Parse alle gebiedsmarkeringen en selecteer de betrouwbaarste geometrie.
 
@@ -880,7 +968,7 @@ def parse_gebiedsmarkering(
             if c:
                 cands.append(c)
 
-    return select_geometry_candidate(cands) or _empty_geom()
+    return select_geometry_candidate(cands, titel=titel) or _empty_geom()
 
 
 # ---------- HTTP fetching ----------------------------------------------------
@@ -1115,6 +1203,39 @@ def daterange(start: dt.date, end: dt.date) -> Iterator[dt.date]:
 
 # ---------- Public wrappers --------------------------------------------------
 
+def init_geometrie_selectie(conn):
+    """Voed de geometrie-selectie: gemeente-centroïden + adres-geocoder.
+
+    Zonder deze aanroep valt `select_geometry_candidate` terug op zijn
+    kaalste vorm — `_GEMEENTE_CENTROIDS` blijft leeg en er is geen geocoder,
+    dus bij meerdere gebiedsmarkeringen wint simpelweg de eerste.
+
+    LET OP, dit was een gat: `set_gemeente_centroids` werd alleen aangeroepen
+    in scripts/koop-poc/ingest.py, niet op het pad dat de wekelijkse refresh
+    gebruikt (src.cli load-koop -> load_koop_range). De centroïde-stap uit
+    G-87 deed op productie dus niets. Beide hooks worden nu op één plek gezet.
+
+    De geocoder krijgt een EIGEN connectie: hij commit zijn cacheregels
+    onmiddellijk, en dat mag de transactie van de ingest niet doorsnijden.
+    """
+    try:
+        set_gemeente_centroids(build_gemeente_centroids(conn))
+    except Exception as e:
+        log.warning("gemeente-centroïden niet geladen (%s); selectie zonder anker", e)
+
+    try:
+        from src.loaders.adres_geocode import Geocoder, zorg_voor_cache
+        geo_conn = get_conn()
+        zorg_voor_cache(geo_conn)
+        set_adres_geocoder(Geocoder(geo_conn))
+        log.info("adres-geocoder actief (cache: vth.adres_geocode)")
+        return geo_conn
+    except Exception as e:
+        log.warning("adres-geocoder niet actief (%s); basiskeuze blijft leidend", e)
+        set_adres_geocoder(None)
+        return None
+
+
 def load_koop_range(from_date: str, to_date: str, force: bool = False) -> int:
     """Laad een dagbereik [from_date, to_date] (ISO YYYY-MM-DD) inclusief.
 
@@ -1124,6 +1245,7 @@ def load_koop_range(from_date: str, to_date: str, force: bool = False) -> int:
     start = dt.date.fromisoformat(from_date)
     end = dt.date.fromisoformat(to_date)
     conn = pg_get_conn()
+    geo_conn = init_geometrie_selectie(conn)
     try:
         total = 0
         for day in daterange(start, end):
@@ -1135,6 +1257,9 @@ def load_koop_range(from_date: str, to_date: str, force: bool = False) -> int:
         log.info("Total upserts across range: %d", total)
         return total
     finally:
+        set_adres_geocoder(None)
+        if geo_conn is not None:
+            geo_conn.close()
         conn.close()
 
 
