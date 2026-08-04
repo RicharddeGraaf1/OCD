@@ -298,6 +298,20 @@ LIST_MAX_LIMIT = 500
 # "10.000 van …" op de kaart, "10.000+" in de lijst.
 COUNT_CAP = 10_000
 
+# Bovengrens waaronder materialiseren (de OFFSET 0-barrière) nog loont bij een
+# niet-tekstueel filter. Veel hoger dan COUNT_CAP omdat de kosten hier anders
+# liggen: een bbox-hertoets per rij is spotgoedkoop, dus 40.000 rijen ophalen
+# en er een top-N heapsort overheen doen is prima. Bij tekst geldt COUNT_CAP
+# als grens, want daar wordt per rij de tsvector over inhoud_tekst herberekend.
+BARRIERE_MAX = 150_000
+
+# Lagere pin-cap bij een stadsbrede selectie: die zit boven COUNT_CAP (dus de
+# kaart is toch afgekapt en zegt dat ook) én de treffers liggen verspreid over
+# de heap. Gemeten prod, Amsterdam-bbox: 10.000 pins = 8,8 s koud / 0,58 s warm.
+# Bewust NIET van toepassing op het landelijke kaartbeeld: daar is de selectie
+# zó dicht dat 10.000 pins 0,33 s kosten, en juist daar wil je de clusters vol.
+PINS_TRUNC_CAP = 4_000
+
 # Lagere pin-cap zodra de zoekterm in meer dan COUNT_CAP records voorkomt.
 # Bij zo'n term moet Postgres de datum-index aflopen en per rij de tsvector
 # opnieuw uitrekenen over inhoud_tekst; die kosten schalen lineair met de cap.
@@ -509,22 +523,52 @@ def _count_sql(where: str, capped: bool) -> str:
     )
 
 
-def _tel(cur, where: str, params: list[Any], capped: bool) -> tuple[int, bool]:
-    """(totaal, is-afgetopt) — exact waar dat goedkoop kan, anders afgetopt.
+def _tel(cur, where: str, params: list[Any], capped: bool) -> tuple[int, bool, int]:
+    """(totaal, is-afgetopt, planner-schatting) — exact waar dat goedkoop kan.
 
     Op een filterset die niet index-only te beantwoorden is (bbox of tekst)
     vragen we eerst de planner-schatting. Ligt die boven COUNT_CAP, dan slaan
     we het tellen helemaal over: het antwoord wordt toch "10.000+", en dan is
-    élke seconde die we eraan besteden weggegooid.
+    élke seconde die we eraan besteden weggegooid. De schatting gaat mee terug
+    omdat de caller hem ook voor de plankeuze gebruikt.
     """
     if not capped:
         cur.execute(_count_sql(where, False), params)
-        return cur.fetchone()["n"], False
-    if _geschat_aantal(cur, where, params) > COUNT_CAP:
-        return COUNT_CAP, True
+        return cur.fetchone()["n"], False, -1
+    est = _geschat_aantal(cur, where, params)
+    if est > COUNT_CAP:
+        return COUNT_CAP, True, est
     cur.execute(_count_sql(where, True), params)
     n = cur.fetchone()["n"]
-    return (COUNT_CAP, True) if n > COUNT_CAP else (n, False)
+    return (COUNT_CAP, True, est) if n > COUNT_CAP else (n, False, est)
+
+
+def _gebruik_barriere(cur, capped: bool, est: int, qf) -> bool:
+    """Moet de query de OFFSET 0-barrière gebruiken? Zie list_vergunningen.
+
+    Twee omslagpunten, want de twee filtersoorten hebben een heel andere
+    hertoets-prijs per rij:
+
+    - **tekst** — zonder barrière herberekent Postgres per rij `to_tsvector`
+      over `inhoud_tekst`. Bij een brede term is dat prima (hij is snel klaar),
+      bij een zeldzame term rampzalig. Grens: COUNT_CAP. Gemeten: 'zonnepark'
+      (745 treffers) 45 s+ zonder barrière tegen 0,01 s met; 'dakkapel'
+      (60k) juist 0,41 s zonder tegen 7,08 s mét.
+    - **bbox** — de hertoets is een goedkope geometrie-vergelijking, dus
+      materialiseren loont veel langer door. Grens: BARRIERE_MAX. Gemeten:
+      wijk-bbox (499) 21 s zonder barrière tegen 0,02 s met; Amsterdam-bbox
+      (38.624) 9,5 s zonder tegen 8,4 s mét; landelijke bbox (~660k) 0,33 s
+      zonder — mét zou hij honderdduizenden rijen materialiseren.
+
+    Staat er een tekstfilter, dan telt de selectiviteit van de tékst, niet die
+    van de hele filterset: een zeldzame term binnen een landelijke bbox heeft
+    de barrière nog steeds nodig.
+    """
+    if not capped:
+        return False
+    if qf and qf[2]:
+        return _geschat_aantal(cur, _where_sql([qf[0]]), qf[1]) <= COUNT_CAP
+    return est <= BARRIERE_MAX
 
 
 def _geschat_aantal(cur, where: str, params: list[Any]) -> int:
@@ -600,25 +644,27 @@ def list_vergunningen(
     where = _where_sql(clauses)
     order = _SORT_SQL[sort]
     capped = _needs_capped_count(q, bbox)
-    qf = _q_filter(q)
-    tekstzoek = bool(qf and qf[2])
 
-    # Twee plannen voor dezelfde tekstzoekopdracht; welk van de twee wint hangt
-    # volledig af van hoe breed de term is:
+    # Twee plannen voor dezelfde query; welk van de twee wint hangt af van hoe
+    # sélectief de filterset is. Dit geldt voor élk filter dat de planner via
+    # een aparte index moet oplossen — een tsvector-term net zo goed als een
+    # bbox:
     #
     #   zonder barrière — de planner loopt idx_vk_datum aflopend af en toetst
-    #     per rij de tsvector opnieuw tot hij `limit` treffers heeft. Optimaal
-    #     bij een brede term ('woning' zit in ~1 op de 5 records: klaar na een
-    #     paar honderd rijen). Rampzalig bij een zeldzame term: 'zonnepark'
-    #     (741 van 883k) moet dan tienduizenden rijen toetsen -> 45 s+.
+    #     per rij het filter opnieuw tot hij `limit` treffers heeft. Optimaal
+    #     bij een ruime selectie ('woning' zit in ~1 op de 5 records, een
+    #     landelijke bbox in vrijwel alle: klaar na een paar honderd rijen).
+    #     Rampzalig bij een smalle selectie — 'zonnepark' (741 van 883k) kostte
+    #     zo 45 s+, en een wijk-bbox (499 van 883k) 21 s.
     #
     #   met barrière (OFFSET 0 blokkeert het samenvouwen van de subquery) —
-    #     eerst de GIN-scan, dan pas sorteren. Optimaal bij een zeldzame term
-    #     (0,02 s), maar bij een brede term materialiseert hij honderdduizenden
-    #     rijen voordat er gesorteerd wordt -> 500 na de timeout.
+    #     eerst de GIN-/GiST-scan, dan pas sorteren. Optimaal bij een smalle
+    #     selectie (0,02 s), maar bij een ruime materialiseert hij
+    #     honderdduizenden rijen vóór het sorteren -> 500 na de timeout.
     #
-    # De capped count vertelt ons gratis in welk regime we zitten, dus die
-    # gebruiken we als schakelaar.
+    # De count vertelt ons gratis in welk regime we zitten: hebben we exact
+    # kunnen tellen ónder COUNT_CAP, dan is de selectie klein genoeg om te
+    # materialiseren. Is de count afgetopt, dan is hij dat niet.
     def _list_sql(met_barriere: bool) -> str:
         if met_barriere:
             return (
@@ -631,12 +677,11 @@ def list_vergunningen(
         )
 
     with get_conn() as conn, conn.cursor() as cur:
-        total, total_capped = _tel(cur, where, params, capped)
-        # De plankeuze hangt af van de selectiviteit van de zóekterm, los van
-        # de overige filters: een zeldzame term binnen een landelijke bbox
-        # heeft nog steeds de barrière nodig.
-        breed = tekstzoek and _geschat_aantal(cur, _where_sql([qf[0]]), qf[1]) > COUNT_CAP
-        cur.execute(_list_sql(tekstzoek and not breed), params + [limit, offset])
+        total, total_capped, est = _tel(cur, where, params, capped)
+        cur.execute(
+            _list_sql(_gebruik_barriere(cur, capped, est, _q_filter(q))),
+            params + [limit, offset],
+        )
         records = [VergunningSummary(**dict(r)) for r in cur.fetchall()]
     took = int((time.perf_counter() - t0) * 1000)
     return ListResponse(
@@ -700,11 +745,16 @@ def list_pins(
         )
 
     with get_conn() as conn, conn.cursor() as cur:
-        total, total_capped = _tel(cur, where, params, capped)
-        breed = tekstzoek and _geschat_aantal(cur, _where_sql([qf[0]]), qf[1]) > COUNT_CAP
-        if breed:
-            cap = min(cap, PINS_BREED_CAP)
-        cur.execute(_pins_sql(tekstzoek and not breed), params + [cap])
+        total, total_capped, est = _tel(cur, where, params, capped)
+        barriere = _gebruik_barriere(cur, capped, est, qf)
+        if total_capped:
+            if barriere:
+                # Verspreide selectie boven COUNT_CAP = stadszoom. Afgekapt is
+                # hij toch; minder pins scheelt hier evenredig veel heap-reads.
+                cap = min(cap, PINS_TRUNC_CAP)
+            if tekstzoek and not barriere:
+                cap = min(cap, PINS_BREED_CAP)
+        cur.execute(_pins_sql(barriere), params + [cap])
         pins = [Pin(**dict(r)) for r in cur.fetchall()]
     took = int((time.perf_counter() - t0) * 1000)
     return PinsResponse(
@@ -712,7 +762,11 @@ def list_pins(
         total_matching=total,
         total_capped=total_capped,
         returned=len(pins),
-        truncated=total > len(pins),
+        # `total > len(pins)` alleen is niet genoeg sinds de count afgetopt kan
+        # zijn: dan ís total gelijk aan COUNT_CAP en zou een kaart met precies
+        # zoveel pins zichzelf als compleet melden. Is de count afgetopt, dan
+        # zijn er per definitie méér treffers dan we tonen.
+        truncated=total_capped or total > len(pins),
         cap=cap,
         took_ms=took,
     )
