@@ -4852,6 +4852,172 @@ def viewer_tekstelement_kinderen(expression: str, wid: str, ontwerp_id: str | No
         }
 
 
+@app.get("/v1/register/landelijk", dependencies=[Depends(verify_key)])
+def register_landelijk():
+    """Landelijk beeld voor omgevingsdocumentenregister.nl — fase 6.
+
+    Eén call in plaats van een handvol: de pagina toont uitsluitend
+    aggregaten, en die apart ophalen zou tientallen round-trips kosten
+    (per documenttype één telling).
+
+    **Geen tijdreeksen.** Bewust: de database is een momentopname en er is
+    voor de Ow-kant geen betrouwbare tijdas. Alles hier beschrijft de
+    tóestand, niet de ontwikkeling. Zie het uitvoeringsplan, fase 7 is
+    buiten scope gezet.
+
+    Alle tellingen respecteren `NOT r.inactief`, zodat verdrongen
+    regelingversies niet meetellen.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM p2p.regeling WHERE NOT inactief")
+        ow_totaal = cur.fetchone()["n"]
+
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE ow_regelingen > 0 OR wro_instrumenten > 0) AS n "
+            "FROM core.bronhouder"
+        )
+        bronhouders = cur.fetchone()["n"]
+
+        # Uit de tabel tellen, niet uit `core.bronhouder.wro_instrumenten`:
+        # die gedenormaliseerde kolom is verlopen (55.085 tegen 63.062 in de
+        # tabel, gemeten 2026-08-04). Het filter op pons_status kost ~3,3 s
+        # doordat er geen index op staat; acceptabel omdat de proxy dit
+        # antwoord een dag lang cachet, en het is het enige eerlijke getal —
+        # zoeken filtert er ook op.
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE pons_status = 'actief') AS n "
+            "FROM wro.ruimtelijk_instrument"
+        )
+        wro_totaal = cur.fetchone()["n"]
+
+        cur.execute(
+            """
+            SELECT b.bestuurslaag, count(*) AS n
+            FROM p2p.regeling r
+            JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
+            WHERE NOT r.inactief AND b.bestuurslaag IS NOT NULL
+            GROUP BY b.bestuurslaag ORDER BY n DESC
+            """
+        )
+        per_bestuurslaag = cur.fetchall()
+
+        # Alleen gemeentelijke documenten: een provincie- of waterschapsdocument
+        # hoort niet bij één provincie-gebied, en het Rijk al helemaal niet.
+        # De frontend zegt dat er expliciet bij.
+        cur.execute(
+            """
+            SELECT g.provincie,
+                   count(DISTINCT g.overheidscode) AS gemeenten,
+                   count(r.frbr_expression)        AS ow,
+                   coalesce((SELECT count(*) FROM wro.ruimtelijk_instrument ri
+                             JOIN core.gemeentegrens g2 ON g2.overheidscode = ri.bronhouder
+                             WHERE g2.provincie = g.provincie
+                               AND ri.pons_status = 'actief'), 0) AS wro
+            FROM core.gemeentegrens g
+            LEFT JOIN p2p.regeling r
+                   ON r.bronhouder = g.overheidscode AND NOT r.inactief
+            WHERE g.provincie IS NOT NULL
+            GROUP BY g.provincie ORDER BY ow DESC
+            """
+        )
+        per_provincie = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT coalesce(r.documenttype, 'onbekend') AS documenttype,
+                   count(*) AS n
+            FROM p2p.regeling r
+            WHERE NOT r.inactief
+            GROUP BY 1 ORDER BY n DESC
+            """
+        )
+        per_documenttype = cur.fetchall()
+
+        # ── Opvallend ────────────────────────────────────────
+        # Vier uitschieters die zonder tijdas te bepalen zijn. De vier uit het
+        # oorspronkelijke ontwerp die datums nodig hebben (drukste
+        # bekendmakingsdag, meeste wijzigingen, kortste geldigheidsduur,
+        # snelste bronhouder) zitten er bewust niet in.
+        opvallend = []
+
+        cur.execute(
+            """
+            SELECT r.frbr_expression, r.opschrift, count(*) AS n
+            FROM p2p.tekst_element te
+            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+            WHERE NOT r.inactief
+            GROUP BY 1, 2 ORDER BY n DESC LIMIT 1
+            """
+        )
+        if (r := cur.fetchone()):
+            opvallend.append({
+                "kop": "Grootste omgevingsdocument",
+                "waarde": r["opschrift"] or "(zonder opschrift)",
+                "noot": f"{r['n']:,} tekstelementen".replace(",", "."),
+                "expression": r["frbr_expression"],
+            })
+
+        cur.execute(
+            "SELECT naam, count(*) AS n FROM p2p.activiteit "
+            "WHERE naam IS NOT NULL GROUP BY 1 ORDER BY n DESC LIMIT 1"
+        )
+        if (r := cur.fetchone()):
+            opvallend.append({
+                "kop": "Meest geannoteerde activiteit",
+                "waarde": r["naam"],
+                "noot": f"in {r['n']} omgevingsdocumenten geannoteerd",
+                "expression": None,
+            })
+
+        cur.execute(
+            "SELECT type, count(*) AS n FROM p2p.gebiedsaanwijzing "
+            "WHERE type IS NOT NULL GROUP BY 1 ORDER BY n DESC LIMIT 1"
+        )
+        if (r := cur.fetchone()):
+            opvallend.append({
+                "kop": "Meest gebruikte gebiedsaanwijzing",
+                "waarde": r["type"],
+                "noot": f"{r['n']} keer aangewezen",
+                "expression": None,
+            })
+
+        cur.execute(
+            """
+            SELECT n.type_norm, n.eenheid, nw.kwantitatieve_waarde AS waarde,
+                   r.frbr_expression, r.opschrift
+            FROM p2p.normwaarde nw
+            JOIN p2p.norm n ON n.identificatie = nw.norm_id
+            JOIN p2p.juridische_regel_norm jrn ON jrn.norm_id = n.identificatie
+            JOIN p2p.juridische_regel jr ON jr.identificatie = jrn.juridische_regel_id
+            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+            WHERE nw.kwantitatieve_waarde IS NOT NULL
+              AND n.type_norm ILIKE '%hoogte%'
+              AND NOT r.inactief
+            ORDER BY nw.kwantitatieve_waarde DESC LIMIT 1
+            """
+        )
+        if (r := cur.fetchone()):
+            opvallend.append({
+                "kop": "Hoogste genormeerde hoogte",
+                "waarde": f"{r['waarde']:g} {r['eenheid'] or ''}".strip(),
+                "noot": f"{r['type_norm']} — {r['opschrift'] or '(zonder opschrift)'}",
+                "expression": r["frbr_expression"],
+            })
+
+    return {
+        "totalen": {
+            "ow": ow_totaal,
+            "wro": wro_totaal,
+            "bronhouders": bronhouders,
+        },
+        "per_bestuurslaag": per_bestuurslaag,
+        "per_provincie": per_provincie,
+        "per_documenttype": per_documenttype,
+        "opvallend": opvallend,
+    }
+
+
 @app.get("/v1/overzicht", dependencies=[Depends(verify_key)])
 def overzicht():
     """Database-overzicht: totalen per tabel."""
