@@ -2564,11 +2564,78 @@ def viewer_teksten(req: TekstenRequest = Body(...)):
             (HERTAAL_MODEL, HERTAAL_PROMPT_VERSIE, wids),
         )
         rows = cur.fetchall()
+        iorefs = _iorefs_bij_wids(cur, wids)
     return {"teksten": [
         {"wid": r["wid"], "tekst": r["tekst"], "begrijpelijk": r["begrijpelijk"],
-         "inactief": bool(r["inactief"])}
+         "inactief": bool(r["inactief"]),
+         "iorefs": iorefs.get(r["wid"], {})}
         for r in rows
     ]}
+
+
+def _iorefs_bij_wids(cur, wids: list[str]) -> dict[str, dict]:
+    """Per wid: de IntIoRef'en in dat tekst_element, opgelost naar hun GIO.
+
+    Additief veld op /v1/viewer/teksten. Reden om het hier te doen en niet in
+    een eigen call: de leestekst laadt toch al per artikel, en de renderer moet
+    bij het tékenen al weten of een verwijzing klikbaar is. Een knop die pas
+    na de klik blijkt niets op te leveren is erger dan geen knop.
+
+    Twee-traps: IntIoRef.@ref = wId van een ExtIoRef in HETZELFDE document;
+    die ExtIoRef draagt de FRBR van het GIO. `target_gio_expression` heeft die
+    keten al opgelost, maar staat leeg zodra de GIO-rij is opgeruimd
+    (gaps.md G-106) — de LATERAL hieronder haalt de FRBR dan alsnog uit de
+    ExtIoRef zelf. Zo kent het paneel altijd minstens de identiteit van waar
+    de verwijzing heen wijst, ook als de geometrie ontbreekt.
+    """
+    if not wids:
+        return {}
+    cur.execute(
+        """
+        WITH te AS (
+          SELECT DISTINCT ON (t.wid) t.id, t.wid, t.regeling_expression
+          FROM p2p.tekst_element t
+          LEFT JOIN p2p.regeling r ON r.frbr_expression = t.regeling_expression
+          WHERE t.wid = ANY(%s)
+          ORDER BY t.wid, r.inactief ASC NULLS FIRST
+        ),
+        ir AS (
+          SELECT te.wid, te.regeling_expression, i.target_ref, i.target_gio_expression
+          FROM te
+          JOIN p2p.tekst_inline_referentie i ON i.tekst_element_id = te.id
+          WHERE i.soort = 'IntIoRef'
+        )
+        SELECT ir.wid, ir.target_ref,
+               coalesce(ir.target_gio_expression, e.target_ref) AS gio,
+               g.naam,
+               EXISTS (SELECT 1 FROM p2p.gio_locatie gl
+                       WHERE gl.gio_frbr = coalesce(ir.target_gio_expression, e.target_ref)
+                      ) AS heeft_geometrie
+        FROM ir
+        LEFT JOIN LATERAL (
+          SELECT e2.target_ref
+          FROM p2p.tekst_inline_referentie e2
+          JOIN p2p.tekst_element t2 ON t2.id = e2.tekst_element_id
+          WHERE e2.soort = 'ExtIoRef'
+            AND e2.eigen_wid = ir.target_ref
+            AND t2.regeling_expression = ir.regeling_expression
+          LIMIT 1
+        ) e ON TRUE
+        LEFT JOIN p2p.geo_informatieobject g
+               ON g.frbr_expression = coalesce(ir.target_gio_expression, e.target_ref)
+        """,
+        (wids,),
+    )
+    uit: dict[str, dict] = {}
+    for r in cur.fetchall():
+        if not r["gio"]:
+            continue
+        uit.setdefault(r["wid"], {})[r["target_ref"]] = {
+            "gio": r["gio"],
+            "naam": r["naam"],
+            "heeft_geometrie": bool(r["heeft_geometrie"]),
+        }
+    return uit
 
 
 class HertalingLookupRequest(BaseModel):
@@ -3948,6 +4015,272 @@ def viewer_geometrie_post(req: GeometrieRequest = Body(...)):
     """
     ids = [lid.strip() for lid in req.locatie_ids if lid and lid.strip()]
     return _viewer_geometrie(ids)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GIO-paneel — een informatieobject achter een IntIoRef ontsluiten
+#
+# Ontwerp + metingen: vault_v1/analysis/GIO-paneel bij een IntIoRef.md
+#
+# Twee dingen zijn hier niet vrijblijvend:
+#
+# 1. GEOMETRIE GAAT NIET ALS GeoJSON DE DEUR UIT. Over alle 4.591 GIO's met
+#    geometrie is de ruwe GeoJSON p95 4,45 MB en max 264 MB (gemiddeld 16,7
+#    locaties per GIO, max 5.337). Simplificeren in meters lost dat niet op —
+#    p95 blijft 1,16 MB bij een tolerantie van één beeldpixel, tegen ~0,4 s
+#    per GIO. Duizenden losse vlakjes zijn een aantal-probleem, geen
+#    precisie-probleem. Daarom reduceren we in PIXELRUIMTE: eerst affien naar
+#    beeldpixels, dan snappen op een halve pixel (sub-pixel-vlakjes vallen
+#    samen en verdwijnen), dan simplificeren, dan ST_AsSVG. Meting op 320
+#    GIO's bij 380 px: 91,0 % onder 60 kB op de fijne pass, 97,5 % na de
+#    grove, ~29 ms per GIO.
+#
+# 2. ST_AsSVG NEGEERT Y. `ST_AsSVG(POLYGON((0 0,10 0,10 10,0 10,0 0)))` geeft
+#    `M 0 0 L 10 0 10 -10 0 -10 Z`. De affine hieronder flipt daarom ZELF NIET
+#    (e = +s); de negatie van ST_AsSVG doet dat werk. Het pad loopt dus van
+#    y=0 tot y=-hoogte, en daarom levert dit endpoint een `viewbox` mee in
+#    plaats van de client die conventie te laten raden.
+# ═══════════════════════════════════════════════════════════════════════
+
+# Nederlandse WMTS-tilematrix (EPSG:28992), geverifieerd tegen de
+# GetCapabilities van service.pdok.nl/brt/achtergrondkaart/wmts/v2_0:
+# 256 px-tegels, oorsprong linksboven, macht-van-twee-piramide.
+GIO_TEGEL_M0 = 3440.64  # meter per pixel op zoomniveau 0 (= scale 12288000 * 0.00028)
+GIO_PLAAT_BREEDTE = 380
+GIO_PLAAT_HOOGTE = 300
+GIO_MARGE = 0.12          # lucht rond de vorm, als fractie van de extent
+GIO_SVG_BUDGET = 60_000   # tekens; daarboven een grovere pass, dan opgeven
+
+
+def _gio_zoom(dx: float, dy: float) -> int:
+    """Fijnste zoomniveau waarop de extent nog volledig in de plaat past.
+
+    Resolutie r(z) = 3440,64 / 2^z m/px, en de plaat is een vast aantal
+    pixels. De extent past dus zolang r >= max(dx/breedte, dy/hoogte). We
+    zoeken de grootste z (fijnste beeld) die daaraan nog voldoet — één stap
+    verder en de vorm loopt buiten de plaat.
+
+    Niet naar het eerste niveau springen dat fijn genoeg *lijkt*: r loopt
+    omlaag met z, dus de test moet op z+1 staan, niet op z.
+    """
+    nodig = max(dx / GIO_PLAAT_BREEDTE, dy / GIO_PLAAT_HOOGTE, 1e-6)
+    z = 0
+    while z < 19 and GIO_TEGEL_M0 / (2 ** (z + 1)) >= nodig:
+        z += 1
+    return z
+
+
+def _gio_kaart(cur, gio: str) -> dict | None:
+    """Bouw het kaartblok: plaat-extent, zoomniveau en SVG-pad in pixels."""
+    cur.execute(
+        """
+        SELECT ST_Extent(l.geometrie)::text AS bbox, count(*) AS n_loc
+        FROM p2p.gio_locatie gl
+        JOIN p2p.locatie l ON l.identificatie = gl.locatie_id
+        WHERE gl.gio_frbr = %s
+        """,
+        (gio,),
+    )
+    row = cur.fetchone()
+    if not row or not row["bbox"]:
+        return None
+
+    x0, y0, x1, y1 = (
+        float(v) for v in row["bbox"][4:-1].replace(",", " ").split()
+    )
+    dx, dy = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    z = _gio_zoom(dx * (1 + GIO_MARGE), dy * (1 + GIO_MARGE))
+    res = GIO_TEGEL_M0 / (2 ** z)
+
+    # De plaat is altijd exact 380x300 px; de extent volgt uit de resolutie
+    # van het gekozen zoomniveau, niet andersom. Zo blijft een tegel een tegel.
+    half_x = GIO_PLAAT_BREEDTE * res / 2
+    half_y = GIO_PLAAT_HOOGTE * res / 2
+    plaat = [cx - half_x, cy - half_y, cx + half_x, cy + half_y]
+
+    schaal = 1.0 / res
+    xoff = -plaat[0] * schaal
+    yoff = -plaat[1] * schaal
+    # e = +schaal: geen eigen y-flip, ST_AsSVG negeert y al (zie kopcommentaar).
+    affine = (schaal, 0, 0, schaal, xoff, yoff)
+
+    # Drie tolerantie's in één query. Eén ST_Collect, drie goedkope reducties
+    # (SnapToGrid + Douglas-Peucker), één round-trip; de fijnste die binnen het
+    # budget past wint.
+    #
+    # Bewust GEEN ST_SimplifyPreserveTopology als vangnet. Dat stond er even in
+    # op de aanname dat snappen dunne vormen wegperst — maar gemeten bleek een
+    # 40 km lange dijkzone bij snap 0,5 px géén leeg pad te geven maar 3,2 MB.
+    # De pass was dus een oplossing voor een probleem dat er niet was, en
+    # kostte wél minutenlange queries op precies de zwaarste GIO's.
+    #
+    # Wat overblijft na 8 px is echt te fijn voor deze schaal. Dan liever de
+    # bbox met een eerlijke telling dan een half getekende contour: een halve
+    # contour liegt over waar het informatieobject ligt.
+    cur.execute(
+        """
+        WITH px AS (
+          SELECT ST_Affine(ST_Collect(l.geometrie), %s, %s, %s, %s, %s, %s) AS g
+          FROM p2p.gio_locatie gl
+          JOIN p2p.locatie l ON l.identificatie = gl.locatie_id
+          WHERE gl.gio_frbr = %s
+        )
+        SELECT ST_AsSVG(ST_Simplify(ST_SnapToGrid(g, 0.5), 0.5), 0, 1) AS fijn,
+               ST_AsSVG(ST_Simplify(ST_SnapToGrid(g, 2),   2),   0, 1) AS grof,
+               ST_AsSVG(ST_Simplify(ST_SnapToGrid(g, 8),   8),   0, 1) AS grover,
+               ST_NumGeometries(g) AS n_vlakken
+        FROM px
+        """,
+        (*affine, gio),
+    )
+    passes = cur.fetchone() or {}
+    pad, tol, afgekapt = None, None, True
+    for kolom, tolerantie in (("fijn", 0.5), ("grof", 2.0), ("grover", 8.0)):
+        kandidaat = passes.get(kolom)
+        if kandidaat and len(kandidaat) <= GIO_SVG_BUDGET:
+            pad, tol, afgekapt = kandidaat, tolerantie, False
+            break
+
+    return {
+        "zoom": z,
+        "resolutie_m_px": round(res, 4),
+        "bbox_rd": [round(v, 2) for v in plaat],
+        "extent_rd": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)],
+        "breedte_px": GIO_PLAAT_BREEDTE,
+        "hoogte_px": GIO_PLAAT_HOOGTE,
+        "viewbox": f"0 -{GIO_PLAAT_HOOGTE} {GIO_PLAAT_BREEDTE} {GIO_PLAAT_HOOGTE}",
+        "pad": pad,
+        "tolerantie_px": tol,
+        "afgekapt": afgekapt,
+        "n_vlakken": passes.get("n_vlakken"),
+        "n_locaties": row["n_loc"],
+    }
+
+
+def _gio_versiedatum(expression: str) -> str | None:
+    """Datum uit de FRBR-expressie: `.../nld@2026-03-02;5-1` -> 2026-03-02.
+
+    Dit is nadrukkelijk de VERSIEdatum, niet de vaststellingsdatum — die
+    bestaat niet in deze data (p2p.procedurestap wordt alleen voor ontwerpen
+    gevuld; vault gaps.md G-108). De frontend labelt hem ook zo.
+    """
+    m = re.search(r"@(\d{4}-\d{2}-\d{2})", expression or "")
+    return m.group(1) if m else None
+
+
+@app.get("/v1/viewer/gio/{expression:path}", dependencies=[Depends(verify_key)])
+def viewer_gio(expression: str):
+    """Alles wat het register achter één IntIoRef toont.
+
+    `expression` is de FRBR-expressie van het GeoInformatieObject, zoals de
+    ExtIoRef hem declareert.
+    """
+    gio = expression if expression.startswith("/") else "/" + expression
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT g.frbr_expression, g.frbr_work, g.naam, g.regeling_expression,
+                   r.opschrift AS regeling_opschrift, r.citeertitel, r.bronhouder
+            FROM p2p.geo_informatieobject g
+            LEFT JOIN p2p.regeling r ON r.frbr_expression = g.regeling_expression
+            WHERE g.frbr_expression = %s
+            """,
+            (gio,),
+        )
+        meta = cur.fetchone()
+
+        # Geen rij in geo_informatieobject hoeft niet te betekenen dat het GIO
+        # niet bestaat — pruning van verouderde regelingversies verwijdert
+        # GIO-rijen waar de geldende versie nog naar verwijst (gaps.md G-106).
+        # De basisgeo-keten kan er dan nog wél zijn, dus we proberen de kaart
+        # hoe dan ook.
+        kaart = _gio_kaart(cur, gio)
+
+        objecten = {"gebiedsaanwijzingen": [], "activiteiten": [], "normwaarden": []}
+        locaties = []
+        if kaart:
+            cur.execute(
+                """
+                SELECT DISTINCT l.identificatie, l.locatie_type, l.noemer
+                FROM p2p.gio_locatie gl
+                JOIN p2p.locatie l ON l.identificatie = gl.locatie_id
+                WHERE gl.gio_frbr = %s
+                ORDER BY l.noemer NULLS LAST
+                LIMIT 50
+                """,
+                (gio,),
+            )
+            locaties = [dict(r) for r in cur.fetchall()]
+
+            cur.execute(
+                """
+                SELECT DISTINCT ga.type, ga.naam, ga.groep
+                FROM p2p.gio_locatie gl
+                JOIN p2p.gebiedsaanwijzing ga ON ga.locatie_id = gl.locatie_id
+                WHERE gl.gio_frbr = %s
+                ORDER BY ga.type, ga.naam
+                LIMIT 40
+                """,
+                (gio,),
+            )
+            objecten["gebiedsaanwijzingen"] = [dict(r) for r in cur.fetchall()]
+
+            cur.execute(
+                """
+                SELECT DISTINCT a.naam, ala.kwalificatie
+                FROM p2p.gio_locatie gl
+                JOIN p2p.activiteit_locatieaanduiding ala ON ala.locatie_id = gl.locatie_id
+                JOIN p2p.activiteit a ON a.identificatie = ala.activiteit_id
+                WHERE gl.gio_frbr = %s
+                ORDER BY a.naam
+                LIMIT 40
+                """,
+                (gio,),
+            )
+            objecten["activiteiten"] = [dict(r) for r in cur.fetchall()]
+
+            cur.execute(
+                """
+                SELECT DISTINCT n.naam AS norm, n.type_norm, n.eenheid,
+                       coalesce(nw.kwalitatieve_waarde,
+                                nw.kwantitatieve_waarde::text) AS waarde
+                FROM p2p.gio_locatie gl
+                JOIN p2p.normwaarde nw ON nw.locatie_id = gl.locatie_id
+                JOIN p2p.norm n ON n.identificatie = nw.norm_id
+                WHERE gl.gio_frbr = %s
+                ORDER BY n.naam
+                LIMIT 40
+                """,
+                (gio,),
+            )
+            objecten["normwaarden"] = [dict(r) for r in cur.fetchall()]
+
+    if not meta and not kaart:
+        raise HTTPException(404, "Informatieobject niet gevonden")
+
+    return {
+        "gio": {
+            "frbr_expression": gio,
+            "frbr_work": (meta or {}).get("frbr_work") or gio.split("@")[0],
+            "naam": (meta or {}).get("naam"),
+            "regeling_expression": (meta or {}).get("regeling_expression"),
+            "regeling_opschrift": (meta or {}).get("citeertitel")
+            or (meta or {}).get("regeling_opschrift"),
+            "bronhouder": (meta or {}).get("bronhouder"),
+            "versiedatum": _gio_versiedatum(gio),
+            "geladen": meta is not None,
+        },
+        "kaart": kaart,
+        "locaties": locaties,
+        "objecten": objecten,
+        # De koppeling GIO -> OW-object loopt over gedeelde basisgeo:id, dus
+        # over gemeenschappelijke geometrie — niet over een verklaarde relatie
+        # in de bron (p2p.juridische_borging is leeg; gaps.md G-107). De
+        # frontend leest dit veld en formuleert de kop navenant.
+        "koppeling": "basisgeo",
+    }
 
 
 @app.get("/v1/viewer/regeling/{expression:path}/ala", dependencies=[Depends(verify_key)])
