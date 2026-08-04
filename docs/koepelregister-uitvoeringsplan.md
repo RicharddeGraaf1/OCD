@@ -1,7 +1,35 @@
 # Koepelregister — uitvoeringsplan
 
-**Status:** fase 0 en 1 afgerond en live (2026-08-04); fase 2 t/m 7 open
+**Status:** fase 0, 1, 4 en 6 afgerond en live (2026-08-04). Fase 2, 3, 5 en 7
+zijn op verzoek van de gebruiker **buiten scope** gezet — zie hieronder.
 **Datum:** 2026-08-03, bijgewerkt 2026-08-04
+
+---
+
+## 0. Scope-inperking 2026-08-04
+
+De gebruiker heeft het plan teruggebracht tot wat het register nú moet doen:
+
+> "je kunt alles gerelateerd met toekomst en verleden voor nu even buiten
+> scope zetten."
+
+Daarmee vervallen vier fasen:
+
+| Fase | Reden |
+|---|---|
+| 2 — statusdimensie | Zonder verleden én toekomst blijft één toestand over: wat geldt. *Historisch* valt af, en *ontwerp* en *vastgesteld, nog niet in werking* zijn toekomst (die komen uit `p2pwijziging`). Er is dan geen dimensie meer om te tonen |
+| 3 — bronhouderprofiel met tabs | Niet gewenst |
+| 5 — publieke API | Niet gewenst. Het was ook geen bouwtaak maar een besluit: mag een derde de gegevens rechtstreeks ophalen. Blijft liggen tot iemand erom vraagt |
+| 7 — tijdas + bekendmakingen | Is per definitie verleden |
+
+**Wat expliciet blíjft**, want dit is geen verleden: de **Wro-plannen**. Die
+horen bij het oude regime maar gelden vandaag, dus ze staan gewoon in het
+register. En de `inactief`-vlag blijft nodig, alleen in een andere rol — niet
+om historie te tónen maar om verdrongen versies te *verbergen*, zoals de
+zoekopdracht al doet met `AND NOT r.inactief`.
+
+Gevolg voor de vault: [[gaps#G-105]] (geen Ow-tijdas) is daarmee geen
+openstaand hiaat meer maar "niet relevant voor nu".
 **Ontwerp:** vault `analysis/Omgevingsdocumentenregister als koepel.md`
 **Besluiten:** vault `sources/Gebruikersinput.md` §[2026-08-03]
 
@@ -150,6 +178,41 @@ Het contract staat voluit in de vault-analyse §5. Kort: één bestand op
 **niet** op de expressie, met verplichte `dekking` en `nvt_reden` als
 eersterangs veld.
 
+**Afgerond 2026-08-04**, drie van de vier publiceren nu een echte
+`oordeel.json`; alleen annotatieconformiteit loopt nog via de adapter op
+`gezagen.json`. Elke generator hangt aan de bestaande verversing van zijn eigen
+site (`build.sh`, `ververs-score.yml`, `deploy.sh`), zodat een feed niet kan
+verouderen ten opzichte van wat de site toont.
+
+**Het patroon dat pas zichtbaar werd door alle vier te bouwen:** alleen
+annotatiekwaliteit draagt een `goed/matig/zwak`-etiket. Die lens meet tegen een
+*norm* — de annotatierichtlijnen. De andere drie meten iets anders, en daar zou
+een etiket naast een gemeentenaam een oordeel suggereren dat de data niet
+draagt:
+
+- **transitie** meet voortgang in een traject dat tot 2032 loopt en landelijk
+  nauwelijks begonnen is (342 van 342 gemeenten onder de 40, hoogste 29). "Zwak"
+  zou daar "op schema" betekenen.
+- **instructieregels** zegt over zijn eigen signaal letterlijk *"expliciet
+  indicatief, geen nalevingsoordeel"*; mediaan 4%. Dat is een
+  meetbaarheidsgrens, geen prestatie.
+- **monitor** is een percentielrang: die zegt hoe een gemeente zich verhoudt
+  tot de andere 341, niet of ze het goed doet.
+
+Alle drie laten `label` leeg en zetten de reden in `label_weggelaten`. De
+monitor-feed vermeldt bovendien in zijn dekkingszin dat hij drie van de andere
+lenzen bevat, zodat een lezer de panelen niet dubbeltelt.
+
+**Openstaand bij instructieregels.** De feed is gebouwd en gecommit maar nog
+niet gepubliceerd: de wekelijkse Action faalt op `relation "irm.doelcel" does
+not exist`. Die tabel bestaat lokaal (`match/ddl-doel.sql`) maar niet op de
+Railway-DB. Oorzaak is een fout bij het committen — `git add -A` nam
+ongecommit werk mee, waaronder de `query.sql` die naar die tabel verwijst,
+waardoor onafgerond werk in het deploy-pad kwam. De site zelf is ongemoeid
+(deploy-stap werd overgeslagen, data van 03-08 staat er nog); het paneel in het
+register toont zolang "feed onbereikbaar". Opgelost zodra `irm.doelcel` naar
+prod gaat.
+
 | Satelliet | Wat het levert | Aandachtspunt |
 |---|---|---|
 | `annotatieconformiteit.nl` | kerncijfer per gezag + per document | Heeft `gezagen.json` al. **Dekking is al berekend**: dekkingsgraad per regeling en categorie draait sinds 30-07-2026 — alleen exposen. Scope is `RegelingCompact`; vrijetekst (omgevingsvisie, programma), tijdelijke delen en projectbesluiten krijgen `nvt_reden` |
@@ -177,7 +240,19 @@ hier de blokker.
 
 ---
 
-## 9. Fase 6 — landelijk beeld (zonder tijdreeksen)
+## 9. Fase 6 — landelijk beeld (zonder tijdreeksen) — **AF 2026-08-04**
+
+Draait op één endpoint `/v1/register/landelijk` (589 ms via de proxy) met
+totalen, bestuurslaag, provincie, documenttype en vier uitschieters. Twee
+dingen kwamen bovendrijven tijdens het bouwen:
+
+- **`core.bronhouder.wro_instrumenten` is verlopen**: 55.085 tegen 63.062 in
+  `wro.ruimtelijk_instrument`. Het endpoint telt uit de tabel, met hetzelfde
+  `pons_status`-filter dat zoeken gebruikt. Kandidaat voor de data-health-laag.
+- De grootste documentcategorie is niet het omgevingsplan (342) maar
+  **Voorbeschermingsregels Omgevingsplan (685)**.
+
+
 
 | # | Taak | Repo | Acceptatie |
 |---|---|---|---|
