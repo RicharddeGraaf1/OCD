@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Wekelijkse verse-data-cyclus voor omgevingsvergunningenregister.nl.
   Laadt KOOP-kennisgevingen LOKAAL (zwaar werk op je eigen machine) en duwt
@@ -20,6 +20,14 @@
                                vth.vergunning_stats_type_besluit.
     4) -Verify  -ProdUrl <url> Telling + max(datum_publicatie) op PROD.
   Of -All (vereist -ProdUrl) om 1..4 achter elkaar te draaien.
+
+  EENMALIG, buiten de weekcyclus (dus NIET in -All):
+    -PushGeoCorrecties -ProdUrl <url>
+        Duwt de uitkomst van scripts/koop-poc/backfill_geometrie_adres.py naar
+        prod: bij publicaties met meerdere gebiedsmarkeringen de kandidaat die
+        bij het huisnummer hoort (vault gaps.md G-87). Draai daarna -Refresh.
+    -RollbackGeoCorrecties -ProdUrl <url>
+        Zet die pins terug op hun oude prod-waarde, uit vth.geometrie_correctie.
 
   PREREQUISITE voor Push/Refresh/Verify (handmatig go-moment):
     - Zet een TIJDELIJKE TCP-proxy aan op de PostGIS-service in Railway
@@ -69,6 +77,8 @@ param(
     [switch]$Push,
     [switch]$Refresh,
     [switch]$Verify,
+    [switch]$PushGeoCorrecties,
+    [switch]$RollbackGeoCorrecties,
     [switch]$All
 )
 
@@ -82,8 +92,8 @@ function Warn($m){ Write-Host "[!] $m"  -ForegroundColor Yellow }
 
 if(-not (Test-Path $psql))   { throw "PG17-psql niet gevonden: $psql (pas -PgBin aan)" }
 if($All){ $LoadLocal=$Push=$Refresh=$Verify=$true }
-if(-not ($LoadLocal -or $Push -or $Refresh -or $Verify)){
-    Warn "Geen fase gekozen. Gebruik -LoadLocal / -Push / -Refresh / -Verify of -All. Zie -? voor help."
+if(-not ($LoadLocal -or $Push -or $Refresh -or $Verify -or $PushGeoCorrecties -or $RollbackGeoCorrecties)){
+    Warn "Geen fase gekozen. Gebruik -LoadLocal / -Push / -Refresh / -Verify / -PushGeoCorrecties of -All. Zie -? voor help."
     return
 }
 function Need-Prod(){ if(-not $ProdUrl){ throw "-ProdUrl is vereist voor deze fase (tijdelijke Railway TCP-proxy)." } }
@@ -218,6 +228,129 @@ VALUES ('koop-sru-vergunningen',
     } else {
         Ok "Push vastgelegd in core.load_run (bron koop-sru-vergunningen)."
     }
+}
+
+# ---- 2b. GEOMETRIE-CORRECTIES NAAR PROD (eenmalig) -----------------------
+# Duwt de uitkomst van backfill_geometrie_adres.py naar prod: bij publicaties
+# met meerdere gebiedsmarkeringen de kandidaat die bij het huisnummer hoort.
+# Zie vault gaps.md G-87 (§Vervolg 2026-08-03).
+#
+# BEWUST NIET IN -All: dit is een eenmalige historische correctie. Zodra de
+# stap in de ingest zit, komen nieuwe records al goed binnen en reist hun
+# geometrie gewoon mee in de gewone -Push-delta.
+#
+# De audittabel op PROD legt de OUDE PROD-waarden vast (niet die van lokaal),
+# zodat -RollbackGeoCorrecties precies terugzet wat er op prod stond.
+if($PushGeoCorrecties){
+    Need-Prod
+    $corrFile = Join-Path $WorkDir 'geo_correcties.csv'
+
+    $nLokaal = (& $psql $LocalUrl -tAqc "SELECT count(*) FROM vth.geometrie_correctie;").Trim()
+    if($LASTEXITCODE -ne 0){ throw "kon lokale correcties niet tellen (draaide backfill_geometrie_adres.py al?)" }
+    if([int]$nLokaal -eq 0){ Warn "Geen correcties in de lokale vth.geometrie_correctie — niets te duwen."; return }
+    Info "Lokaal klaarstaand: $nLokaal correcties."
+
+    Info "Exporteren naar CSV (geometrie als WKT)..."
+    $exportSql = "\copy (SELECT koop_id, nieuw_type, ST_AsText(nieuw_rd), ST_AsText(nieuw_wgs), verschuiving_m, afstand_voor_m, afstand_na_m, adres_vraag FROM vth.geometrie_correctie WHERE nieuw_wgs IS NOT NULL) TO '$corrFile' WITH (FORMAT csv, HEADER false)"
+    & $psql $LocalUrl -v ON_ERROR_STOP=1 -c $exportSql
+    if($LASTEXITCODE -ne 0){ throw "export van de correcties faalde (exit $LASTEXITCODE)" }
+    $mb = [math]::Round((Get-Item $corrFile).Length/1MB,2)
+    Info "CSV: $mb MB."
+
+    $importSql = @"
+\set ON_ERROR_STOP on
+
+CREATE TABLE IF NOT EXISTS vth.geometrie_correctie (
+    koop_id          text PRIMARY KEY,
+    oud_type         text,
+    oud_wgs          geometry(Point, 4326),
+    oud_rd           geometry(Point, 28992),
+    nieuw_type       text,
+    nieuw_wgs        geometry(Point, 4326),
+    nieuw_rd         geometry(Point, 28992),
+    verschuiving_m   double precision,
+    afstand_voor_m   double precision,
+    afstand_na_m     double precision,
+    adres_vraag      text,
+    gecorrigeerd_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TEMP TABLE _corr (
+    koop_id text, nieuw_type text, nieuw_rd text, nieuw_wgs text,
+    verschuiving_m double precision, afstand_voor_m double precision,
+    afstand_na_m double precision, adres_vraag text
+);
+\copy _corr FROM '$corrFile' WITH (FORMAT csv, HEADER false)
+
+\echo '-- audit: leg de HUIDIGE prod-waarden vast als oud_*'
+INSERT INTO vth.geometrie_correctie
+    (koop_id, oud_type, oud_wgs, oud_rd, nieuw_type, nieuw_wgs, nieuw_rd,
+     verschuiving_m, afstand_voor_m, afstand_na_m, adres_vraag)
+SELECT d.koop_id, v.geometrie_type, v.geometrie_wgs_pt, v.geometrie_rd_pt,
+       d.nieuw_type, ST_GeomFromText(d.nieuw_wgs, 4326),
+       ST_GeomFromText(d.nieuw_rd, 28992),
+       d.verschuiving_m, d.afstand_voor_m, d.afstand_na_m, d.adres_vraag
+FROM _corr d
+JOIN vth.vergunningkennisgeving v USING (koop_id)
+ON CONFLICT (koop_id) DO UPDATE SET
+    nieuw_type = EXCLUDED.nieuw_type,
+    nieuw_wgs  = EXCLUDED.nieuw_wgs,
+    nieuw_rd   = EXCLUDED.nieuw_rd,
+    verschuiving_m = EXCLUDED.verschuiving_m,
+    afstand_voor_m = EXCLUDED.afstand_voor_m,
+    afstand_na_m   = EXCLUDED.afstand_na_m,
+    adres_vraag    = EXCLUDED.adres_vraag,
+    gecorrigeerd_at = now();
+-- LET OP: oud_* staat bewust NIET in de DO UPDATE. Bij een tweede push zijn de
+-- huidige prod-waarden al de gecorrigeerde; die als 'oud' wegschrijven zou de
+-- rollback-basis vernietigen.
+
+\echo '-- de pins verplaatsen'
+UPDATE vth.vergunningkennisgeving v SET
+    geometrie_type   = d.nieuw_type,
+    geometrie_rd_pt  = ST_GeomFromText(d.nieuw_rd, 28992),
+    geometrie_wgs_pt = ST_GeomFromText(d.nieuw_wgs, 4326)
+FROM _corr d
+WHERE v.koop_id = d.koop_id;
+
+\echo '-- controle'
+SELECT count(*) AS gecorrigeerd,
+       round(avg(afstand_voor_m)) AS gem_voor_m,
+       round(avg(afstand_na_m))   AS gem_na_m,
+       count(*) FILTER (WHERE afstand_na_m <= 5) AS binnen_5m
+FROM vth.geometrie_correctie;
+"@
+    $importFile = Join-Path $WorkDir 'geo_correcties_import.sql'
+    Set-Content -Path $importFile -Value $importSql -Encoding utf8
+    Info "Toepassen op prod..."
+    & $psql $ProdUrl -f $importFile
+    if($LASTEXITCODE -ne 0){ throw "toepassen van de correcties op prod faalde (exit $LASTEXITCODE)" }
+    Remove-Item $importFile -ErrorAction SilentlyContinue
+    Ok "Geometrie-correcties toegepast op prod ($nLokaal aangeboden)."
+    Warn "Draai hierna -Refresh: de UPDATE laat de visibility map leeg achter."
+}
+
+# ---- 2c. GEOMETRIE-CORRECTIES TERUGDRAAIEN --------------------------------
+if($RollbackGeoCorrecties){
+    Need-Prod
+    Warn "Zet alle gecorrigeerde pins terug op hun oude prod-waarde."
+    $sql = @'
+\set ON_ERROR_STOP on
+UPDATE vth.vergunningkennisgeving v SET
+    geometrie_type   = c.oud_type,
+    geometrie_rd_pt  = c.oud_rd,
+    geometrie_wgs_pt = c.oud_wgs
+FROM vth.geometrie_correctie c
+WHERE v.koop_id = c.koop_id AND c.oud_wgs IS NOT NULL;
+
+DELETE FROM vth.geometrie_correctie;
+'@
+    $tmp = Join-Path $WorkDir 'geo_rollback.sql'
+    Set-Content -Path $tmp -Value $sql -Encoding utf8
+    & $psql $ProdUrl -f $tmp
+    if($LASTEXITCODE -ne 0){ throw "rollback faalde (exit $LASTEXITCODE)" }
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+    Ok "Correcties teruggedraaid. Draai -Refresh om de visibility map te herstellen."
 }
 
 # ---- 3. VACUUM + MATVIEWS OP PROD ----------------------------------------
