@@ -2968,18 +2968,18 @@ def regelingen_zoek(
             #     (commit d0c7fab, 'kalver' moet Kalverstraat blijven vinden).
             pattern = f"%{q}%"
             if ts_arg:
-                base_where.append("""(
-                    r.opschrift ILIKE %s
-                    OR r.citeertitel ILIKE %s
-                    OR r.frbr_work ILIKE %s
-                    OR EXISTS (
-                        SELECT 1 FROM p2p.tekst_element te
-                         WHERE te.regeling_expression = r.frbr_expression
-                           AND to_tsvector('dutch', coalesce(te.inhoud_plain, ''))
-                               @@ to_tsquery('dutch', %s)
-                    )
-                )""")
-                base_params.extend([pattern, pattern, pattern, ts_arg])
+                # De tekst-tak is GEEN gecorreleerde EXISTS meer. Die dwong een
+                # aparte GIN-lookup per regeling af (~1.900 stuks), en bij een
+                # prefix die over veel lexemen uitwaaiert liep dat op tot 12,4 s
+                # voor 'geluid' — te dicht bij de timeout. `treffers` scant
+                # tekst_element één keer en telt meteen; de join is daarna
+                # gratis. Gemeten op prod: 'geluid' 12,43 s -> 0,17 s,
+                # 'bouwen' 4,13 s -> 0,22 s, met identieke uitkomsten.
+                base_where.append(
+                    "(r.opschrift ILIKE %s OR r.citeertitel ILIKE %s "
+                    " OR r.frbr_work ILIKE %s OR tr.e IS NOT NULL)"
+                )
+                base_params.extend([pattern, pattern, pattern])
             else:
                 # Alleen leestekens ingetypt: tekst-tak weglaten in plaats van
                 # op alles te matchen.
@@ -3070,7 +3070,29 @@ def regelingen_zoek(
         full_where = base_where + ([bestuurslaag_clause] if bestuurslaag_clause else [])
         full_params = base_params + bestuurslaag_params
 
+        # Tekst-treffers per regeling in één scan over tekst_element. Zowel de
+        # resultaat- als de facet-query hangen eraan, dus beide dragen de CTE
+        # én de join; het CTE-argument staat vooraan in de parameterlijst omdat
+        # de WITH vóór de WHERE staat.
+        if ts_arg:
+            cte_sql = (
+                "WITH treffers AS ("
+                " SELECT te.regeling_expression AS e, COUNT(*) AS n"
+                " FROM p2p.tekst_element te"
+                " WHERE to_tsvector('dutch', coalesce(te.inhoud_plain, ''))"
+                "       @@ to_tsquery('dutch', %s)"
+                " GROUP BY te.regeling_expression)"
+            )
+            join_sql = "LEFT JOIN treffers tr ON tr.e = r.frbr_expression"
+            hits_sql = "COALESCE(tr.n, 0)"
+            cte_params: list = [ts_arg]
+        else:
+            cte_sql = join_sql = ""
+            hits_sql = "NULL::bigint"
+            cte_params = []
+
         ow_query = f"""
+            {cte_sql}
             SELECT
                 r.frbr_expression                         AS expression,
                 r.opschrift                               AS titel,
@@ -3081,39 +3103,17 @@ def regelingen_zoek(
                 b.bestuurslaag,
                 (SELECT COUNT(*) FROM p2p.tekst_element te
                   WHERE te.regeling_expression = r.frbr_expression) AS totaal_artikelen,
-                -- hits_in_tekst wordt hierna in één gegroepeerde query gevuld,
-                -- niet hier. Als gecorreleerde subquery draaide hij pér
-                -- gevonden regeling: gemeten 5,0 s over 527 regelingen tegen
-                -- 0,03 s voor dezelfde telling in één GROUP BY.
-                NULL::bigint                              AS hits_in_tekst
+                -- 0 bij een regeling die alleen op titel of identificatie
+                -- matchte; NULL wanneer er niet op tekst gezocht is.
+                {hits_sql}                                AS hits_in_tekst
             FROM p2p.regeling r
             JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
+            {join_sql}
             WHERE {' AND '.join(full_where)}
             ORDER BY r.opschrift, r.frbr_expression DESC
         """
-        cur.execute(ow_query, full_params)
+        cur.execute(ow_query, cte_params + full_params)
         ow_rows = cur.fetchall()
-
-        # Tekst-treffers per regeling: één GROUP BY over de gevonden set in
-        # plaats van een gecorreleerde subquery per rij. Dit vult de kolom die
-        # `sort_by=relevantie` gebruikt, dus hij moet vóór het sorteren staan
-        # en over de hele resultaatset gaan — niet alleen de page-window.
-        if ts_arg and ow_rows:
-            cur.execute(
-                """
-                SELECT te.regeling_expression, COUNT(*) AS n
-                  FROM p2p.tekst_element te
-                 WHERE te.regeling_expression = ANY(%s)
-                   AND to_tsvector('dutch', coalesce(te.inhoud_plain, ''))
-                       @@ to_tsquery('dutch', %s)
-                 GROUP BY te.regeling_expression
-                """,
-                ([r["expression"] for r in ow_rows], ts_arg),
-            )
-            hits_per_expression = {r["regeling_expression"]: r["n"] for r in cur.fetchall()}
-            for row in ow_rows:
-                # 0 wanneer de regeling alleen op titel/identificatie matchte.
-                row["hits_in_tekst"] = hits_per_expression.get(row["expression"], 0)
 
         # ── Bestuurslaag-facets ────────────────────────────────
         # Voor elke laag: hoeveel hits zou je krijgen als ALLEEN deze laag
@@ -3125,14 +3125,16 @@ def regelingen_zoek(
         # multi-bronhouder-regelingen.
         cur.execute(
             f"""
+            {cte_sql}
             SELECT b.bestuurslaag, COUNT(*) AS n
             FROM p2p.regeling r
             JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
+            {join_sql}
             WHERE {' AND '.join(base_where)}
               AND b.bestuurslaag IS NOT NULL
             GROUP BY b.bestuurslaag
             """,
-            base_params,
+            cte_params + base_params,
         )
         facet_bestuurslaag = {row["bestuurslaag"]: row["n"] for row in cur.fetchall()}
 
