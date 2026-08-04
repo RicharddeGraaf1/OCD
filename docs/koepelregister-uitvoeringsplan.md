@@ -1,7 +1,7 @@
 # Koepelregister — uitvoeringsplan
 
-**Status:** vastgesteld, nog niet gestart
-**Datum:** 2026-08-03
+**Status:** fase 0 en 1 afgerond en live (2026-08-04); fase 2 t/m 7 open
+**Datum:** 2026-08-03, bijgewerkt 2026-08-04
 **Ontwerp:** vault `analysis/Omgevingsdocumentenregister als koepel.md`
 **Besluiten:** vault `sources/Gebruikersinput.md` §[2026-08-03]
 
@@ -79,6 +79,28 @@ Doel: een bruikbare site met één lens. Dit is de fase die het patroon bewijst.
 > gezagen al op de kale `overheidscode` en regelingen op de AKN-`frbr_work` —
 > precies de twee sleutels uit het contract. Een adapter in `public/lenzen.js`
 > volstond; fase 4 hoeft voor déze satelliet niets meer te doen.
+>
+> **Bijstelling 2026-08-04.** Die aanname klopte maar half: bruikbaar wás het
+> endpoint, maar alleen omdat ik uit een 403 had afgeleid dat het werkte in
+> plaats van het mét sleutel uit te proberen. Zodra dat wel gebeurde gaf élke
+> `q` een 500 — zie taak 1.1, die daarmee tóch voorwaarde bleek en niet
+> verbetering. Gefixt in `15be6d8` en `6728ddf`; fase 1 is sinds 2026-08-04
+> live. Wat er wél stond: fase 2 (status) was geen voorwaarde, en het
+> Cloudflare-pad had geen enkele OCD-wijziging nodig.
+
+### Rest-punt uit fase 1: brede zoektermen
+
+`q=water` doet **7,1 s** op productie — de breedste prefix die er is (water,
+waterschap, waterkering, wateroverlast, waterstaatswerk…), met 2.790 treffers
+in het topresultaat. Blijft binnen de `statement_timeout` van 20 s, maar het is
+geen fijne zoekervaring.
+
+Oorzaak is de heap-recheck: bij een expressie-index moet Postgres per
+kandidaatrij `to_tsvector` opnieuw uitrekenen over `inhoud_plain`. De route
+ernaartoe is een **opgeslagen `tsvector`-kolom** met een GIN-index daarop, zodat
+die hertoets vervalt. Dat is een migratie op 687.627 rijen plus een loader-hook
+die de kolom bijhoudt — geen bijzaak, en niet urgent zolang alle andere termen
+onder de seconde blijven.
 
 | # | Taak | Repo | Acceptatie |
 |---|---|---|---|
