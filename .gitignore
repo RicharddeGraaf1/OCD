@@ -40,6 +40,10 @@ Thumbs.db
 *.db
 *.dump
 
+# Run-artefacten (overnight-runs, ad-hoc evaluaties)
+*.stdout
+kernel_retrieval_results.json
+
 # OS
 .DS_Store
 Thumbs.db
