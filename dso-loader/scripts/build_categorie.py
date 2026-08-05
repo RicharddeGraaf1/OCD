@@ -4,7 +4,7 @@ Ruggengraat = 28 IMOW-thema's (empirische centroide waar thema-geannoteerd, ande
 label-embedding). Discovery = gededupliceerde HDBSCAN die alleen kandidaten voorstelt
 die de ruggengraat mist (reconcile op cosine). Zie vault-analyse Categorie-destillatie.
 """
-import re, time, hashlib, numpy as np, httpx, psycopg
+import json, os, re, time, hashlib, numpy as np, httpx, psycopg
 from sklearn.decomposition import TruncatedSVD
 from sklearn.cluster import HDBSCAN
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -84,6 +84,32 @@ if low:
         cur.execute("""insert into v2a.categorie(categorie_id,naam,centroide,n_chunks_seen,status,bron,taxonomie_versie)
           values(%s,%s,%s::vector,%s,'bevestigd','imow-thema',%s)""", (cid, label, vlit(e), nm, VERSIE))
         bb.append((cid, label)); cat_cent.append(e); lab += 1
+# 3b. gecureerde categorieen terugladen
+#
+# Waarom dit hier moet: de DDL hierboven DROPt v2a.categorie, dus elk menselijk
+# oordeel over de taxonomie is bij een herbouw weg. Het DDL-commentaar noemt de
+# tabel "first-class, compounding" en de categorie_id "stabiel, overleeft
+# re-runs" — dat gold geen van beide zolang er geen bron buiten de tabel was.
+# `curatie/categorie-curatie.json` is die bron; zie scripts/export_categorie_curatie.py.
+#
+# Ze gaan de ruggengraat IN (bb + cat_cent), niet ernaast: stap 6 wijst alleen
+# toe aan wat in `C` staat. Een gecureerde categorie die daar niet in zit krijgt
+# per definitie nul chunks — precies de reden dat `lucht`, `veiligheid`, `erfgoed`
+# en `milieu` op nul stonden terwijl er wel degelijk clusters bij hoorden.
+CURATIE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "curatie", "categorie-curatie.json")
+n_cur = 0
+if os.path.exists(CURATIE):
+    thema_cid = {naam: cid for cid, naam in bb}
+    for r in json.load(open(CURATIE, encoding="utf-8"))["categorieen"]:
+        parent = thema_cid.get(r["thema"])
+        cid = "curatie." + re.sub(r"[^a-z0-9]+", "-", r["naam"].lower()).strip("-")
+        cen = unit(np.array(r["centroide"], dtype=np.float32))
+        cur.execute("""insert into v2a.categorie(categorie_id,naam,parent_id,centroide,n_chunks_seen,status,bron,taxonomie_versie)
+          values(%s,%s,%s,%s::vector,%s,'bevestigd','gebruiker',%s)""",
+          (cid, r["naam"], parent, vlit(cen), r.get("n_chunks_seen", 0), VERSIE))
+        bb.append((cid, r["naam"])); cat_cent.append(cen); n_cur += 1
+    print(f"[{time.monotonic()-t0:.0f}s] curatie teruggeladen: {n_cur} categorieen")
+
 C = np.vstack(cat_cent)
 print(f"[{time.monotonic()-t0:.0f}s] ruggengraat: {emp} empirisch + {lab} label-embed = {len(bb)} thema's")
 

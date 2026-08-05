@@ -4287,6 +4287,99 @@ def viewer_gio(expression: str):
     }
 
 
+@app.get("/v1/viewer/regeling/{expression:path}/onderwerpen", dependencies=[Depends(verify_key)])
+def viewer_onderwerpen(expression: str):
+    """Waar gaat dit document over — de onderwerp-as uit de vector-laag.
+
+    Achtergrond en metingen: `omgevingsdocumentenregister.nl/docs/onderwerpen-plan.md`.
+
+    Drie dingen zitten hier bewust in:
+
+    1. KOPPELEN OP WERK, NIET OP EXPRESSIE. `v2a.tekst_embedding` draagt de
+       expressie van het moment waarop de vector-laag draaide; die loopt achter
+       op `p2p.regeling`. Voor Arnhem staat er `…@2026-03-05` terwijl het
+       register `…@2026-06-26` toont — joinen op expressie geeft daar NUL
+       onderwerpen, joinen op werk 1.267.
+
+    2. `split_part(…, '/nld@', 1)` en niet `LIKE …/nld@%`. Dezelfde kolom
+       bevat twee vormen: voor Arnhem 6.420 chunks onder het kale werk én
+       1.722 onder de expressie. Een LIKE op de expressie-vorm telt stilzwijgend
+       de helft niet mee. Er ligt een index op precies deze uitdrukking
+       (`tekst_embedding_werk_idx`).
+
+    3. OPROLLEN NAAR DE HOOFDCATEGORIE. Toewijzingen gaan naar de IMOW-thema's
+       en naar gecureerde subcategorieën; de recursieve CTE rolt beide op naar
+       hun wortel. Alleen die wortels zijn toonbaar — de rest van de taxonomie
+       staat op `kandidaat` met machinaal gegenereerde namen.
+
+    4. ALLEEN REGELS, GEEN TOELICHTING. `kop_pad` met "toelicht" erin valt af.
+       Dat scheelt fors en het scheelt terecht: over het hele Arnhemse plan
+       zakt het van 1.267 naar 771 ingedeelde onderdelen, en bij `water` van 41
+       naar 3 — dat onderwerp stond daar dus vrijwel volledig in de
+       artikelsgewijze toelichting. Wie vraagt "waar staat hierover een regel"
+       heeft niets aan een treffer in een toelichting.
+
+    Geen onderwerpen voor Wro-plannen: daar is de vector-laag niet over gedraaid
+    (0 van 39.594). Dat is iets anders dan "geen onderwerpen", en de frontend
+    hoort dat onderscheid te maken.
+    """
+    werk = expression if expression.startswith("/") else "/" + expression
+    werk = werk.split("/nld@")[0]
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH RECURSIVE wortel AS (
+              SELECT categorie_id, naam AS root
+              FROM v2a.categorie WHERE parent_id IS NULL
+              UNION ALL
+              SELECT c.categorie_id, w.root
+              FROM v2a.categorie c JOIN wortel w ON c.parent_id = w.categorie_id
+            )
+            SELECT w.root AS naam,
+                   count(DISTINCT ch.wid) AS n_elementen,
+                   array_agg(DISTINCT ch.wid) AS wids
+            FROM v2a.tekst_embedding ch
+            JOIN v2a.chunk_categorie cc ON cc.chunk_id = ch.id
+            JOIN wortel w ON w.categorie_id = cc.categorie_id
+            WHERE split_part(ch.regeling_expression, '/nld@', 1) = %s
+              AND ch.wid IS NOT NULL
+              AND coalesce(ch.kop_pad, '') NOT ILIKE '%%toelicht%%'
+            GROUP BY w.root
+            ORDER BY 2 DESC
+            """,
+            (werk,),
+        )
+        onderwerpen = [dict(r) for r in cur.fetchall()]
+
+        # Noemer op de EXPRESSIE die de bezoeker bekijkt, niet op het werk:
+        # anders tel je alle versies bij elkaar op (Arnhem: 3.161 in plaats van
+        # 1.597) en zegt de dekking niets over het document op het scherm.
+        # Scheelt bovendien een seq scan over 687k rijen — hier pakt
+        # idx_tekst_element_regeling.
+        cur.execute(
+            "SELECT count(*) FROM p2p.tekst_element "
+            "WHERE regeling_expression = %s AND inhoud IS NOT NULL",
+            (expression if expression.startswith("/") else "/" + expression,),
+        )
+        met_inhoud = (cur.fetchone() or {}).get("count") or 0
+
+        cur.execute("SELECT DISTINCT taxonomie_versie FROM v2a.chunk_categorie LIMIT 1")
+        versie = (cur.fetchone() or {}).get("taxonomie_versie")
+
+    geclassificeerd = len({w for o in onderwerpen for w in o["wids"]})
+    return {
+        "frbr_work": werk,
+        "taxonomie_versie": versie,
+        "onderwerpen": onderwerpen,
+        "dekking": {
+            "elementen_met_inhoud": met_inhoud,
+            "geclassificeerd": geclassificeerd,
+            "toelichting_uitgesloten": True,
+        },
+    }
+
+
 @app.get("/v1/viewer/regeling/{expression:path}/ala", dependencies=[Depends(verify_key)])
 def viewer_ala(
     expression: str,
