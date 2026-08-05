@@ -11,7 +11,8 @@
  *       el.tekst = rauweStopXml;         // property (niet als attribuut — te groot)
  *       el.begrijpelijk = "…";           // optioneel; ontgrendelt de begrijpelijk-modus
  *       el.weergave = "begrijpelijk";    // of attribuut weergave="…"
- *       el.addEventListener('intref-klik', e => nav(e.detail.eid));
+ *       el.addEventListener('intref-klik', e => nav(e.detail.eid));   // naar tekst
+ *       el.addEventListener('ioref-klik',  e => toon(e.detail.wid));  // naar informatieobject
  *     </script>
  *
  * De parser is 1-op-1 geport uit OCDviewer's stop-xml-parser.ts (logica identiek,
@@ -199,15 +200,40 @@
     return { marker, segments: mergeInline(inlineParts) };
   }
 
+  /* IntRef en IntIoRef zijn allebei verwijzingen, maar naar verschillende
+     dingen — en dat verschil hoort in het model, niet pas bij de afnemer.
+
+       IntRef   @ref = eId van een tekstcomponent in ditzelfde document.
+                Springen binnen de tekst.
+       IntIoRef @ref = wId van een ExtIoRef in ditzelfde document; die draagt
+                pas de FRBR van het informatieobject. Twee trappen, en het
+                eindpunt is geen tekst maar een object (meestal geometrie).
+
+     Ze zijn hier lang op één hoop gegaan als `intref`. Dat leverde bij elke
+     afnemer een verwijzing op die naar een eId gezocht werd en daar nooit
+     gevonden kon worden: in OCDviewer kreeg elke IntIoRef daardoor de
+     markering "verwijzing niet gevonden in dit document". Vandaar een eigen
+     type met een eigen veldnaam (`wid`, niet `eid`) — dan kan een afnemer de
+     verwarring niet meer per ongeluk maken.
+
+     Wat het informatieobject IS, weet deze engine niet en hoort hij niet te
+     weten: dit bestand doet geen netwerk. Het oplossen van wId -> GIO gebeurt
+     server-side (OCD `iorefs` op /v1/viewer/teksten). */
+  function verwijzingSegment(child, namen) {
+    const ref = child.getAttribute('ref') || '';
+    const text = child.textContent || '';
+    if (!ref) return text ? splitOpTermen(text, namen) : [];
+    if (child.localName === 'IntIoRef') return [{ type: 'ioref', text, wid: ref }];
+    return [{ type: 'intref', text, eid: ref }];
+  }
+
   function parseInline(el, namen) {
     const out = [];
     for (const child of Array.from(el.childNodes)) {
       if (child.nodeType === 3) { const txt = child.textContent || ''; if (txt) out.push(...splitOpTermen(txt, namen)); continue; }
       if (!isElement(child)) continue;
       if (child.localName === 'IntRef' || child.localName === 'IntIoRef') {
-        const ref = child.getAttribute('ref') || '', text = child.textContent || '';
-        if (ref) out.push({ type: 'intref', text, eid: ref });
-        else if (text) out.push(...splitOpTermen(text, namen));
+        out.push(...verwijzingSegment(child, namen));
         continue;
       }
       if (child.localName === 'NieuweTekst' || child.localName === 'VerwijderdeTekst') {
@@ -231,9 +257,7 @@
         const txt = child.textContent || ''; if (txt) out.push(...splitOpTermen(txt, namen)); continue;
       }
       if (child.localName === 'IntRef' || child.localName === 'IntIoRef') {
-        const ref = child.getAttribute('ref') || '', text = child.textContent || '';
-        if (ref) out.push({ type: 'intref', text, eid: ref });
-        else if (text) out.push(...splitOpTermen(text, namen));
+        out.push(...verwijzingSegment(child, namen));
         continue;
       }
       const text = child.textContent || '';
@@ -286,6 +310,14 @@
       s.className = 'ocd-term'; s.dataset.naam = seg.naam; s.textContent = seg.text;
       s.addEventListener('click', () => emit('term-klik', { naam: seg.naam, text: seg.text }));
       return s;
+    }
+    if (seg.type === 'ioref') {
+      const a = document.createElement('a');
+      a.className = 'ocd-ioref'; a.href = '#'; a.dataset.wid = seg.wid;
+      a.textContent = seg.text || seg.wid;
+      a.title = 'Verwijzing naar een informatieobject';
+      a.addEventListener('click', (e) => { e.preventDefault(); emit('ioref-klik', { wid: seg.wid, text: seg.text }); });
+      return a;
     }
     if (seg.type === 'intref') {
       const a = document.createElement('a');
@@ -394,6 +426,8 @@
     table.ocd-tabel thead th { background: var(--ocd-th-bg, #f2f4f6); }
     .ocd-term { border-bottom: 1px dotted var(--ocd-term, #39870c); cursor: help; }
     .ocd-intref { color: var(--ocd-link, #275937); text-decoration: underline; cursor: pointer; }
+    .ocd-ioref { color: var(--ocd-link, #275937); text-decoration: underline; text-decoration-style: dotted; cursor: pointer; }
+    .ocd-ioref::after { content: 'F1'; font-size: .78em; margin-left: .22em; }
     .ocd-ins { text-decoration: none; background: #e7f6e7; }
     .ocd-del { color: #999; }
     .ocd-beg { margin: 0; }

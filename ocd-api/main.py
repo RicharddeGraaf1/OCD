@@ -2520,8 +2520,12 @@ def viewer_tekst(wid: str):
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "Tekst niet gevonden")
+        # Ook hier `iorefs`, niet alleen op de batch-variant: een lui geladen
+        # los artikel zou anders stilzwijgend geen klikbare verwijzingen
+        # krijgen, afhankelijk van welk pad de frontend toevallig koos.
+        iorefs = _iorefs_bij_wids(cur, [wid])
     return {"wid": wid, "tekst": row["tekst"], "begrijpelijk": row["begrijpelijk"],
-            "inactief": bool(row["inactief"])}
+            "inactief": bool(row["inactief"]), "iorefs": iorefs.get(wid, {})}
 
 
 class TekstenRequest(BaseModel):
