@@ -27,6 +27,11 @@ VEILIGHEID
   * Per-site isolatie: een mislukte deploy stopt de andere sites niet.
   * Poort: publiceert alleen als de laatste sync-run status 'ok' had
     (overrulebaar met --force).
+  * Per-site PRE-FLIGHT: een site kan een read-only check meebrengen die moet
+    slagen vóór build/deploy. Instructieregels gebruikt dat om te weigeren als
+    de doorwerkingsmeting achterloopt op de data — die oordelen komen uit een
+    aparte lokale pijplijn, dus "de tabellen zijn gevuld" zegt niets over
+    actualiteit. Zie runbook stap 6b. Draait ook in dry-run (read-only).
 
 STATUS: voorbereiding/scaffold. Concreet ingevuld: instructieregels + ponsenkaart.
 Nog te bevestigen (met TODO gemarkeerd): RoM-deploy en annotatieconformiteit-repo.
@@ -75,6 +80,7 @@ class Site:
     deploy: list[Stap] = field(default_factory=list)
     notitie: str = ""
     actief: bool = True             # False = bekend maar nog niet ingevuld
+    preflight: "Stap | None" = None  # moet exit 0 geven, anders wordt de site overgeslagen
 
 
 def _git_bash() -> str:
@@ -141,6 +147,17 @@ def sites(db_source: str) -> list[Site]:
                 cwd=INSTRUCTIEREGELS,
                 beschrijving="wrangler pages deploy web → Cloudflare Pages",
             )],
+            # De doorwerkings-oordelen (irm.*) komen NIET uit de loader maar uit
+            # een lokale Ollama-pijplijn in de instructieregels-repo. Zonder deze
+            # poort bouwt publish.py de site na een sync gewoon opnieuw, met
+            # oordelen van vóór die sync — en zonder één foutmelding, want de
+            # tabellen zijn gevuld, alleen niet meer actueel. Zie runbook stap 6b.
+            preflight=Stap(
+                [sys.executable, "match/stand.py"],
+                cwd=INSTRUCTIEREGELS,
+                env={"PYTHONUTF8": "1"},
+                beschrijving="doorwerkingsmeting bij de data? (exit 0 = ja)",
+            ),
             notitie="Vereist CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in de "
                     "omgeving. Alternatief: `gh workflow run deploy.yml` (bouwt "
                     "echter uit Railway-prod via secrets.PSQL_CONN).",
@@ -197,7 +214,41 @@ def run_stap(s: Stap, dry: bool) -> None:
     subprocess.run(argv, cwd=s.cwd, env=env, check=True)
 
 
-def publiceer_site(site: Site, dry: bool) -> tuple[str, str]:
+def run_preflight(site: Site, force: bool) -> str | None:
+    """Draai de pre-flight van een site. Returns None bij ok, anders de reden.
+
+    `force` komt van --force-preflight, NIET van --force.
+
+    Draait OOK in dry-run: hij is read-only en het is juist de vraag die je in
+    een dry-run beantwoord wilt zien.
+    """
+    s = site.preflight
+    if s is None:
+        return None
+    print(f"    $ {' '.join(s.argv)} (cwd={s.cwd})  # {s.beschrijving}")
+    try:
+        r = subprocess.run(s.argv, cwd=s.cwd, env={**os.environ, **s.env},
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+    except Exception as e:
+        reden = f"pre-flight niet uitvoerbaar: {e}"
+        if force:
+            print(f"    ! {reden} — genegeerd (--force)")
+            return None
+        return reden
+    for regel in (r.stdout or "").splitlines():
+        print(f"      {regel}")
+    if r.returncode == 0:
+        return None
+    reden = ((r.stderr or "").strip().splitlines() or ["pre-flight faalde"])[-1] \
+        if r.returncode == 2 else "meting loopt achter op de data (runbook stap 6b)"
+    if force:
+        print(f"    ! {reden} — genegeerd (--force)")
+        return None
+    return reden
+
+
+def publiceer_site(site: Site, dry: bool, force: bool = False) -> tuple[str, str]:
     """Bouw + deploy één gebakken site. Returns (naam, 'ok'|'skip'|'fout: …')."""
     if not site.actief:
         print(f"  [{site.naam}] OVERGESLAGEN — {site.notitie}")
@@ -210,6 +261,11 @@ def publiceer_site(site: Site, dry: bool) -> tuple[str, str]:
     if not site.deploy:
         print(f"    ! geen deploy-stap ingevuld — {site.notitie}")
         return site.naam, "skip"
+    reden = run_preflight(site, force)
+    if reden:
+        print(f"    ! OVERGESLAGEN — {reden}. Draai eerst de pijplijn, of "
+              f"--force-preflight om toch te publiceren.", file=sys.stderr)
+        return site.naam, f"overgeslagen: {reden}"
     try:
         for s in site.build:
             run_stap(s, dry)
@@ -277,6 +333,12 @@ def main() -> int:
                     help="prod verversen voor de live sites (default none)")
     ap.add_argument("--force", action="store_true",
                     help="publiceer ook als de laatste sync-run geen 'ok' was")
+    # BEWUST een aparte vlag. Als --force beide poorten zou dekken, schakelt
+    # iedereen die langs een rode sync-status moet ook de doorwerkingspoort uit
+    # zonder dat te bedoelen — en de sync-status staat vaker rood dan je denkt.
+    ap.add_argument("--force-preflight", action="store_true",
+                    help="publiceer ook als een site-pre-flight faalt "
+                         "(bv. doorwerkingsmeting die achterloopt)")
     args = ap.parse_args()
     dry = not args.execute
 
@@ -312,13 +374,17 @@ def main() -> int:
     for site in sites(args.db_source):
         if args.only and site.naam.lower() != args.only.lower():
             continue
-        resultaten.append(publiceer_site(site, dry))
+        resultaten.append(publiceer_site(site, dry, args.force_preflight))
 
     print("\n" + "=" * 70)
     print("resultaat:")
     for naam, status in resultaten:
         print(f"  {naam:22} {status}")
-    fouten = [n for n, s in resultaten if s.startswith("fout")]
+    # "overgeslagen" telt mee als niet-nul: een site die vanwege een gefaalde
+    # pre-flight niet gepubliceerd is, mag een aanroepend script niet als succes
+    # binnenkrijgen. ("skip" voor live sites is iets anders — dat is de normale
+    # gang van zaken en blijft 0.)
+    fouten = [n for n, s in resultaten if s.startswith(("fout", "overgeslagen"))]
     print("=" * 70)
     if dry:
         print("DRY-RUN — draai met --execute om echt te publiceren.")

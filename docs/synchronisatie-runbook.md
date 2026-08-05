@@ -49,13 +49,16 @@ data draait; prod achterlaten betekent dat de sites stale zijn.
 4. VTH → prod       delta-push                       ~10 min
 5. I2A → prod       afweging, meestal overslaan      —
 6. EMBEDDINGS       apart en bewust                  uren
+6b. DOORWERKING     instructieregels.nl-meting       uren, lokale GPU
 7. VERIFICATIE      beide DB's + API                 ~5 min
 8. DOWNSTREAM       gebakken sites herbouwen         ~15 min
 9. NAZORG           proxy dicht, VACUUM, loggen,
                     code van de run committen op main ~15 min
 ```
 
-Stappen 0–4 en 7–9 horen bij elke sync. Stap 5 en 6 zijn afwegingen.
+Stappen 0–4 en 7–9 horen bij elke sync. Stap 5 en 6 zijn afwegingen. Stap 6b
+hangt aan 6: hij zoekt in de vectorindex, dus zonder embeddings meet hij tegen
+een index die de nieuwe regelingen niet kent.
 
 De post-fase domineert de looptijd, niet het laden: `p2p.naammatch_signaal`
 alleen al kost 20–35 minuten omdat hij elke objectnaam tegen elke tekst binnen
@@ -188,6 +191,61 @@ OCD_DB_URL=<prod-dsn> python scripts/run_overnight.py   # daarna prod
 Tot G-97 is opgelost geldt: **nieuwe regelingen zijn pas semantisch vindbaar na
 deze stap.** Sla je hem over, dan is de sync wél compleet en de vindlaag niet.
 
+### Stap 6b — Doorwerkingsmeting instructieregels.nl
+
+De monitor op instructieregels.nl toont per instructieregel of hij is uitgewerkt
+in de documenten waarop hij zich richt. Die oordelen zitten **niet** in de
+loader: ze komen uit een aparte pijplijn in `c:/GIT/instructieregels.nl/match/`
+die lokaal draait op Ollama (embeddings + een entailment-judge) en schrijft naar
+het `irm`-schema. De site bakt die tabellen alleen maar uit.
+
+Gevolg als je deze stap overslaat: stap 8 herbouwt de site zonder fout, met
+oordelen van vóór de sync. Nieuwe instructieregels verschijnen wél in de
+inventaris en staan dan op "Onbepaalbaar"; nieuwe omgevingsplan-teksten tellen
+helemaal niet mee. De site ziet er precies even actueel uit als daarvoor — dit
+is dezelfde soort stille onvolledigheid als G-98.
+
+**Eerst kijken of het nodig is:**
+
+```bash
+cd c:/GIT/instructieregels.nl
+PYTHONUTF8=1 python match/stand.py        # exit 0 = bij, 1 = achter, 2 = onbepaalbaar
+```
+
+Draaien (volledige volgorde staat in `instructieregels.nl/PLAN.md`
+§Draaivolgorde; hier het waarom per blok):
+
+```
+0a. match/opruimen.sql     verweesde ir_id's weg — anders kost de judge tijd aan
+                           instructieregels die niet meer bestaan (426 sets op
+                           180 verdwenen regels bij de run van 04-08)
+0b. match/verversen.sql    detecteert gewijzigde/verdwenen inhoud en gooit de
+                           afgeleide rijen weg, zodat de gewone overslaan-
+                           condities ze weer oppakken
+1a. tier1_screen.py        embeddings + landelijke top-K screening
+1b. match/cellen.sql       screening_hit -> screening_cel (bewijs-hash)
+1c. fase2_fill.py          indicatief oordeel per provincie
+1d. tier2_fill.py          judge per unieke bewijs-set   <- de lange stap
+2a. doel_screen.py         relevantie + screening voor de tier-2-instrumenten
+2b. doel_judge.py          judge daarvoor
+3.  sync_prod.py           oordelen naar de prod-DB (incrementeel, --dry-run eerst)
+```
+
+**Stap 3 hoort hier en niet bij stap 8.** De judge draait alleen lokaal; de
+CI-bouw van de site leest de Railway-DB. Zonder die sync deployt stap 8 de
+vorige oordelen.
+
+Duur: de eerste volledige cyclus (04/05-08) kostte 78 min screening + 107 min
+judge. Bij een gewone sync is het een fractie daarvan, omdat ongewijzigd bewijs
+via een inhoudshash zijn bestaande oordeel terugvindt — gemeten 68% hergebruik.
+
+**Wat `stand.py` níét kan zien.** Hij detecteert nieuwe regels, gewijzigde
+teksten, verdwenen bewijs en onbeoordeelde bewijs-sets. Hij kan niet zien dat
+een *nieuw omgevingsplan-artikel* inmiddels in de top-K van een bestaande regel
+zou vallen: de screening is een landelijke top-K per regel, en of die verschoven
+is weet je pas door hem opnieuw te draaien. Vuistregel: **laadde stap 1 nieuwe
+of gewijzigde omgevingsplannen, draai dan 1a–1d ongeacht wat `stand.py` zegt.**
+
 ### Stap 7 — Verificatie
 
 ```bash
@@ -217,6 +275,21 @@ python scripts/publish.py --execute       # instructieregels, ponsenkaart, RoM
 De poort van `publish.py` laat alleen door als de laatste sync-run "0 fouten"
 meldde. Zie de kanttekening in §5: die poort meet exceptions, geen
 volledigheid.
+
+Vóór instructieregels bouwt draait `publish.py` een pre-flight op de
+doorwerkingsmeting (`match/stand.py`, stap 6b). Staat die op ACHTER, dan wordt
+de site **overgeslagen** in plaats van met verouderde oordelen gepubliceerd, en
+eindigt `publish.py` met exitcode 1.
+
+Overrulen kan met `--force-preflight` — bewust een **andere** vlag dan
+`--force`. Als één vlag beide poorten dekte, zou iedereen die langs een rode
+sync-status moet (en dat is vaker dan je denkt) de doorwerkingspoort ongemerkt
+meesleuren.
+
+Voor instructieregels is een `wrangler`-deploy overigens niet de enige weg: de
+repo deployt sinds 04-08 ook op elke push naar `main` (GitHub Actions bouwt dan
+uit de Railway-DB via `secrets.PSQL_CONN`). Wie na stap 6b iets in die repo
+commit, publiceert dus al.
 
 ### Stap 9 — Nazorg
 
@@ -322,6 +395,8 @@ Noodroute als prod onherstelbaar afwijkt: `restore-dev-naar-prod.ps1`
 | G-94 | geen delta voor i2a/vth op prod; geen scheduling | stap 4 en 5 blijven handwerk |
 | — | i2a-datum hardgecodeerd op `10-04-2026` | i2a laadt de april-toestand |
 | — | rapportage meet exceptions, geen volledigheid | "0 fouten" gaf jarenlang valse geruststelling |
+| — | doorwerkingsmeting (6b) hangt niet aan de pipeline, vereist lokale GPU | instructieregels.nl toont oordelen van vóór de sync tot iemand 6b draait; sinds 05-08 gaat de site tenminste niet meer stil de deur uit (pre-flight in `publish.py`) |
+| — | verschoven top-K is niet detecteerbaar zonder te herscreenen | `stand.py` kan "nieuw artikel valt nu in de top-K van een oude regel" niet zien; vandaar de vuistregel in 6b |
 | — | *opgelost 2026-08-01* — drieslag kostte ~1,5 u door een ongescopete naam-match | nu 5,5 min lokaal / 11 min prod; zie hieronder |
 
 ### Refresh-modus van de MV's
@@ -375,6 +450,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 |---|---|---|
 | Volledige sync (stap 0–4, 7–9) | wekelijks | dit runbook |
 | Embeddings (stap 6) | na elke sync met noemenswaardig nieuw | apart, bewust |
+| Doorwerkingsmeting (stap 6b) | na elke sync die omgevingsplannen of instructieregels raakte | lokaal, ná stap 6; `match/stand.py` zegt of het moet |
 | `diff_dso_bronhouder_coverage.py` | maandelijks | zwaardere coverage-diff naast de preview |
 | Wro/IMRO2006 (`load-wro-imro2006`) | los, ~24 min | landelijke PDOK-herparse, niet in de sync |
 | MER (`load-mer`) | los, seconden | aparte harvester-repo |
