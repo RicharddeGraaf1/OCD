@@ -117,10 +117,20 @@
 
   function parseBlock(el, namen) {
     switch (el.localName) {
+      /* STOP imop-tekst.xsd: Lijst = Lijstaanhef?, Li+, Lijstsluiting?
+         De aanhef draagt de normatieve strekking van de opsomming ("Voor een
+         geluidgevoelig gebouw ... is uitgesloten:"); de items zijn zonder die
+         zin betekenisloos. Ze alleen op Li filteren gooide dus juist het
+         dragende deel van het lid weg. */
       case 'Lijst': {
         const items = [];
-        for (const li of Array.from(el.children)) { if (li.localName === 'Li') items.push(parseLi(li, namen)); }
-        return { type: 'lijst', lijstType: el.getAttribute('type'), items };
+        let aanhef = null, sluiting = null;
+        for (const kind of Array.from(el.children)) {
+          if (kind.localName === 'Li') items.push(parseLi(kind, namen));
+          else if (kind.localName === 'Lijstaanhef') aanhef = parseInline(kind, namen);
+          else if (kind.localName === 'Lijstsluiting') sluiting = parseInline(kind, namen);
+        }
+        return { type: 'lijst', lijstType: el.getAttribute('type'), aanhef, sluiting, items };
       }
       case 'Begrippenlijst': {
         const items = [];
@@ -186,18 +196,24 @@
     return { term, segments: mergeInline(definitieSegments) };
   }
 
+  /* Li = LiNummer?, (Al|Figuur|Formule|Lijst|table)+ — een lijstitem mag dus
+     zelf weer een lijst of tabel bevatten. Die als inline-tekst platslaan
+     plakt de sub-items (mét hun a./b.-markers) tot één doorlopende regel aan
+     elkaar; ze horen als eigen blokken onder het item. */
   function parseLi(li, namen) {
     let marker = null;
     const inlineParts = [];
+    const blocks = [];
     for (const child of Array.from(li.childNodes)) {
       if (isElement(child)) {
         if (child.localName === 'LiNummer') { marker = (child.textContent || '').trim() || null; continue; }
+        if (child.localName === 'Lijst' || child.localName === 'table') { blocks.push(parseBlock(child, namen)); continue; }
         inlineParts.push(...parseInline(child, namen));
       } else if (child.nodeType === 3) {
         const txt = child.textContent || ''; if (txt) inlineParts.push(...splitOpTermen(txt, namen));
       }
     }
-    return { marker, segments: mergeInline(inlineParts) };
+    return { marker, segments: mergeInline(inlineParts), blocks };
   }
 
   /* IntRef en IntIoRef zijn allebei verwijzingen, maar naar verschillende
@@ -240,6 +256,14 @@
         const inner = parseRenvooiInner(child, namen);
         if (inner.length === 0) continue;
         out.push(child.localName === 'NieuweTekst' ? { type: 'ins', segments: inner } : { type: 'del', segments: inner });
+        continue;
+      }
+      // sub/sup zijn betekenisdragend in normteksten: Lden en Lnight zijn twee
+      // verschillende geluidmaten, en platgeslagen worden ze onleesbaar
+      // ("wordt gelezen voor «Lden»: Lday").
+      if (child.localName === 'sub' || child.localName === 'sup') {
+        const txt = child.textContent || '';
+        if (txt) out.push({ type: child.localName, text: txt });
         continue;
       }
       const text = child.textContent || '';
@@ -325,6 +349,11 @@
       a.addEventListener('click', (e) => { e.preventDefault(); emit('intref-klik', { eid: seg.eid, text: seg.text }); });
       return a;
     }
+    if (seg.type === 'sub' || seg.type === 'sup') {
+      const el = document.createElement(seg.type);
+      el.textContent = seg.text;
+      return el;
+    }
     if (seg.type === 'ins' || seg.type === 'del') {
       const el = document.createElement(seg.type === 'ins' ? 'ins' : 'del');
       el.className = seg.type === 'ins' ? 'ocd-ins' : 'ocd-del';
@@ -352,10 +381,24 @@
           if (item.marker) {
             const m = document.createElement('span'); m.className = 'ocd-li-marker'; m.textContent = item.marker; li.appendChild(m);
           }
-          const body = document.createElement('span'); body.className = 'ocd-li-body';
-          appendInline(body, item.segments, emit); li.appendChild(body); ul.appendChild(li);
+          const body = document.createElement('div'); body.className = 'ocd-li-body';
+          appendInline(body, item.segments, emit);
+          for (const sub of (item.blocks || [])) body.appendChild(blockToNode(sub, emit));
+          li.appendChild(body); ul.appendChild(li);
         }
-        return ul;
+        // Zonder aanhef/sluiting exact dezelfde DOM als voorheen (één <ul>).
+        if (!(block.aanhef && block.aanhef.length) && !(block.sluiting && block.sluiting.length)) return ul;
+        const wrap = document.createElement('div'); wrap.className = 'ocd-lijst-blok';
+        if (block.aanhef && block.aanhef.length) {
+          const p = document.createElement('p'); p.className = 'ocd-al ocd-lijstaanhef';
+          appendInline(p, block.aanhef, emit); wrap.appendChild(p);
+        }
+        wrap.appendChild(ul);
+        if (block.sluiting && block.sluiting.length) {
+          const p = document.createElement('p'); p.className = 'ocd-al ocd-lijstsluiting';
+          appendInline(p, block.sluiting, emit); wrap.appendChild(p);
+        }
+        return wrap;
       }
       case 'definitielijst': {
         const dl = document.createElement('dl'); dl.className = 'ocd-begrippen';
@@ -415,8 +458,15 @@
     :host { display: block; color: inherit; font: inherit; line-height: 1.55; }
     .ocd-al { margin: 0 0 .6em; }
     .ocd-lijst { margin: 0 0 .6em; padding-left: 0; list-style: none; }
+    .ocd-lijst-blok { margin: 0 0 .6em; }
+    .ocd-lijst-blok > .ocd-al { margin-bottom: .35em; }
+    .ocd-lijst-blok > .ocd-lijstsluiting { margin: .35em 0 0; }
+    .ocd-lijst-blok > .ocd-lijst { margin-bottom: 0; }
     .ocd-li { display: flex; gap: .5em; margin: .2em 0; }
     .ocd-li-marker { flex: 0 0 auto; min-width: 1.4em; font-weight: 600; }
+    .ocd-li-body { flex: 1 1 auto; min-width: 0; }
+    .ocd-li-body > .ocd-lijst, .ocd-li-body > .ocd-lijst-blok { margin: .25em 0 0; padding-left: .6em; }
+    .ocd-li-body > .ocd-tabel { margin-top: .35em; }
     .ocd-begrippen { margin: 0 0 .6em; }
     .ocd-begrippen dt { font-weight: 600; margin-top: .4em; }
     .ocd-begrippen dd { margin: 0 0 .3em; padding-left: 1em; }
