@@ -4355,20 +4355,49 @@ def viewer_onderwerpen(expression: str):
             """,
             (werk,),
         )
+        rijen = cur.fetchall()
+
+        # De wId's van DIT document ophalen — noemer én zeef in één query.
+        #
+        # Zeef, want de vector-laag draait op het WERK en dus soms op een oudere
+        # versie van het document. Een wId die daar geclassificeerd is hoeft in
+        # de versie op het scherm niet meer te bestaan: bij gm0796 bestaat 45%
+        # van de geclassificeerde wId's niet in de getoonde expressie. Zonder
+        # deze zeef belooft de knop "Geluidbeperkende maatregelen 29" terwijl de
+        # boom er twee kan aanwijzen. Elementen die tussen versies ongewijzigd
+        # bleven houden hun wId, dus de tolerantie voor de achterstand blijft:
+        # alleen wat écht verdwenen is valt af.
+        #
+        # Noemer op de EXPRESSIE en niet op het werk: anders tel je alle versies
+        # bij elkaar op (Arnhem: 3.161 in plaats van 1.597) en zegt de dekking
+        # niets over het document op het scherm. Scheelt bovendien een seq scan
+        # over 687k rijen — hier pakt idx_tekst_element_regeling.
+        cur.execute(
+            "SELECT wid, (inhoud IS NOT NULL) AS heeft_inhoud FROM p2p.tekst_element "
+            "WHERE regeling_expression = %s",
+            (expression if expression.startswith("/") else "/" + expression,),
+        )
+        elementen = cur.fetchall()
+        in_document = {r["wid"] for r in elementen if r["wid"]}
+        met_inhoud = sum(1 for r in elementen if r["heeft_inhoud"])
+
         # Twee niveaus opbouwen. De toewijzing zit op één categorie — soms een
         # hoofdcategorie, soms een subcategorie — en de recursieve CTE geeft er
         # de wortel bij. Het hoofdniveau is dus de UNIE van zijn eigen directe
         # toewijzingen en die van zijn subcategorieën; niet de som, want
         # hetzelfde tekst-element kan via twee wegen binnenkomen.
         hoofd: dict[str, dict] = {}
-        for r in cur.fetchall():
+        for r in rijen:
+            treffers = sorted(set(r["wids"]) & in_document)
+            if not treffers:
+                continue
             h = hoofd.setdefault(r["hoofd"], {"naam": r["hoofd"], "wids": set(), "sub": []})
-            h["wids"].update(r["wids"])
+            h["wids"].update(treffers)
             if not r["is_hoofd"]:
                 h["sub"].append({
                     "naam": r["toegewezen"],
-                    "n_elementen": r["n_elementen"],
-                    "wids": r["wids"],
+                    "n_elementen": len(treffers),
+                    "wids": treffers,
                 })
         onderwerpen = sorted(
             (
@@ -4382,18 +4411,6 @@ def viewer_onderwerpen(expression: str):
             ),
             key=lambda h: -h["n_elementen"],
         )
-
-        # Noemer op de EXPRESSIE die de bezoeker bekijkt, niet op het werk:
-        # anders tel je alle versies bij elkaar op (Arnhem: 3.161 in plaats van
-        # 1.597) en zegt de dekking niets over het document op het scherm.
-        # Scheelt bovendien een seq scan over 687k rijen — hier pakt
-        # idx_tekst_element_regeling.
-        cur.execute(
-            "SELECT count(*) FROM p2p.tekst_element "
-            "WHERE regeling_expression = %s AND inhoud IS NOT NULL",
-            (expression if expression.startswith("/") else "/" + expression,),
-        )
-        met_inhoud = (cur.fetchone() or {}).get("count") or 0
 
         cur.execute("SELECT DISTINCT taxonomie_versie FROM v2a.chunk_categorie LIMIT 1")
         versie = (cur.fetchone() or {}).get("taxonomie_versie")
