@@ -247,6 +247,30 @@ def main(dry: bool) -> None:
             (b, a))
         n["samen"] += 1
 
+    # 3b. Alle hernoemde kandidaten promoveren.
+    #
+    # Als regel en niet als lijst, want de hernoeming ÍS de curatie-daad: een
+    # kandidaat draagt standaard zijn top-3-TF-IDF-naam (`naam = naam_auto`).
+    # Staat er een door een mens gekozen naam, dan heeft iemand ernaar gekeken
+    # en hem de moeite waard gevonden. Die regel dekt zowel de 31 hernoemingen
+    # die er al stonden als de 23 van deze ronde.
+    #
+    # Zonder deze stap heeft een tweede niveau in de UI geen inhoud waar het
+    # ertoe doet: de twaalf promoties uit stap 2 zitten allemaal onder de LEGE
+    # thema's, terwijl de zes grootste (water, procedures, natuur, bodem,
+    # bouwen, geluid) nul subcategorieën hadden.
+    #
+    # De uitzonderingen staan expliciet in NIET_PROMOVEREN.
+    cur.execute(
+        """UPDATE v2a.categorie
+           SET status='bevestigd', bron='gebruiker'
+           WHERE bron='discovery' AND status='kandidaat'
+             AND naam <> naam_auto
+             AND naam <> ALL(%s)""",
+        (NIET_PROMOVEREN,),
+    )
+    n["promoveer"] += cur.rowcount
+
     # 4. Afkeuren
     for naam in AFKEUREN:
         cid = een(cur, naam)

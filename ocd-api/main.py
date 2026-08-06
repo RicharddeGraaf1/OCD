@@ -4307,10 +4307,12 @@ def viewer_onderwerpen(expression: str):
        de helft niet mee. Er ligt een index op precies deze uitdrukking
        (`tekst_embedding_werk_idx`).
 
-    3. OPROLLEN NAAR DE HOOFDCATEGORIE. Toewijzingen gaan naar de IMOW-thema's
-       en naar gecureerde subcategorieën; de recursieve CTE rolt beide op naar
-       hun wortel. Alleen die wortels zijn toonbaar — de rest van de taxonomie
-       staat op `kandidaat` met machinaal gegenereerde namen.
+    3. TWEE NIVEAUS. Toewijzingen gaan naar één categorie: soms een IMOW-thema,
+       soms een gecureerde subcategorie. De recursieve CTE geeft de wortel erbij,
+       zodat het antwoord beide lagen draagt — hoofdcategorie met daaronder de
+       subcategorieën die in dít document voorkomen. Het hoofdniveau is de UNIE
+       van zijn eigen toewijzingen en die van zijn subcategorieën, niet de som:
+       hetzelfde tekst-element kan langs twee wegen binnenkomen.
 
     4. ALLEEN REGELS, GEEN TOELICHTING. `kop_pad` met "toelicht" erin valt af.
        Dat scheelt fors en het scheelt terecht: over het hele Arnhemse plan
@@ -4336,21 +4338,50 @@ def viewer_onderwerpen(expression: str):
               SELECT c.categorie_id, w.root
               FROM v2a.categorie c JOIN wortel w ON c.parent_id = w.categorie_id
             )
-            SELECT w.root AS naam,
+            SELECT w.root AS hoofd,
+                   k.naam  AS toegewezen,
+                   (k.parent_id IS NULL) AS is_hoofd,
                    count(DISTINCT ch.wid) AS n_elementen,
                    array_agg(DISTINCT ch.wid) AS wids
             FROM v2a.tekst_embedding ch
             JOIN v2a.chunk_categorie cc ON cc.chunk_id = ch.id
             JOIN wortel w ON w.categorie_id = cc.categorie_id
+            JOIN v2a.categorie k ON k.categorie_id = cc.categorie_id
             WHERE split_part(ch.regeling_expression, '/nld@', 1) = %s
               AND ch.wid IS NOT NULL
               AND coalesce(ch.kop_pad, '') NOT ILIKE '%%toelicht%%'
-            GROUP BY w.root
-            ORDER BY 2 DESC
+            GROUP BY w.root, k.naam, k.parent_id IS NULL
+            ORDER BY 4 DESC
             """,
             (werk,),
         )
-        onderwerpen = [dict(r) for r in cur.fetchall()]
+        # Twee niveaus opbouwen. De toewijzing zit op één categorie — soms een
+        # hoofdcategorie, soms een subcategorie — en de recursieve CTE geeft er
+        # de wortel bij. Het hoofdniveau is dus de UNIE van zijn eigen directe
+        # toewijzingen en die van zijn subcategorieën; niet de som, want
+        # hetzelfde tekst-element kan via twee wegen binnenkomen.
+        hoofd: dict[str, dict] = {}
+        for r in cur.fetchall():
+            h = hoofd.setdefault(r["hoofd"], {"naam": r["hoofd"], "wids": set(), "sub": []})
+            h["wids"].update(r["wids"])
+            if not r["is_hoofd"]:
+                h["sub"].append({
+                    "naam": r["toegewezen"],
+                    "n_elementen": r["n_elementen"],
+                    "wids": r["wids"],
+                })
+        onderwerpen = sorted(
+            (
+                {
+                    "naam": h["naam"],
+                    "n_elementen": len(h["wids"]),
+                    "wids": sorted(h["wids"]),
+                    "sub": sorted(h["sub"], key=lambda s: -s["n_elementen"]),
+                }
+                for h in hoofd.values()
+            ),
+            key=lambda h: -h["n_elementen"],
+        )
 
         # Noemer op de EXPRESSIE die de bezoeker bekijkt, niet op het werk:
         # anders tel je alle versies bij elkaar op (Arnhem: 3.161 in plaats van
