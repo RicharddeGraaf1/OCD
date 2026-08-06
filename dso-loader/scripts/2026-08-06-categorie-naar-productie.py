@@ -179,7 +179,9 @@ def toon_resultaat(pc) -> None:
         GROUP BY 1, 3 ORDER BY 2 DESC LIMIT 8
     """)
     for naam, n, is_sub in pc.fetchall():
-        log(f"  {'  └ ' if is_sub else ''}{naam}: {n}")
+        # ASCII: de Windows-console draait op cp1252 en een kader-teken laat
+        # het script struikelen op de laatste regel, ná al het echte werk.
+        log(f"  {'  - ' if is_sub else ''}{naam}: {n}")
 
 
 def main() -> None:
