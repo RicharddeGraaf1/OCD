@@ -61,6 +61,14 @@ class RegeltekstenRequest(BaseModel):
     y: float | None = Field(None, description="RD y-coordinaat")
     max_concepts: int = Field(5, ge=1, le=20)
     max_regelteksten: int = Field(20, ge=1, le=100)
+    uitgesloten_termen: list[str] = Field(
+        default_factory=list, max_length=40,
+        description="Begrippen/termen die de gebruiker heeft uitgezet. Matchende "
+                    "SKOS-concepten vallen af (en dus hun tak van de "
+                    "activiteit-join) en de term telt niet meer mee in de "
+                    "weging. Zo levert opnieuw zoeken écht een andere set op, "
+                    "i.p.v. alleen een filter over dezelfde resultaten.",
+    )
 
     @model_validator(mode="after")
     def _location_or_xy(self):
@@ -529,6 +537,17 @@ def _term_regex(term: str) -> re.Pattern | None:
     return re.compile(r"(?<![a-z0-9])" + re.escape(t))
 
 
+def _zonder_uitgesloten(scored: list[dict], uitgesloten: set[str]) -> list[dict]:
+    """Haal de door de gebruiker uitgezette termen uit de gewogen keyword-set.
+
+    Werkt op de genormaliseerde (lowercase, getrimde) term, zodat de frontend
+    de chip-tekst één-op-één kan meesturen.
+    """
+    if not uitgesloten:
+        return scored
+    return [k for k in scored if (k.get("term") or "").strip().lower() not in uitgesloten]
+
+
 def compute_term_weights(cur, scored: list[dict]) -> list[dict]:
     """Per scored keyword een gewicht = woordsoort × specificiteit(IDF) × bron.
 
@@ -630,9 +649,20 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
         rd_x, rd_y, _ = resolve_address(req.location)
         address_resolution_ms = round((time.perf_counter() - t0) * 1000, 1)
 
+    uitgesloten = {t.strip().lower() for t in req.uitgesloten_termen if t.strip()}
+
     with get_conn() as conn, conn.cursor() as cur:
         # Stap 1 — SKOS-extractie
         matched_rows, ngrams = match_skos_concepts(cur, req.question, req.max_concepts)
+
+        # Stap 1b — uitgezette begrippen eruit. Dit gebeurt vóór de killer-query,
+        # zodat de activiteit-join hun tak niet meer volgt: het resultaat is een
+        # échte andere ophaal, niet hetzelfde antwoord met een filter erover.
+        if uitgesloten and matched_rows:
+            matched_rows = [
+                r for r in matched_rows
+                if (r.get("naam") or "").strip().lower() not in uitgesloten
+            ]
 
         if not matched_rows:
             # SKOS gaf 0 matches (komt voor bij beleids-/visievragen waar het
@@ -641,14 +671,19 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
             # tekst-fallback proberen met de vraag-tokens als keywords — dekt
             # vrijetekst-instrumenten (omgevingsvisie/programma) waar de relevante
             # term letterlijk in de proza staat. Cluster C-fix 2026-06-16.
-            vraag_termen_leeg = extract_vraag_chips(cur, req.question)
+            vraag_termen_leeg = [
+                t for t in extract_vraag_chips(cur, req.question)
+                if t.strip().lower() not in uitgesloten
+            ]
             t0 = time.perf_counter()
             fallback_rows = tekst_fallback_query(
                 cur, vraag_termen_leeg, rd_x, rd_y, req.max_regelteksten,
             )
             # Geen SKOS-concepten → scored keywords uit de vraag-tokens alleen
             # (letterlijk/phrase), dan begrippen-gewogen score + cutoff.
-            scored_leeg = build_scored_keywords(req.question, [], {}, {})
+            scored_leeg = _zonder_uitgesloten(
+                build_scored_keywords(req.question, [], {}, {}), uitgesloten,
+            )
             term_weights_leeg = compute_term_weights(cur, scored_leeg)
             fallback_rows = score_en_cutoff(
                 fallback_rows, term_weights_leeg, req.max_regelteksten,
@@ -676,8 +711,14 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
 
         # Domein-trefwoorden (concept-namen + SKOS-trefwoorden) + vraag-chips:
         # basis voor zowel de tekst-fallback als het frontend object-filter.
-        domein_keywords = fetch_expanded_keywords(cur, [r["uri"] for r in matched_rows])
-        vraag_termen = extract_vraag_chips(cur, req.question)
+        domein_keywords = [
+            k for k in fetch_expanded_keywords(cur, [r["uri"] for r in matched_rows])
+            if k.strip().lower() not in uitgesloten
+        ]
+        vraag_termen = [
+            t for t in extract_vraag_chips(cur, req.question)
+            if t.strip().lower() not in uitgesloten
+        ]
 
         # Stap 4b — tekst-fallback: vond de activiteit-join niets, zoek dan de op
         # de locatie geldende regelteksten waarvan de tekst/opschrift een domein-
@@ -695,7 +736,10 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
         # de cutoff zet de sterke begrippen (znw, letterlijk, zeldzaam) bovenaan en
         # snoeit de zwakke staart. Zie [[Relevantiescoring en cutoff voor viewer-retrieval]].
         trefw_by_uri, broader_by_uri = fetch_trefw_broader(cur, [r["uri"] for r in matched_rows])
-        scored = build_scored_keywords(req.question, matched_rows, trefw_by_uri, broader_by_uri)
+        scored = _zonder_uitgesloten(
+            build_scored_keywords(req.question, matched_rows, trefw_by_uri, broader_by_uri),
+            uitgesloten,
+        )
         term_weights = compute_term_weights(cur, scored)
         regel_rows = score_en_cutoff(regel_rows, term_weights, req.max_regelteksten)
 
