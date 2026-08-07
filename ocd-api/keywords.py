@@ -56,6 +56,19 @@ STOP_WORDS: set[str] = {
     # van regels in het omgevingsplan" en vervuilen de chips. Net als
     # "regelgeving" hierboven weren.
     "regels", "regel", "hierover",
+    # Vraagwoorden, aanwijzende en onbepaalde voornaamwoorden. Deze glippen
+    # anders door de 1-gram-drempel heen: die weert termen die in véél
+    # SKOS-concepten voorkomen, maar een vraagwoord staat er helemáál niet in
+    # (freq 0) en telt dus als "specifiek". Gevolg vóór deze toevoeging:
+    # "welke regels gelden hier over datacentra?" leverde de chips "welke" en
+    # "welke datacentra" op, met gewicht 1,00 resp. 0,95 — terwijl "welke" in
+    # 5,3% van alle tekstelementen voorkomt (gemeten 2026-08-07), tegen 0,15%
+    # voor "dakkapel". Zie [[gaps#G-113]].
+    "welke", "welk", "wanneer", "waarom", "wie", "wiens", "hoeveel",
+    "waarmee", "waarvoor", "waaraan", "waarbij", "waarin", "waarop",
+    "waarover", "waarnaar", "waardoor", "waaruit",
+    "hiervoor", "hierbij", "hieronder", "daarbij", "daarvoor", "daarover",
+    "alle", "elke", "elk", "iedere", "ieder", "sommige", "enkele",
 }
 
 
