@@ -1,6 +1,7 @@
-"""Antwoord-endpoint: vraag + locatie -> natuurlijke-taal antwoord met bronnen.
+"""Antwoord-endpoints: vraag -> natuurlijke-taal antwoord met bronnen.
 
-POST /v1/antwoord-bij-vraag
+POST /v1/antwoord-bij-vraag      — retrieval + LLM in één call
+POST /v1/antwoord-bij-selectie   — LLM over een meegegeven selectie, geen retrieval
 
 De antwoord-tegenhanger van `/v1/regelteksten-bij-vraag`: dezelfde retrieval
 (SKOS->activiteit-join->geo-filter via `killer_query`), maar met een extra
@@ -12,6 +13,13 @@ Gedeeld brein: viewer én omgevingsbot consumeren dit endpoint (zie
 `OCDviewer/docs/plans/20260603-ocd-gedeeld-brein.md`). De LLM is feature-flagged
 (zie `llm.py`); zonder provider geeft dit endpoint 503 en valt de viewer terug op
 zijn eigen samenvatting.
+
+`/v1/antwoord-bij-selectie` doet géén retrieval: het antwoordt uitsluitend over
+de tekst-elementen die de afnemer meestuurt. Reden: `/v1/antwoord-bij-vraag`
+zoekt zelf opnieuw en slaat daarbij `score_en_cutoff` over, waardoor de LLM een
+andere set ziet dan de lijst op het scherm van de gebruiker. Voor een UI die de
+stappen zichtbaar maakt (zie `OCDviewer/docs/plans/ai-modus-viewer.md`) moet het
+antwoord gegrond zijn in exact wat er getoond is.
 """
 
 from __future__ import annotations
@@ -23,14 +31,16 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from db import get_conn
-from keywords import match_skos_concepts
+from keywords import build_scored_keywords, extract_vraag_chips, match_skos_concepts
 from llm import llm
 from regelteksten_bij_vraag import (
     MatchedConceptSummary,
     RegeltekstHit,
+    compute_term_weights,
     fetch_expanded_keywords,
     killer_query,
     resolve_address,
+    score_en_cutoff,
     tekst_fallback_query,
     verrijk_met_artikel,
 )
@@ -69,6 +79,29 @@ class AntwoordRequest(BaseModel):
         if not self.location and (self.x is None or self.y is None):
             raise ValueError("Geef ofwel `location`, ofwel `x` en `y`")
         return self
+
+
+class SelectieItem(BaseModel):
+    """Eén tekst-element uit de selectie die de afnemer op het scherm heeft.
+
+    `regeling_expression` is verplicht: `tekst_element.wid` is NIET uniek over
+    regelingen heen (wId fan-out). Zonder de expression zou dezelfde wId
+    artikelen uit vreemde regelingen de context in trekken.
+    """
+    wid: str = Field(..., min_length=1, max_length=200)
+    regeling_expression: str = Field(..., min_length=1, max_length=500)
+
+
+class AntwoordSelectieRequest(BaseModel):
+    question: str = Field(..., min_length=2, max_length=500)
+    location: str | None = Field(None, description="Alleen voor de aanhef van het antwoord.")
+    x: float | None = None
+    y: float | None = None
+    selectie: list[SelectieItem] = Field(
+        ..., min_length=1, max_length=60,
+        description="Exact de tekst-elementen waarover geantwoord moet worden.",
+    )
+    model: str | None = Field(None, description="Optionele model-override.")
 
 
 class AntwoordTrace(BaseModel):
@@ -179,14 +212,66 @@ def antwoord_bij_vraag(req: AntwoordRequest):
         matched_rows, _ngrams = match_skos_concepts(cur, req.question, req.max_concepts)
 
         if not matched_rows:
+            # Geen SKOS-match hoeft niet te betekenen dat er niets geldt: bij
+            # beleids-/visievragen en vaktermen buiten de SKOS-schema's
+            # ("datacentra", "hoogwaterbescherming", "Lelylijn") vindt de
+            # tekst-fallback wél regels. `/v1/regelteksten-bij-vraag` doet
+            # datzelfde en levert dan een gevulde lijst; zonder deze stap zegt
+            # dít endpoint "geen onderwerp herkend" terwijl de gebruiker naast
+            # de chat een gevulde regelmix ziet staan. Zie
+            # OCDviewer/docs/plans/ai-modus-viewer.md §Probleem.
+            t0 = time.perf_counter()
+            vraag_termen = extract_vraag_chips(cur, req.question)
+            fallback_rows = tekst_fallback_query(
+                cur, vraag_termen, rd_x, rd_y, req.max_regelteksten,
+            )
+            scored = build_scored_keywords(req.question, [], {}, {})
+            fallback_rows = score_en_cutoff(
+                fallback_rows, compute_term_weights(cur, scored), req.max_regelteksten,
+            )
+            verrijk_met_artikel(cur, fallback_rows)
+            sql_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+            if not fallback_rows:
+                return AntwoordResponse(
+                    antwoord=GEEN_CONCEPT_TEKST,
+                    confidence="LAAG",
+                    bronnen=[],
+                    matched_concepts=[],
+                    trace=AntwoordTrace(
+                        matched_concepts_count=0, sql_query_ms=sql_ms,
+                        address_resolution_ms=address_ms, rd_x=rd_x, rd_y=rd_y,
+                    ),
+                )
+
+            if not llm.available:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Antwoord-generatie is niet beschikbaar (geen LLM geconfigureerd).",
+                )
+            dso_context = build_context(fallback_rows)
+            t1 = time.perf_counter()
+            try:
+                result = llm.generate_answer(
+                    req.question, location_str, dso_context, model_override=req.model,
+                )
+            except Exception as e:
+                logger.warning("llm_failed (tekst-fallback): %s", e)
+                raise HTTPException(status_code=503, detail=f"Antwoord-generatie mislukte: {e}")
+            llm_ms = round((time.perf_counter() - t1) * 1000, 1)
+            logger.info(
+                "antwoord via tekst-fallback (0 SKOS-concepten): %d regels op basis van %s",
+                len(fallback_rows), ", ".join(vraag_termen[:5]),
+            )
             return AntwoordResponse(
-                antwoord=GEEN_CONCEPT_TEKST,
-                confidence="LAAG",
-                bronnen=[],
+                antwoord=result["answer"],
+                confidence=result["confidence"],
+                bronnen=_hit_models(fallback_rows),
                 matched_concepts=[],
                 trace=AntwoordTrace(
-                    matched_concepts_count=0, sql_query_ms=0.0,
+                    matched_concepts_count=0, sql_query_ms=sql_ms, llm_ms=llm_ms,
                     address_resolution_ms=address_ms, rd_x=rd_x, rd_y=rd_y,
+                    llm_provider=llm.provider, llm_model=req.model or llm.model,
                 ),
             )
 
@@ -241,6 +326,99 @@ def antwoord_bij_vraag(req: AntwoordRequest):
         matched_concepts=concepts,
         trace=AntwoordTrace(
             **base_trace, llm_ms=llm_ms,
+            llm_provider=llm.provider, llm_model=req.model or llm.model,
+        ),
+    )
+
+
+@router.post("/antwoord-bij-selectie", response_model=AntwoordResponse)
+def antwoord_bij_selectie(req: AntwoordSelectieRequest):
+    """Antwoord over **exact** de meegegeven tekst-elementen. Geen retrieval.
+
+    Bedoeld voor afnemers die de selectie al op het scherm hebben staan en het
+    antwoord daarin geaard willen zien. De volgorde van `selectie` is de
+    volgorde waarin de context wordt opgebouwd — de afnemer bepaalt dus zelf de
+    rangschikking (bv. de relevantie-sortering uit `/v1/regelteksten-bij-vraag`).
+    """
+    if not llm.available:
+        raise HTTPException(
+            status_code=503,
+            detail="Antwoord-generatie is niet beschikbaar (geen LLM geconfigureerd).",
+        )
+
+    location_str = req.location or (
+        f"{req.x}, {req.y}" if req.x is not None and req.y is not None else "deze locatie"
+    )
+    wids = [s.wid for s in req.selectie]
+    exprs = [s.regeling_expression for s in req.selectie]
+
+    t0 = time.perf_counter()
+    with get_conn() as conn, conn.cursor() as cur:
+        # De join op (wid, regeling_expression) is bewust een paar-match via
+        # unnest: `tekst_element.wid` is niet uniek over regelingen heen, dus een
+        # losse `wid = ANY(...)` zou artikelen uit vreemde regelingen binnenhalen.
+        cur.execute(
+            """
+            SELECT
+                te.id           AS te_id,
+                te.wid          AS wid,
+                te.opschrift    AS artikel,
+                r.opschrift     AS regeling,
+                r.frbr_expression AS regeling_expression,
+                r.documenttype,
+                REGEXP_REPLACE(te.inhoud, '<[^>]+>', '', 'g') AS inhoud,
+                sel.ord
+            FROM unnest(%(wids)s::text[], %(exprs)s::text[])
+                 WITH ORDINALITY AS sel(wid, expr, ord)
+            JOIN p2p.tekst_element te
+              ON te.wid = sel.wid AND te.regeling_expression = sel.expr
+            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+            WHERE te.inhoud IS NOT NULL
+            ORDER BY sel.ord
+            """,
+            {"wids": wids, "exprs": exprs},
+        )
+        rows = cur.fetchall()
+        verrijk_met_artikel(cur, rows)
+    sql_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Geen van de meegegeven (wid, regeling_expression)-paren bestaat.",
+        )
+
+    # `_hit_models` verwacht de velden van de killer-query; de selectie kent geen
+    # activiteit-context, dus die blijven leeg.
+    for r in rows:
+        r.setdefault("activiteit_naam", "")
+        r.setdefault("activiteit_id", "")
+        r.setdefault("join_pad", "selectie")
+
+    dso_context = build_context(rows)
+    t1 = time.perf_counter()
+    try:
+        result = llm.generate_answer(
+            req.question, location_str, dso_context, model_override=req.model,
+        )
+    except Exception as e:
+        logger.warning("llm_failed (selectie): %s", e)
+        raise HTTPException(status_code=503, detail=f"Antwoord-generatie mislukte: {e}")
+    llm_ms = round((time.perf_counter() - t1) * 1000, 1)
+
+    logger.info(
+        "antwoord-bij-selectie: %d/%d elementen gevonden, context=%d tekens",
+        len(rows), len(req.selectie), len(dso_context),
+    )
+
+    return AntwoordResponse(
+        antwoord=result["answer"],
+        confidence=result["confidence"],
+        bronnen=_hit_models(rows),
+        matched_concepts=[],
+        trace=AntwoordTrace(
+            matched_concepts_count=0, sql_query_ms=sql_ms, llm_ms=llm_ms,
+            rd_x=req.x, rd_y=req.y,
             llm_provider=llm.provider, llm_model=req.model or llm.model,
         ),
     )

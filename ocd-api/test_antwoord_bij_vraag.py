@@ -69,6 +69,43 @@ class TestFallback:
         assert "geen specifiek onderwerp" in data["antwoord"].lower()
         assert calls == []  # LLM niet aangeroepen
 
+    def test_geen_concepten_maar_wel_tekstmatch_geeft_gewoon_antwoord(self, monkeypatch):
+        """Vaktermen buiten de SKOS-schema's ("datacentra") leveren 0 concepten
+        maar wél regels via de tekst-fallback. Dan hoort dit endpoint dezelfde
+        regels samen te vatten als `/v1/regelteksten-bij-vraag` toont — anders
+        zegt de chat "niets gevonden" naast een gevulde regelmix."""
+        monkeypatch.setattr(mod, "match_skos_concepts", lambda cur, q, n: ([], []))
+        monkeypatch.setattr(mod, "extract_vraag_chips", lambda cur, q, **k: ["datacentra"])
+        monkeypatch.setattr(mod, "build_scored_keywords", lambda *a, **k: [])
+        monkeypatch.setattr(mod, "compute_term_weights", lambda cur, scored: [])
+        monkeypatch.setattr(mod, "verrijk_met_artikel", lambda cur, rows: rows)
+        monkeypatch.setattr(
+            mod, "tekst_fallback_query",
+            lambda cur, kw, x, y, limit: [{
+                "activiteit_naam": "", "activiteit_id": "",
+                "artikel": "Artikel 5.161ba", "regeling": "Besluit activiteiten leefomgeving",
+                "regeling_expression": "/akn/expr-bal", "documenttype": "AMvB",
+                "inhoud": "Openbaarmaking gegevens energie-efficiëntie datacentra.",
+                "join_pad": "tekst_fallback",
+            }],
+        )
+        monkeypatch.setattr(mod.llm, "available", True)
+        monkeypatch.setattr(
+            mod.llm, "generate_answer",
+            lambda *a, **k: {"answer": "Voor datacentra geldt …", "confidence": "MIDDEN"},
+        )
+
+        r = client.post("/v1/antwoord-bij-vraag",
+                        json={"question": "wat geldt hier over datacentra", "x": AMS_X, "y": AMS_Y})
+
+        assert r.status_code == 200
+        data = r.json()
+        assert data["confidence"] == "MIDDEN"
+        assert "datacentra" in data["antwoord"].lower()
+        assert len(data["bronnen"]) == 1
+        assert data["bronnen"][0]["join_pad"] == "tekst_fallback"
+        assert data["matched_concepts"] == []
+
 
 # ══════════════════════════════════════════════════════════
 # LLM niet beschikbaar -> 503
