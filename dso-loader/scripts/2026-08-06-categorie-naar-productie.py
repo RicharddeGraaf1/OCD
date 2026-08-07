@@ -8,15 +8,21 @@ naar Railway zou het ~1 miljoen vectoren van 768 floats als tekst zijn, en dat
 is gigabytes. Serverside met pgvector (`<=>`) kan ook, maar dat leest ~5 GB aan
 vectordata op een instance met een harde geheugenkap van 2 GB.
 
-Kopiëren mag hier omdat de twee kanten aantoonbaar dezelfde chunks bevatten.
-Gemeten 2026-08-06, beide zijden identiek:
+Kopiëren mag omdat de twee kanten dezelfde chunk-id-ruimte delen. Gemeten
+2026-08-06, beide zijden identiek:
 
     n=1651590  min(id)=1823  max(id)=1745971
     md5(alle ids)            = 6d167fd02a98…
     md5(id|wid|bron_soort)   = ad7c1e5309db…
 
 Dat is geen aanname over "prod is een dump van lokaal" maar een vingerafdruk.
-Wijkt hij af, dan stopt dit script — want dan slaan de chunk_ids nergens op.
+
+Na een synchronisatie lopen de twee uiteen: stap 6 van het sync-runbook embedt
+lokaal de nieuwe tekst en die chunks bestaan op prod nog niet. Dit script trekt
+dat daarom eerst gelijk — nieuwe chunks erheen, lokaal opgeruimde chunks daar
+weg (`prune_verouderde_versies.py` haalt ze lokaal via CASCADE weg) — en eist
+de vingerafdruk pas dáárna. Zou hij hem vooraf eisen, dan blokkeerde hij
+precies op het moment waarop je hem nodig hebt.
 
 Waarom een schaduwtabel en geen TRUNCATE
 ----------------------------------------
@@ -60,6 +66,65 @@ CATEGORIE_KOLOMMEN = [
 
 def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
+
+
+EMBEDDING_KOLOMMEN = [
+    "id", "tekst_element_id", "regeling_expression", "bron_soort", "kop_pad",
+    "inhoud_plain", "embedding", "wid", "source_type", "source_id", "source_ref",
+]
+
+
+def verschil_chunks(lc, pc):
+    """Welke chunk-id's staan wél lokaal en niet op prod, en omgekeerd.
+
+    Na een sync loopt dit onvermijdelijk uiteen: stap 6 embedt lokaal de nieuwe
+    tekst en die rijen bestaan op prod nog niet. Een kale gelijkheidstest zou de
+    overzet dan blokkeren precies wanneer je hem nodig hebt."""
+    lc.execute("SELECT id FROM v2a.tekst_embedding")
+    lokaal = {r[0] for r in lc.fetchall()}
+    pc.execute("SELECT id FROM v2a.tekst_embedding")
+    prod = {r[0] for r in pc.fetchall()}
+    return lokaal - prod, prod - lokaal
+
+
+def sync_embeddings(lconn, pconn, pc, nieuw: set, verdwenen: set) -> None:
+    """Trek v2a.tekst_embedding op prod gelijk aan lokaal, incrementeel.
+
+    Moet vóór de toewijzingen: chunk_categorie heeft een foreign key op deze
+    tabel, dus een toewijzing naar een chunk die prod niet kent, faalt."""
+    if verdwenen:
+        # Lokaal weggevallen chunks horen ook op prod weg. Ze ontstaan als
+        # `prune_verouderde_versies.py` een regeling opruimt; de CASCADE haalt
+        # de chunks dan lokaal mee. Blijven ze op prod staan, dan levert de
+        # semantische zoektocht daar tekst op die nergens meer bij hoort.
+        pc.execute("DELETE FROM v2a.tekst_embedding WHERE id = ANY(%s)", (list(verdwenen),))
+        pconn.commit()
+        log(f"prod opgeschoond: {len(verdwenen)} chunks verwijderd die lokaal weg zijn")
+
+    if not nieuw:
+        log("geen nieuwe chunks om over te zetten")
+        return
+
+    kol = ", ".join(EMBEDDING_KOLOMMEN)
+    n = 0
+    t0 = time.time()
+    with lconn.cursor(name="lees_chunks") as rc:
+        rc.itersize = 2000
+        rc.execute(f"SELECT {kol} FROM v2a.tekst_embedding WHERE id = ANY(%s) ORDER BY id",
+                   (list(nieuw),))
+        with pc.copy(f"COPY v2a.tekst_embedding ({kol}) FROM STDIN") as cp:
+            for rij in rc:
+                cp.write_row(rij)
+                n += 1
+                if n % 20000 == 0:
+                    log(f"  {n}/{len(nieuw)} chunks ({n / (time.time() - t0):.0f}/s)")
+    pconn.commit()
+    # De sequence moet mee, anders botst een latere insert op prod op een
+    # bestaande id.
+    pc.execute("SELECT setval(pg_get_serial_sequence('v2a.tekst_embedding','id'), "
+               "(SELECT max(id) FROM v2a.tekst_embedding))")
+    pconn.commit()
+    log(f"embeddings bijgewerkt: {n} chunks in {time.time() - t0:.0f}s")
 
 
 def controleer_pariteit(lc, pc) -> None:
@@ -188,11 +253,19 @@ def main() -> None:
     echt = "--ja" in sys.argv
     with psycopg.connect(LOKAAL) as lconn, psycopg.connect(PROD, connect_timeout=30) as pconn:
         lc, pc = lconn.cursor(), pconn.cursor()
-        controleer_pariteit(lc, pc)
+
+        nieuw, verdwenen = verschil_chunks(lc, pc)
+        log(f"chunks: {len(nieuw)} nieuw lokaal, {len(verdwenen)} alleen nog op prod")
         if not echt:
             lc.execute("SELECT count(*) FROM v2a.chunk_categorie")
-            log(f"droogloop — zou {lc.fetchone()[0]} toewijzingen overzetten. Draai met --ja.")
+            log(f"droogloop — zou {len(nieuw)} chunks en {lc.fetchone()[0]} toewijzingen "
+                f"overzetten. Draai met --ja.")
             return
+
+        # Volgorde is dwingend: eerst de chunks (foreign key), dan de
+        # categorieën (foreign key), dan pas de toewijzingen.
+        sync_embeddings(lconn, pconn, pc, nieuw, verdwenen)
+        controleer_pariteit(lc, pc)   # nu moet het wél exact gelijk zijn
         sync_categorie(lc, pconn, pc)
         n = laad_toewijzingen(lconn, pconn, pc)
         wissel_om(pconn, pc, n)

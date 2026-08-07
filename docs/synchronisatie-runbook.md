@@ -48,17 +48,20 @@ data draait; prod achterlaten betekent dat de sites stale zijn.
 3. PROD delta       p2p + post                       ~2–3 u
 4. VTH → prod       delta-push                       ~10 min
 5. I2A → prod       afweging, meestal overslaan      —
-6. EMBEDDINGS       apart en bewust                  uren
+6. EMBEDDINGS       + onderwerp-as, draait standaard uren
 6b. DOORWERKING     instructieregels.nl-meting       uren, lokale GPU
+6c. ONDERWERP-AS    toewijzingen lokaal → prod       ~1 min
 7. VERIFICATIE      beide DB's + API                 ~5 min
 8. DOWNSTREAM       gebakken sites herbouwen         ~15 min
 9. NAZORG           proxy dicht, VACUUM, loggen,
                     code van de run committen op main ~15 min
 ```
 
-Stappen 0–4 en 7–9 horen bij elke sync. Stap 5 en 6 zijn afwegingen. Stap 6b
-hangt aan 6: hij zoekt in de vectorindex, dus zonder embeddings meet hij tegen
-een index die de nieuwe regelingen niet kent.
+Stappen 0–4 en 7–9 horen bij elke sync. Stap 5 is een afweging. **Stap 6 draait
+standaard mee** — `full_sync.py` slaat hem alleen over met `--skip-embed`, of
+stil wanneer Ollama niet bereikbaar is. Stap 6b hangt aan 6: hij zoekt in de
+vectorindex, dus zonder embeddings meet hij tegen een index die de nieuwe
+regelingen niet kent.
 
 De post-fase domineert de looptijd, niet het laden: `p2p.naammatch_signaal`
 alleen al kost 20–35 minuten omdat hij elke objectnaam tegen elke tekst binnen
@@ -172,24 +175,72 @@ Bedenk daarbij: de i2a-loader bevraagt de RTR/STTR met een **hardgecodeerde
 toestand van 10 april op — een verschil dat níét verschijnt is dus geen bewijs
 van actualiteit.
 
-### Stap 6 — Embeddings (apart en bewust)
+### Stap 6 — Embeddings + onderwerp-as
 
-Niet meenemen in de sync. Twee redenen:
+**Deze stap draait standaard mee.** `full_sync.py` roept `fase_embed()` aan
+tenzij je `--skip-embed` meegeeft; die start `run_overnight.py`, dat vijf fasen
+doorloopt: canonieke chunk-laag → embedden → `chunk_annotatie` →
+`chunk_categorie` → objectnamen.
 
-1. `run_overnight.py` sluit af met **`git checkout feat/vector-chunk-lagen` +
-   commit** op `c:/GIT/OCD`. Met een dirty working tree op een andere branch is
-   dat een ongeluk-in-wording. Commit of stash je WIP eerst.
-2. De embed-stap zelf is resumable en goedkoop, maar dezelfde run herbouwt
-   `chunk_annotatie` en `chunk_categorie` **volledig** (uren), ook als er weinig
-   nieuw is (G-97).
+> Tot 2026-08-06 stond hier "niet meenemen in de sync". Dat was achterhaald.
+> De eerste reden — `run_overnight.py` doet een `git checkout` + commit — is op
+> 2026-08-01 uit het script gehaald; het raakt git niet meer. De tweede reden
+> (volledige herbouw) staat nog, maar is kleiner dan "uren": `chunk_categorie`
+> is gemeten op **5,3 min** over 1,65 miljoen chunks. De kosten zitten in
+> `chunk_annotatie`, dat via `DROP TABLE` + `CREATE` volledig herbouwt.
+
+#### Wat is incrementeel en wat niet
+
+| Fase | Gedrag |
+|---|---|
+| Fase 3 — canonieke chunk-laag | idempotente DDL, verwaarloosbaar |
+| Fase 4a+5 — embedden | **incrementeel**: `NOT EXISTS` op `tekst_element_id`, alleen nieuwe elementen |
+| `chunk_annotatie` | **volledige herbouw** (`DROP` + `CREATE`) |
+| `chunk_categorie` | **volledige herbouw** (`truncate` + opnieuw toewijzen) |
+| Fase 4b — objectnamen | incrementeel (idempotent-filter in Python) |
+
+De belangrijkste eigenschap staat niet in die tabel: **chunks worden alleen
+toegevoegd, nooit opgeruimd.** Verdringt de sync een expressie, dan blijven de
+chunks van de oude versie staan, mét hun wId's. De onderwerp-as in het register
+zeeft die er bij het lezen uit — een categorie telt alleen wId's die in de
+getoonde expressie bestaan. Bij `gm0796` bestond op 2026-08-06 **45%** van de
+geclassificeerde wId's niet meer in de versie op het scherm. Dat is dus geen
+fout maar een oplopende schuld: hoe langer G-97 open staat, hoe meer materiaal
+de zeef weggooit.
+
+#### Overslaan mag, maar weet wat je overslaat
 
 ```bash
-python scripts/run_overnight.py                    # lokaal
-OCD_DB_URL=<prod-dsn> python scripts/run_overnight.py   # daarna prod
+python scripts/full_sync.py --skip-embed     # sync zonder de vectorlaag
+python scripts/run_overnight.py              # de stap los, later
 ```
 
-Tot G-97 is opgelost geldt: **nieuwe regelingen zijn pas semantisch vindbaar na
-deze stap.** Sla je hem over, dan is de sync wél compleet en de vindlaag niet.
+Sla je hem over, dan is de sync compleet en de vindlaag niet. Nieuw geladen
+regelingen zijn dan **niet semantisch vindbaar** én ze missen hun
+**onderwerp-categorie** in omgevingsdocumentenregister.nl. Dat tweede is stil:
+het filter toont alleen wat het kent, dus een document zonder categorieën ziet
+er hetzelfde uit als een document dat nergens over gaat.
+
+Sinds 2026-08-06 rapporteert `fase_embed()` daarom de gemeten verschillen
+(chunks, annotaties, toewijzingen, bevestigde categorieën) in het sync-rapport
+in plaats van alleen `ok`, en een overgeslagen stap landt in de sectie
+**Fouten** in plaats van als losse regel.
+
+#### Naar productie: lokaal draaien en de tabel overzetten
+
+`run_overnight.py` rechtstreeks tegen de prod-DSN draaien kán, maar doe dat
+niet. `extend_categorie()` trekt élke embedding naar Python om er numpy op los
+te laten; over het internet is dat ~1 miljoen vectoren van 768 floats als
+tekst. Lokaal (unix-socket) kost dat 5,3 minuten, over de lijn is het
+gigabytes.
+
+De route die wel werkt staat in
+`dso-loader/scripts/2026-08-06-categorie-naar-productie.py`: lokaal draaien,
+daarna de toewijzingen kopiëren. Gemeten 2026-08-06: **737.911 rijen in 2
+seconden**, met een schaduwtabel en een swap, zodat lezers niet blokkeren.
+Het script controleert eerst een vingerafdruk over `v2a.tekst_embedding` aan
+beide kanten en stopt als die verschilt — anders zouden de `chunk_id`'s naar
+andere tekst wijzen. Zonder `--ja` doet hij alleen die controle.
 
 ### Stap 6b — Doorwerkingsmeting instructieregels.nl
 
@@ -245,6 +296,31 @@ een *nieuw omgevingsplan-artikel* inmiddels in de top-K van een bestaande regel
 zou vallen: de screening is een landelijke top-K per regel, en of die verschoven
 is weet je pas door hem opnieuw te draaien. Vuistregel: **laadde stap 1 nieuwe
 of gewijzigde omgevingsplannen, draai dan 1a–1d ongeacht wat `stand.py` zegt.**
+
+### Stap 6c — Onderwerp-as naar productie
+
+Stap 6 draait lokaal en laat de productie-DB dus met de vorige toewijzingen
+zitten. Het register leest die tabel rechtstreeks, dus zonder deze stap toont
+omgevingsdocumentenregister.nl de categorieën van vóór de sync — zonder enig
+teken dat er iets ontbreekt.
+
+```bash
+cd c:/GIT/OCD/dso-loader
+python scripts/2026-08-06-categorie-naar-productie.py        # droogloop
+python scripts/2026-08-06-categorie-naar-productie.py --ja   # echt
+```
+
+De droogloop vergelijkt een md5 over alle `v2a.tekst_embedding`-id's aan beide
+kanten. Komt die niet overeen, dan stopt hij: de `chunk_id`'s zouden dan naar
+andere tekst wijzen. Dat is precies het geval **als je stap 6 lokaal hebt
+gedraaid en er nieuwe chunks bij zijn gekomen** — dan moet eerst de
+embedding-tabel zelf mee naar prod, anders klopt de sleutelruimte niet.
+
+Wat hij doet: `v2a.categorie` gelijktrekken (alleen `UPDATE`, de 99 id's zijn
+aan beide kanten dezelfde), de toewijzingen in een schaduwtabel laden en die
+omwisselen. De oude tabel blijft achter als `v2a.chunk_categorie_oud`, dus
+terugdraaien is twee renames. Gemeten 2026-08-06: 737.911 rijen in 2 s laden,
+swap in 1 s, foreign keys herstellen 2 min.
 
 ### Stap 7 — Verificatie
 
@@ -391,7 +467,7 @@ Noodroute als prod onherstelbaar afwijkt: `restore-dev-naar-prod.ps1`
 |---|---|---|
 | G-98 | *opgelost 2026-08-01* — delta brak af op een ongesorteerde lijst | 16 regelingen waren stil gemist; nu gefixt + regressietests |
 | G-91 | verdwenen regelingen worden gedetecteerd maar niet opgevolgd | 11 vigerende regelingen in de DB die de DSO niet meer toont |
-| G-97 | vectorindex hangt niet aan de pipeline | nieuwe regelingen niet semantisch vindbaar tot stap 6 |
+| G-97 | vectorlaag herbouwt volledig en ruimt niets op | `chunk_annotatie` + `chunk_categorie` worden elke run overgedaan; chunks van verdrongen expressies blijven staan en worden pas bij het lezen weggezeefd (45% bij `gm0796`) |
 | G-94 | geen delta voor i2a/vth op prod; geen scheduling | stap 4 en 5 blijven handwerk |
 | — | i2a-datum hardgecodeerd op `10-04-2026` | i2a laadt de april-toestand |
 | — | rapportage meet exceptions, geen volledigheid | "0 fouten" gaf jarenlang valse geruststelling |
@@ -449,7 +525,8 @@ meet ook de `publish.py`-poort iets zinnigs.
 | Wat | Frequentie | Hoe |
 |---|---|---|
 | Volledige sync (stap 0–4, 7–9) | wekelijks | dit runbook |
-| Embeddings (stap 6) | na elke sync met noemenswaardig nieuw | apart, bewust |
+| Embeddings + onderwerp-as (stap 6) | elke sync | draait standaard mee in `full_sync.py` |
+| Onderwerp-as naar prod | na elke stap 6 die lokaal draaide | `2026-08-06-categorie-naar-productie.py --ja` (2 s) |
 | Doorwerkingsmeting (stap 6b) | na elke sync die omgevingsplannen of instructieregels raakte | lokaal, ná stap 6; `match/stand.py` zegt of het moet |
 | `diff_dso_bronhouder_coverage.py` | maandelijks | zwaardere coverage-diff naast de preview |
 | Wro/IMRO2006 (`load-wro-imro2006`) | los, ~24 min | landelijke PDOK-herparse, niet in de sync |

@@ -480,7 +480,41 @@ def snapshot_totalen(run_id: int):
     log(f"Totaal-snapshot vastgelegd voor run {run_id} ({metrics['regelingen']} regelingen, {db})")
 
 
-# ── Fase 7: embeddings ───────────────────────────────────────────────
+# ── Fase 7: embeddings + onderwerp-as ────────────────────────────────
+
+def _vectorstand() -> dict:
+    """Kerncijfers van de vectorlaag. Los van wat `run_overnight.py` zelf in
+    MORNING-REPORT.md schrijft: dat bestand hoort bij een ander script en zegt
+    niets meer als een fase halverwege omvalt. Deze telling komt uit de
+    database en is dus waar, ook bij een gedeeltelijke run."""
+    stand = {}
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        for sleutel, sql in [
+            ("chunks", "SELECT count(*) n FROM v2a.tekst_embedding"),
+            ("annotaties", "SELECT count(*) n FROM v2a.chunk_annotatie"),
+            ("toewijzingen", "SELECT count(*) n FROM v2a.chunk_categorie"),
+            ("categorieen", "SELECT count(*) n FROM v2a.categorie WHERE status='bevestigd'"),
+        ]:
+            try:
+                cur.execute(sql)
+                stand[sleutel] = cur.fetchone()["n"]
+            except Exception:
+                conn.rollback()
+                stand[sleutel] = None
+        conn.close()
+    except Exception as e:
+        log(f"vectorstand niet op te halen: {e}")
+    return stand
+
+
+def _verschil(voor: dict, na: dict, sleutel: str, label: str) -> str:
+    a, b = voor.get(sleutel), na.get(sleutel)
+    if a is None or b is None:
+        return f"- {label}: niet gemeten"
+    return f"- {label}: {a:,} -> {b:,} ({b - a:+,})".replace(",", ".")
+
 
 def fase_embed():
     from src.run_log import load_run
@@ -489,14 +523,43 @@ def fase_embed():
     try:
         httpx.get(f"{base}/api/tags", timeout=5).raise_for_status()
     except Exception:
-        rapporteer("Embeddings", [f"- OVERGESLAGEN: Ollama niet bereikbaar op {base}"])
+        # Geen stille regel in het rapport: zonder deze stap is de sync
+        # compleet en de vindlaag niet. Nieuwe regelingen zijn dan niet
+        # semantisch vindbaar en missen hun onderwerp-categorie — en dat
+        # laatste is onzichtbaar, want het onderwerp-filter in het register
+        # laat wat het niet kent gewoon weg.
+        rapporteer("Embeddings & onderwerp-as", [
+            f"- **OVERGESLAGEN**: Ollama niet bereikbaar op {base}",
+            "- Gevolg: nieuw geladen regelingen hebben geen chunks, dus geen",
+            "  semantische vindbaarheid en geen onderwerp-categorie in het register.",
+        ])
+        fouten.append(f"embeddings overgeslagen: Ollama niet bereikbaar op {base}")
         log("Embeddings overgeslagen: Ollama niet bereikbaar")
         return
+
+    voor = _vectorstand()
     with load_run("embeddings", scope="vectors (run_overnight)") as run:
         ok = subproc([sys.executable, str(ROOT / "scripts" / "run_overnight.py")],
                      "embeddings (run_overnight)", timeout=10 * 3600)
         run.set(n_fout=0 if ok else 1)
-    rapporteer("Embeddings", [f"- run_overnight.py: {'ok' if ok else 'FOUT (zie log)'}"])
+    na = _vectorstand()
+
+    rapporteer("Embeddings & onderwerp-as", [
+        f"- run_overnight.py: {'ok' if ok else 'FOUT (zie log)'}",
+        _verschil(voor, na, "chunks", "chunks (incrementeel: alleen nieuwe tekst_elementen)"),
+        _verschil(voor, na, "annotaties", "chunk_annotatie (volledige herbouw)"),
+        _verschil(voor, na, "toewijzingen", "chunk_categorie (volledige herbouw)"),
+        _verschil(voor, na, "categorieen", "bevestigde categorieen (hoort gelijk te blijven)"),
+        "",
+        "> Chunks worden alleen TOEGEVOEGD, nooit opgeruimd: chunks van een",
+        "> verdrongen expressie blijven staan. Het onderwerp-endpoint zeeft ze",
+        "> er bij het lezen uit op wId. Zie G-97.",
+    ])
+    if voor.get("categorieen") is not None and voor.get("categorieen") != na.get("categorieen"):
+        fouten.append(
+            f"aantal bevestigde categorieen veranderde tijdens de sync "
+            f"({voor['categorieen']} -> {na['categorieen']}) — curatie gecontroleerd?"
+        )
 
 
 # ── Doelwit-DB (lokaal vs prod-direct) ───────────────────────────────
