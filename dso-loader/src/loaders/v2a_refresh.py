@@ -232,17 +232,26 @@ def refresh_scope(conn, scope_key: str, content_hash: str) -> int:
     tegenover 2.400 die Ollama aankan) viel dat niet op — nu die weg is, is dit
     de eerstvolgende kandidaat.
 
-    Nadrukkelijk nog NIET los gemeten. Van buiten de transactie is de voortgang
-    onzichtbaar (de inserts committen pas per regeling), dus een rate-meting
-    vanuit een tweede sessie leverde 0/min op — dat zegt niets over de
-    werkelijke snelheid. Wat je wél kunt doen: de totale looptijd delen door het
-    aantal chunks, of de insert-lus tijdelijk instrumenteren. Doe dat vóór je
-    hier optimaliseert, anders herhalen we de fout die de vorige drie keer is
-    gemaakt: iets sneller maken dat niet de bottleneck was.
+    De echte kostenpost is niet het aantal round-trips maar het index-onderhoud:
+    op `embedding` ligt een **HNSW-index van 3,8 GB** die niet in shared_buffers
+    past, dus elke insert doet graafnavigatie ván disk (wait_event
+    IO/DataFileRead). De run van 2026-08-08 deed 1.442 nieuwe chunks plus het
+    opruimen van 19.506 in **102,9 minuten** — die twee zijn niet apart geklokt,
+    maar de orde van grootte is duidelijk en het zit niet in Ollama (25 ms per
+    embedding, ~2.400/min).
+
+    Wat dat betekent voor een oplossing: `COPY` scheelt round-trips maar niet
+    het HNSW-werk. Wie dit serieus wil aanpakken kijkt naar de index tijdelijk
+    droppen bij grote herbouw, of accepteert dat een incrementele refresh alleen
+    kleine dirty-sets aankan — wat na deze run ook het normale geval is (dirty
+    was 0 direct erna).
 
     De cascade is het in elk geval niet: `chunk_annotatie` en `chunk_categorie`
     hebben allebei een index op `chunk_id` (geverifieerd 2026-08-08), dus de
     DELETE hoeft niet te scannen.
+
+    Meet vóór je hier optimaliseert. Dit project heeft vandaag vier keer laten
+    zien dat de vermoede bottleneck de verkeerde was.
     """
     with conn.cursor() as cur:
         cur.execute("DELETE FROM v2a.tekst_embedding WHERE regeling_expression = %s",

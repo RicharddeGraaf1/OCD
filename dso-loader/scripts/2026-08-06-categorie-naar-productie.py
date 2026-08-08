@@ -172,6 +172,55 @@ def sync_categorie(lc, pconn, pc) -> None:
     log(f"categorie gesynchroniseerd: {bevestigd} bevestigd, waarvan {sub} subcategorie")
 
 
+def laad_annotatie(lconn, pconn, pc) -> int:
+    """Zet `v2a.chunk_annotatie` over — dezelfde schaduw+swap als de categorie.
+
+    Toegevoegd 2026-08-08. Dit script synchroniseerde `tekst_embedding` en
+    `chunk_categorie`, maar niet `chunk_annotatie`, en dat gat viel pas op na de
+    eerste incrementele refresh: door de FK-cascade verdwenen op prod de
+    annotatie-rijen van opgeruimde chunks (735.964 → 696.776), terwijl de
+    herbouwde rijen voor nieuwe chunks er niet bij kwamen. Lokaal 743.073 tegen
+    prod 696.776 — 46.297 rijen verschil op een tabel die de per-chunk
+    werkingsgebieden draagt.
+
+    Herbouwen op prod zou ook kunnen (4,2 min lokaal gemeten), maar dat is
+    `DROP TABLE` + `CREATE` op een tabel waar de viewer op leest. Kopiëren met
+    een swap houdt de leestijd op milliseconden.
+    """
+    pc.execute("DROP TABLE IF EXISTS v2a.chunk_annotatie_nieuw")
+    pc.execute("CREATE TABLE v2a.chunk_annotatie_nieuw (LIKE v2a.chunk_annotatie)")
+    pconn.commit()
+
+    kols = "chunk_id, object_type, object_id, locatie_id, herkomst, kwalificatie"
+    n = 0
+    t0 = time.time()
+    with lconn.cursor(name="lees_annotatie") as rc:
+        rc.itersize = 20000
+        rc.execute(f"SELECT {kols} FROM v2a.chunk_annotatie")
+        with pc.copy(f"COPY v2a.chunk_annotatie_nieuw ({kols}) FROM STDIN") as cp:
+            for rij in rc:
+                cp.write_row(rij)
+                n += 1
+                if n % 200000 == 0:
+                    log(f"  annotatie {n} rijen ({n / (time.time() - t0):.0f}/s)")
+    pconn.commit()
+
+    with pconn.transaction():
+        pc.execute("DROP TABLE IF EXISTS v2a.chunk_annotatie_oud")
+        pc.execute("""SELECT indexname FROM pg_indexes
+                       WHERE schemaname='v2a' AND tablename='chunk_annotatie'""")
+        for i, (idx,) in enumerate(pc.fetchall(), 1):
+            pc.execute(f'ALTER INDEX v2a."{idx}" RENAME TO chunk_annotatie_oud_idx_{i}')
+        pc.execute("ALTER TABLE v2a.chunk_annotatie RENAME TO chunk_annotatie_oud")
+        pc.execute("ALTER TABLE v2a.chunk_annotatie_nieuw RENAME TO chunk_annotatie")
+        pc.execute("CREATE INDEX chunk_annotatie_chunk_idx ON v2a.chunk_annotatie (chunk_id)")
+        pc.execute("CREATE INDEX chunk_annotatie_locatie_idx ON v2a.chunk_annotatie (locatie_id)")
+        pc.execute("CREATE INDEX chunk_annotatie_object_idx ON v2a.chunk_annotatie (object_id)")
+        pc.execute("CREATE INDEX chunk_annotatie_herkomst_idx ON v2a.chunk_annotatie (herkomst)")
+    log(f"chunk_annotatie: {n} rijen geladen en omgewisseld in {time.time() - t0:.0f}s")
+    return n
+
+
 def laad_toewijzingen(lconn, pconn, pc) -> int:
     pc.execute("DROP TABLE IF EXISTS v2a.chunk_categorie_nieuw")
     pc.execute("CREATE TABLE v2a.chunk_categorie_nieuw (LIKE v2a.chunk_categorie)")
@@ -286,6 +335,7 @@ def main() -> None:
         sync_categorie(lc, pconn, pc)
         n = laad_toewijzingen(lconn, pconn, pc)
         wissel_om(pconn, pc, n)
+        laad_annotatie(lconn, pconn, pc)   # hangt óók aan tekst_embedding(id)
         toon_resultaat(pc)
 
 
