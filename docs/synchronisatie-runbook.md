@@ -483,9 +483,23 @@ python scripts/preview_sync.py --vergelijk-prod    # moet nu ~0 te laden tonen
 
 En verder:
 
-- `SYNC-REPORT-<datum>.md` — 0 fouten? Komt "nieuw geladen regelingen" overeen
-  met wat de preview voorspelde? **Dit is de belangrijkste check**: preview
-  versus uitkomst is de enige die stille onvolledigheid vangt.
+- `SYNC-REPORT-<datum>.md` — kijk éérst naar de sectie **Regressiecheck**. Die
+  vergelijkt niet of een fase gedraaid heeft maar of hij iets *deed*, op basis
+  van `details.totaal_voor`/`totaal_na` per `core.load_run`. Drie signalen:
+
+  | Signaal | Betekenis |
+  |---|---|
+  | totaal **daalde** | er is data verdwenen tijdens een fase die "ok" meldt |
+  | preview verwachtte +N, geladen +M (M < N) | stille onvolledigheid bínnen deze run |
+  | 3 runs op rij geen aangroei | de bron staat stil — dit is het i2a-geval (G-117) |
+
+  Losse controle op een eerdere run: `python -m src.sync_regressie --run-id <n>`.
+  Retroactief getest: de check vindt zowel G-98 (juli, `ozon-regelingen` drie
+  runs stil) als G-117 (`rtr-toepasbare-regels` stil op 63.792).
+
+  De verwachting komt uit de preview en wordt aan het begin van de run in
+  `audit.sync_run.metrics->'verwacht'` gezet. Blijft die leeg (DSO onbereikbaar),
+  dan valt de check terug op de historie.
 - `audit.sync_run` — `klaar_op` gevuld (anders toont het dashboard een
   spook-sync).
 - `core.load_run` — geen rij op `running` blijven staan.

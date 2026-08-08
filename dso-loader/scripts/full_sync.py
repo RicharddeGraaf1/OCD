@@ -180,6 +180,51 @@ def snapshot_en_dedup(label: str) -> int:
     return run_id
 
 
+def leg_verwachting_vast(run_id: int, skip_p2p: bool, skip_vth: bool) -> None:
+    """Zet de preview-uitkomst als verwachting in audit.sync_run.metrics.
+
+    Zonder dit is de regressiecheck beperkt tot "groeit deze bron nog"; mét
+    verwachting kan hij zeggen "de preview zag er 10 en er kwamen er 3". Dat is
+    de preview-vs-uitkomst-controle die het runbook §5 als belangrijkste
+    openstaande verbetering noemde — en de enige die stille onvolledigheid
+    binnen één run vangt.
+
+    Best-effort: een onbereikbare DSO mag een sync niet tegenhouden, dus bij een
+    fout blijft de verwachting leeg en valt de check terug op de historie.
+    """
+    verwacht: dict[str, int] = {}
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        if not skip_p2p:
+            from preview_sync import preview_p2p
+            p = preview_p2p(sinds=None)
+            verwacht["ozon-regelingen"] = len(p["nieuw"]) + len(p["nieuwe_versie"])
+        if not skip_vth:
+            from preview_sync import preview_vth
+            v = preview_vth()
+            verwacht["koop-sru-vergunningen"] = sum(
+                n for _, n in v["dagen"] if isinstance(n, int))
+    except Exception as e:
+        log(f"verwachting vastleggen overgeslagen: {e}")
+        return
+
+    if not verwacht:
+        return
+    from psycopg.types.json import Json
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE audit.sync_run "
+            "   SET metrics = coalesce(metrics, '{}'::jsonb) || jsonb_build_object('verwacht', %s::jsonb) "
+            " WHERE run_id = %s",
+            (Json(verwacht), run_id))
+        conn.commit()
+    finally:
+        conn.close()
+    log("verwachting uit preview: " + ", ".join(f"{k}={v}" for k, v in verwacht.items()))
+
+
 # ── Fase 3: p2p ──────────────────────────────────────────────────────
 
 def bouw_bronhouderlijst():
@@ -683,6 +728,7 @@ def main():
     ])
 
     run_id = snapshot_en_dedup(args.label)
+    leg_verwachting_vast(run_id, args.skip_p2p, args.skip_vth)
 
     bronhouders = bouw_bronhouderlijst()
     # Harvest eerst (p2p → i2a → vth), dan pas rekenen (post → embed).
@@ -709,6 +755,19 @@ def main():
                 (f"{len(fouten)} fouten", run_id))
     conn.commit()
     conn.close()
+
+    # Regressiecheck: niet "draaide de fase" maar "deed de fase iets". Zie
+    # src/sync_regressie.py — dit vangt de nul-die-als-succes-telt.
+    try:
+        from src.sync_regressie import rapport_sectie
+        regels = rapport_sectie(run_id)
+        rapporteer("Regressiecheck (aangroei t.o.v. eerdere runs)", regels)
+        for r in regels:
+            if "⚠️" in r:
+                fouten.append(f"regressie: {r.lstrip('- ').replace('**','')}")
+    except Exception as e:
+        rapporteer("Regressiecheck (aangroei t.o.v. eerdere runs)",
+                   [f"- check zelf faalde: {e}"])
 
     try:
         snapshot_totalen(run_id)
