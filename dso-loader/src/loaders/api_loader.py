@@ -375,6 +375,26 @@ def load_documentstructuur(conn, regeling_uri: str, expression_id: str):
         if refs:
             insert_inline_referenties(conn, te_id, refs)
 
+    # GIO's vóór de resolve, niet erna. Pass A matcht ExtIoRef.@ref op
+    # p2p.geo_informatieobject.frbr_expression; staat die tabel nog leeg voor
+    # deze regeling, dan vindt hij niets en blijft de verwijzing dood. Dat was
+    # jarenlang het geval omdat gio_zip alleen aan losse backfill-scripts hing:
+    # 17.582 dode verwijzingen over 125 regelingen (vault gaps.md G-119).
+    #
+    # De ZIP is gecached per work, en de Download API levert toch altijd de
+    # vigerende versie — voor een regeling die we zojuist als vigerend hebben
+    # geladen is dat precies de goede. Best-effort: een mislukte GIO-stap mag
+    # het laden van de tekst niet ongedaan maken, dus de fout wordt gelogd en
+    # de resolve draait alsnog (die koppelt dan wat er al ligt).
+    try:
+        from src.loaders.gio_zip import process_zip
+        from src.loaders.ow_loader import _download_regeling
+        zip_path = _download_regeling(regeling_uri)   # regeling_uri is het work
+        if zip_path:
+            process_zip(zip_path, conn, regeling_expression=expression_id)
+    except Exception as e:
+        console.print(f"    [yellow]GIO-stap overgeslagen: {str(e)[:120]}[/yellow]")
+
     resolve_target_soort(conn, regeling_expression=expression_id)
 
     conn.commit()

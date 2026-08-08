@@ -351,6 +351,12 @@ def controleer_schema(lc, pc) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sinds", help="ISO-tijdstip; default = start van de laatste geslaagde lokale sync")
+    ap.add_argument("--expressies", metavar="BESTAND",
+                    help="bestand met één frbr_expression per regel; overschrijft --sinds. "
+                         "Voor reparaties die bestaande regelingen raken in plaats van "
+                         "nieuw geladene — bv. het GIO-koppelingsherstel (G-119), waarbij "
+                         "geo_informatieobject en tekst_inline_referentie van oude "
+                         "expressies zijn bijgewerkt.")
     ap.add_argument("--ja", action="store_true", help="echt kopiëren (anders droogloop)")
     args = ap.parse_args()
 
@@ -366,16 +372,27 @@ def main() -> None:
     pc.execute("SET max_parallel_workers_per_gather = 0")
     pc.execute("SET max_parallel_maintenance_workers = 0")
 
-    sinds = args.sinds
-    if not sinds:
-        lc.execute("SELECT max(gestart_op) FROM audit.sync_run "
-                   "WHERE klaar_op IS NOT NULL AND coalesce(opmerking,'') NOT ILIKE '%%afgebroken%%'")
-        sinds = lc.fetchone()[0]
-    log(f"Scope: regelingen geladen sinds {sinds}")
+    expressies: list[str] | None = None
+    if args.expressies:
+        with open(args.expressies, encoding="utf-8") as f:
+            expressies = [r.strip() for r in f if r.strip()]
+        log(f"Scope: {len(expressies)} expressies uit {args.expressies}")
+        sinds = None
+    else:
+        sinds = args.sinds
+        if not sinds:
+            lc.execute("SELECT max(gestart_op) FROM audit.sync_run "
+                       "WHERE klaar_op IS NOT NULL AND coalesce(opmerking,'') NOT ILIKE '%%afgebroken%%'")
+            sinds = lc.fetchone()[0]
+        log(f"Scope: regelingen geladen sinds {sinds}")
 
     controleer_schema(lc, pc)
 
-    lc.execute(SCOPE_EXPR_SQL, {"sinds": sinds})
+    if expressies is not None:
+        lc.execute("CREATE TEMP TABLE scope_expr ON COMMIT DROP AS "
+                   "SELECT unnest(%s::text[]) AS frbr_expression", (expressies,))
+    else:
+        lc.execute(SCOPE_EXPR_SQL, {"sinds": sinds})
     lc.execute(SCOPE_SQL)
     lc.execute("SELECT count(*) FROM scope_expr")
     n_expr = lc.fetchone()[0]

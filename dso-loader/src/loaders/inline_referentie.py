@@ -156,13 +156,21 @@ def resolve_target_soort(conn, regeling_expression: str | None = None) -> dict[s
 
     with conn.cursor() as cur:
         # ─── Pass A: ExtIoRef → GIO via FRBR ───
+        # De conditie is `target_gio_expression IS NULL`, niet `target_soort IS
+        # NULL`. Dat verschil is niet cosmetisch: een rij kan al 'GIO' heten
+        # zonder koppeling — dan hield de oude conditie hem voor afgehandeld en
+        # bleef de verwijzing eeuwig dood. Dat is precies wat er gebeurt als de
+        # GIO's ná de tekst binnenkomen, wat de normale gang van zaken is zolang
+        # de GIO-stap buiten de sync valt (vault gaps.md G-119). Gemeten
+        # 2026-08-08: 1.224 ExtIoRef-koppelingen landelijk herstelbaar, 244 op
+        # één juli-regeling. Een bestaande koppeling wordt nooit overschreven.
         cur.execute(
             f"""UPDATE p2p.tekst_inline_referentie tir
                 SET target_soort = 'GIO',
                     target_gio_expression = gio.frbr_expression
                 FROM p2p.geo_informatieobject gio
                 WHERE tir.soort = 'ExtIoRef'
-                  AND tir.target_soort IS NULL
+                  AND tir.target_gio_expression IS NULL
                   AND tir.target_ref = gio.frbr_expression
                   {where_extra}
             """,
@@ -187,7 +195,7 @@ def resolve_target_soort(conn, regeling_expression: str | None = None) -> dict[s
                          ON tir_ext.eigen_wid = tir_int.target_ref
                     JOIN p2p.tekst_element te_ext ON te_ext.id = tir_ext.tekst_element_id
                     WHERE tir_int.soort = 'IntIoRef'
-                      AND tir_int.target_soort IS NULL
+                      AND tir_int.target_gio_expression IS NULL   -- zie pass A
                       AND tir_ext.soort = 'ExtIoRef'
                       AND tir_ext.eigen_wid IS NOT NULL
                       AND te_int.regeling_expression = te_ext.regeling_expression
