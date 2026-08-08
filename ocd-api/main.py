@@ -24,6 +24,7 @@ from planvoorraad import router as planvoorraad_router
 from ponsenkaart import router as ponsenkaart_router
 from regelteksten_bij_vraag import router as regelteksten_router
 from semantisch import router as semantisch_router
+from tiles import router as tiles_router
 from vergunningen import _tsquery_arg
 from vergunningen import router as vergunningen_router
 from mer import router as mer_router
@@ -208,6 +209,7 @@ app.include_router(planvoorraad_router, dependencies=[Depends(verify_key)])
 app.include_router(ponsenkaart_router, dependencies=[Depends(verify_key)])
 app.include_router(expand_router, dependencies=[Depends(verify_key)])
 app.include_router(kennis_router, dependencies=[Depends(verify_key)])
+app.include_router(tiles_router, dependencies=[Depends(verify_key)])
 
 
 @app.get("/health")
