@@ -99,7 +99,47 @@ automatisme — zie de parallel met G-91.
 
 ---
 
-## 3. GIO's (G-119) — eerst de vraag, dan de bouw
+## 3. GIO's (G-119) — onderzoek afgerond 2026-08-08, bouw nog te doen
+
+**1. Ooit anders geweest?** Nee. `git log -S "process_zip"` over `api_loader.py`
+en `full_sync.py` geeft geen enkele commit. De GIO-stap heeft nooit in de sync
+gezeten — ontwerp, geen regressie.
+
+**2. Wat kost het?** Weinig: `process_zip` op een gecachte ZIP deed 122 GIO's in
+**2,0 s**. De kosten zitten in de ZIP-download (Ozon Download API: request +
+poll + download), niet in het parsen.
+
+**3. Wat mist er functioneel?** Inline referenties met `target_soort='GIO'`:
+
+| Geladen in | GIO-verwijzingen | gekoppeld |
+|---|---|---|
+| juni | 25.090 | 24.083 (96%) |
+| **juli** | **17.058** | **0** |
+| augustus | 1.483 | 1.483 (100%) |
+
+Juli loopt volledig dood. Augustus haalt 100% doordat die regelingen naar GIO's
+van een eerdere versie verwijzen die al in de database stonden.
+
+**De verrassing: achteraf repareren werkt niet zomaar.** Twee obstakels, allebei
+gemeten op een juli-regeling (Groningen):
+
+- `resolve_target_soort()` draait in `api_loader.py:378` **direct na het laden
+  van de tekst**, dus vóórdat er GIO's zijn. Pass A (ExtIoRef → GIO via
+  FRBR-match) vindt dan per definitie niets.
+- De ZIP-cache staat op **work**-niveau: `_download_regeling(work)` maakt
+  `akn_nl_act_gm0014_2020_omgevingsplan.zip`, zonder versie. Na `process_zip`
+  stonden er 122 GIO's op de juli-expressie, maar de 483 verwijzingen bleven op
+  0 gekoppeld — de UUID's waarnaar de juli-tekst verwijst zitten niet in die
+  122. Je haalt dus de GIO's van een oudere versie op.
+
+**Bouwadvies**: het is een volgorde- en sleutelkwestie, geen nieuwe loader. Zet
+de cache-sleutel op expressie in plaats van work, en plaats de GIO-stap in
+`api_loader` ná het laden van de tekst maar vóór `resolve_target_soort`. Beide
+bouwstenen bestaan al.
+
+*Oorspronkelijke opzet hieronder bewaard.*
+
+### Oorspronkelijke aanpak
 
 **Probleem.** `gio_zip.process_zip` wordt alleen aangeroepen vanuit losse
 backfill-scripts, niet vanuit `full_sync.py` of `api_loader.py`. Regelingen
