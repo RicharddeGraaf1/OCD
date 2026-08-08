@@ -79,3 +79,45 @@ def test_timeout_is_transient():
 def test_niet_http_fout_gaat_direct_door():
     with pytest.raises(ValueError):
         http_retry.met_retry(lambda: (_ for _ in ()).throw(ValueError("bug")))
+
+
+# ── i2a-pad (2026-08-08) ─────────────────────────────────────────────
+# De helper bestond sinds 01-08 en noemde de i2a-uitval expliciet, maar
+# imtr_loader gebruikte hem niet. Bij de run van 08-08 viel bronhouder 1699
+# opnieuw uit op een 503 bij /activiteiten/_zoek. Deze tests bewaken dat het
+# i2a-pad de retry écht doorloopt, niet alleen dat de helper werkt.
+
+def test_i2a_post_herprobeert_503(monkeypatch):
+    from src.loaders import imtr_loader
+
+    pogingen = {"n": 0}
+
+    def nep_post(url, headers=None, json=None, timeout=None):
+        pogingen["n"] += 1
+        req = httpx.Request("POST", url)
+        code = 503 if pogingen["n"] == 1 else 200
+        return httpx.Response(code, request=req, json={"ok": pogingen["n"]})
+
+    monkeypatch.setattr(imtr_loader.httpx, "post", nep_post)
+    monkeypatch.setattr(http_retry.time, "sleep", lambda s: None)
+
+    uit = imtr_loader._api_post("https://example.test", "/activiteiten/_zoek", {})
+    assert uit == {"ok": 2}
+    assert pogingen["n"] == 2
+
+
+def test_i2a_get_laat_404_direct_door(monkeypatch):
+    """Een 4xx is een echte fout — daar moet niet op herprobeerd worden."""
+    from src.loaders import imtr_loader
+
+    pogingen = {"n": 0}
+
+    def nep_get(url, headers=None, params=None, timeout=None):
+        pogingen["n"] += 1
+        req = httpx.Request("GET", url)
+        return httpx.Response(404, request=req, json={})
+
+    monkeypatch.setattr(imtr_loader.httpx, "get", nep_get)
+    with pytest.raises(httpx.HTTPStatusError):
+        imtr_loader._api_get("https://example.test", "/iets")
+    assert pogingen["n"] == 1

@@ -15,6 +15,7 @@ from rich.console import Console
 
 from src.config import cfg
 from src.db import get_conn
+from src.http_retry import met_retry
 from src.rate_limiter import limiter
 
 console = Console()
@@ -30,23 +31,41 @@ DMN_NS = {
 
 
 def _api_get(base_url: str, path: str, params: dict | None = None) -> dict:
-    """GET request to a DSO API with shared rate limiting."""
+    """GET request to a DSO API with shared rate limiting en retry op 5xx.
+
+    De retry is hier op 2026-08-08 bijgekomen. `src/http_retry.py` bestond al
+    sinds 01-08 en noemt in zijn eigen docstring dat er toen "één gemeente uit
+    de i2a-fase viel" door een losse 503 — maar i2a gebruikte hem niet. Bij de
+    run van 08-08 gebeurde precies hetzelfde: bronhouder 1699 sneuvelde op een
+    503 bij `/activiteiten/_zoek`, 342 van 343 ok.
+
+    De limiter zit binnen de retry-scope, dus een nieuwe poging gaat er netjes
+    opnieuw doorheen.
+    """
     url = f"{base_url}{path}"
     headers = {"x-api-key": cfg.DSO_API_KEY}
-    with limiter:
-        resp = httpx.get(url, headers=headers, params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+
+    def _doe():
+        with limiter:
+            resp = httpx.get(url, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    return met_retry(_doe, omschrijving=f"i2a GET {path}")
 
 
 def _api_post(base_url: str, path: str, json_body: dict) -> dict:
-    """POST request to a DSO API with shared rate limiting."""
+    """POST request to a DSO API with shared rate limiting en retry op 5xx."""
     url = f"{base_url}{path}"
     headers = {"x-api-key": cfg.DSO_API_KEY, "Content-Type": "application/json"}
-    with limiter:
-        resp = httpx.post(url, headers=headers, json=json_body, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+
+    def _doe():
+        with limiter:
+            resp = httpx.post(url, headers=headers, json=json_body, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    return met_retry(_doe, omschrijving=f"i2a POST {path}")
 
 
 def _rtr_organisatiecode(bronhouder_code: str) -> str:
