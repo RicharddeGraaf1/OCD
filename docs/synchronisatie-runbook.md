@@ -361,11 +361,35 @@ geclassificeerde wId's niet meer in de versie op het scherm. Dat is dus geen
 fout maar een oplopende schuld: hoe langer G-97 open staat, hoe meer materiaal
 de zeef weggooit.
 
+#### Sinds 2026-08-08: `refresh-v2a` in plaats van de volledige scan
+
+```bash
+python -m src.cli refresh-v2a                    # droogloop: toon de dirty-set
+python -m src.cli refresh-v2a --ja --opruimen
+```
+
+Dit is de executor uit het G-97-ontwerp, waarvan tot nu toe alleen fase 1
+(`v2a.embed_state`) bestond. Hij bepaalt met één query welke regelingen nieuw
+of gewijzigd zijn — content-hash, geen timestamp, want p2p-herlaad is
+UPSERT-DO-NOTHING — en embedt alleen die. Gemeten na de sync van 2026-08-07:
+**26 dirty van 1.978**, tegenover de 1.979 die `run_overnight.py` fase 4a
+allemaal langsliep.
+
+`--opruimen` verwijdert daarnaast de chunks van verdrongen expressies, de
+tweede helft van G-97. Let op de scope: `v2a.tekst_embedding` bevat óók
+`source_type='wro'` (39.358 expressies) en `'ontwerp'` (~240). Een naïeve
+"bestaat niet meer in p2p.regeling"-query markeert die als wees en zou de halve
+index wissen — de droogloop gaf 39.846 waar er 12 echt waren. De scherpe
+definitie is: staat wél in `p2p.regeling`, maar op `inactief`.
+
+`run_overnight.py` blijft bestaan voor een volledige herbouw, maar hoort niet
+meer in een gewone sync.
+
 #### Overslaan mag, maar weet wat je overslaat
 
 ```bash
 python scripts/full_sync.py --skip-embed     # sync zonder de vectorlaag
-python scripts/run_overnight.py              # de stap los, later
+python scripts/run_overnight.py              # volledige herbouw, uren
 ```
 
 Sla je hem over, dan is de sync compleet en de vindlaag niet. Nieuw geladen

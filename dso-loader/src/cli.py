@@ -597,6 +597,53 @@ def load_api(types, gemeente, overheid):
                      bronhouder_code=cfg.POC_CBS_CODE, doc_types=doc_types)
 
 
+@cli.command("refresh-v2a")
+@click.option("--ja", is_flag=True, help="echt uitvoeren (default: droogloop)")
+@click.option("--opruimen", is_flag=True,
+              help="ook chunks van verdrongen (inactieve) expressies verwijderen")
+def refresh_v2a_cmd(ja, opruimen):
+    """Incrementele refresh van de vectorlaag (G-97-executor).
+
+    Bepaalt de dirty-set uit `v2a.embed_state` (content-hash per regeling) en
+    embedt alleen wat nieuw of gewijzigd is. Dat vervangt de scan van
+    `run_overnight.py` fase 4a, die alle ~1.979 actieve regelingen langsliep om
+    de handvol gewijzigde te vinden — 574 in 139 minuten, gemeten 2026-08-08.
+
+    Hierna nog `chunk_annotatie` + `chunk_categorie` herbouwen (samen ~10 min);
+    die zijn bewust volledig, want een consistente herbouw is daar goedkoper
+    dan incrementele dirty-state.
+    """
+    from src.loaders.v2a_refresh import dirty_set, refresh_scope, verweesde_scopes
+    from src.run_log import load_run
+    import psycopg
+    from psycopg.rows import dict_row
+
+    conn = psycopg.connect(cfg.db_url, row_factory=dict_row)
+    vuil = dirty_set(conn)
+    wees = verweesde_scopes(conn) if opruimen else []
+    console.print(f"dirty: {len(vuil)} regelingen · verweesd: {len(wees)} expressies")
+    if not ja:
+        console.print("[yellow]droogloop — gebruik --ja[/yellow]")
+        conn.close()
+        return
+
+    with load_run("v2a-tekst-embedding", scope=f"dirty:{len(vuil)}") as run:
+        totaal = 0
+        for v in vuil:
+            totaal += refresh_scope(conn, v["scope_key"], v["content_hash"])
+            conn.commit()
+        if wees:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM v2a.tekst_embedding WHERE regeling_expression = ANY(%s)",
+                            (wees,))
+                cur.execute("DELETE FROM v2a.embed_state WHERE scope_key = ANY(%s) "
+                            "AND source_type='p2p'", (wees,))
+            conn.commit()
+        run.set(n_verwerkt=totaal, details={"dirty": len(vuil), "opgeruimd": len(wees)})
+    console.print(f"[green]{totaal} chunks geëmbed over {len(vuil)} regelingen[/green]")
+    conn.close()
+
+
 @cli.command("refresh-subdiv")
 @click.option("--bronhouder", "-b", default=None,
               help="Beperk tot één bronhouder-code (bv. gm0344). Default: alle polygon-locaties (volledige rebuild).")
