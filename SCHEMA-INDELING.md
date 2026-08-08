@@ -105,6 +105,17 @@ huidige Ow-regime; Wro heeft zijn eigen schema.
 | `naammatch_signaal` | matview | Type 3 — exacte naam-match tussen object-namen (Activiteit/GA/Norm/Omgevingswaarde) en `tekst_element.inhoud_plain`. Refresh via `scripts/refresh_naammatch_signaal.py`. |
 | `tekst_object_consistentie` | view | Combineert type 1 + 2 + 3 per (tekst_element, object), kent een `consistentie_klasse` toe (consistent_aanwezig, vermoedelijk_vergeten_annotatie, annotatie_zonder_tekstbasis, tegenstrijdige_doelen, overig_inconsistent). Filter hierop voor integriteitssignalen in de OCD-viewer. |
 
+**Afgeleide weergave-laag (geometrie):**
+
+| Object | Soort | Reden |
+|---|---|---|
+| `locatie_subdiv` | tabel | Opgedeelde variant van `locatie.geometrie` (`ST_Subdivide`), voor querysnelheid op puntbevraging. |
+| `locatie_generalisatie` | tabel | Vereenvoudigde geometrie per zoomniveau voor de vector-tile-laag (niveau 6/8/10 = hoogste bediende zoom in de PDOK-RD-piramide) + `bron_hash` voor driftdetectie. Volledige herbouw met `scripts/vul_locatie_generalisatie.py` (~23 min). |
+
+Beide zijn **wegwerpbaar**: afgeleid uit `p2p.locatie`, opnieuw op te bouwen
+zonder de bron aan te raken. Ze horen daarom bij de geometrie in `p2p` en niet
+in `core` (referentiedata) of `v2a` (semantische laag).
+
 ### `wro` — oud regime (7 tabellen)
 
 Het Wro-/IMRO-stelsel. Apart schema vanwege eigen technische stack, eigen
