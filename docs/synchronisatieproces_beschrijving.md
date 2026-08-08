@@ -1,6 +1,6 @@
 # Synchronisatieproces OCD — beschrijving, timings & efficiëntie
 
-*Laatst bijgewerkt: 2026-08-01*
+*Laatst bijgewerkt: 2026-08-08*
 
 Dit document beschrijft hoe de nachtelijke synchronisatie van de OCD-database
 werkt, wat elke fase doet, **hoe lang elke stap duurt**, en — kritisch — **hoe
@@ -107,9 +107,10 @@ repair-pons, ponsenkaart-stats, drieslag-MV's, health-MV's) → embeddings
   prod-run voegt zelf een `sync_run`-rij toe → volgende keer schuift `sinds` mee.
 
 **Nog niet in de prod-delta (bewust overslaan met `--skip-i2a --skip-vth`):**
-i2a en vth hebben nog geen delta en pollen álle bronhouders → over de proxy traag.
-Laat die voorlopig via de lokale sync + restore lopen, of draai ze gericht. Delta
-voor i2a/vth is de volgende stap (gaps G-94).
+vth heeft geen delta en pollt álle bronhouders → over de proxy traag. i2a heeft
+er sinds 2026-08-08 wél een (zie §i2a incrementeel), maar draait evengoed niet
+tegen prod: sinds die datum krijgt productie gegevens gerepliceerd in plaats van
+loaders (G-94).
 
 ---
 
@@ -255,6 +256,58 @@ omgekeerde diff wél (en splitst *verdrongen* van *verdwenen*);
 
 ---
 
+## i2a incrementeel: de wijzigingsdatum per regelbestand
+
+De i2a-fase haalt twee dingen op: per bestuursorgaan de RTR-activiteiten, en
+per regelbeheerobject de STTR-regelbestanden. Het tweede is duur, want elk
+regelbestand betekent een aparte DMN-XML-download plus parsing — bij ~150
+bestanden per bronhouder en 343 bronhouders zo'n **50.000 downloads**.
+
+De lijst-call levert per bestand een `laatsteWijzigingDatum` op secondeniveau:
+
+```json
+{"identifier": "...", "functioneleStructuurRef": "...",
+ "laatsteWijzigingDatum": "11-07-2023 13:57:47", "sttrVersie": 2}
+```
+
+Die datum wordt sinds 2026-08-08 opgeslagen in
+`i2a.toepasbaar_regelbestand.laatste_wijziging`. Komt hij bij een volgende run
+overeen, dan is de inhoud ongewijzigd en slaat de loader de XML over.
+
+**Gemeten** op gm1699 (148 regelbestanden), twee runs achter elkaar: **52,3 s →
+3,1 s**. Over 343 bronhouders geëxtrapoleerd: 5,6 uur → ~20 min.
+
+### Waarom niet dezelfde vorm als de p2p-delta
+
+De p2p-delta werkt met één watermark (`registratietijdstip >= sinds`) over de
+hele lijst. Dat is bij i2a bewust **niet** gedaan, om twee redenen:
+
+1. Een watermark op een tijdstempel veronderstelt dat een item zichtbaar wordt
+   op het moment dat het geregistreerd is. Bij p2p bleek dat fout — items
+   verschenen later in de lijst mét een ouder tijdstip, wat op 2026-08-07 bijna
+   zeven regelingen kostte. Een vergelijking *per bestand* kent dat probleem
+   niet.
+2. De winst zit hier niet in het overslaan van lijst-calls (die zijn goedkoop en
+   nodig om de datum te kennen) maar in het overslaan van downloads. Je hebt de
+   lijst dus toch nodig.
+
+### Twee eigenschappen om te kennen
+
+- De datum wordt **pas vastgelegd na een geslaagde DMN-verwerking**. Een
+  afgebroken run laat daardoor geen bestand achter dat ten onrechte als "bij"
+  geldt.
+- **Verdwenen regelbestanden worden niet opgeruimd** — dezelfde keuze als G-91
+  bij p2p: verdwijnen uit een lijst is geen bewijs van intrekking.
+
+### Wat de delta niet oplost
+
+De hardgecodeerde `datum: "10-04-2026"` in de RTR/STTR-calls staat er nog.
+Zolang die er is, haalt i2a de april-toestand op en betekent "niets gewijzigd
+sinds de vorige run" dus: niets gewijzigd *aan de april-toestand*. De delta
+maakt de fase snel, niet actueel.
+
+---
+
 ## De fasen op een rij (met gemeten timings)
 
 | # | Fase | Wat het doet | Duur (gemeten 2026-07-24, incrementeel) |
@@ -263,7 +316,7 @@ omgekeerde diff wél (en splitst *verdrongen* van *verdwenen*);
 | 1 | snapshot | actualiteit vorige sync → `audit.*_hist` | seconden |
 | 2 | dedup | ALA/normwaarde-restgroepen (idempotent) | seconden |
 | 3 | **p2p** | Ow-regelingen via Presenteren (delta) | **seconden** (was ~3u door subdiv-bug) |
-| 4 | i2a | IMTR toepasbare regels, 342 gemeenten + landelijke catalogus | **~3 min** |
+| 4 | i2a | IMTR toepasbare regels, 343 bronhouders + landelijke catalogus | **~20 min** (was 3 min toen de fase niets deed, 5,6 u na de fix, ~20 min met de delta) |
 | 5 | vth | KOOP-kennisgevingen + enrich + geometrie + BOPA | **~15–20 min** (van oudsher de langere) |
 | 6 | post | backfill, repair-pons, drieslag-MV's, health | ~enkele minuten |
 | 7 | embed | nieuwe chunks embedden (Ollama, resumable) | seconden bij weinig nieuw |
@@ -300,8 +353,7 @@ zit een reguliere incrementele sync ruim onder het uur, gedomineerd door vth.
 
 1. **subdiv als post-fase-batch**: i.p.v. per bronhouder tijdens p2p, één
    gebundelde refresh na afloop voor alléén de gewijzigde bronhouders.
-2. **i2a-delta**: i2a is nu ~3 min, maar pollt nog per gemeente; bij groei
-   dezelfde delta-behandeling als p2p mogelijk.
+2. ~~**i2a-delta**~~ — **gebouwd 2026-08-08**, zie hieronder.
 
 ## Bekende zwakke plekken (nog niet opgelost)
 
@@ -309,8 +361,9 @@ zit een reguliere incrementele sync ruim onder het uur, gedomineerd door vth.
   (`imtr_loader.py`, drie plekken). Een sync in augustus haalt dus de
   toestand van 10 april op. `preview_sync.py --i2a` gebruikt dezelfde datum,
   zodat de preview toont wat de loader zóú zien — niet wat vandaag geldt.
-- **Geen delta voor i2a en vth op prod** (G-94): daarom `--skip-i2a --skip-vth`
-  bij een prod-directe run; vth loopt via `refresh-koop-to-prod.ps1`.
+- **Geen delta voor vth op prod** (G-94): vth loopt via
+  `refresh-koop-to-prod.ps1`. i2a heeft sinds 2026-08-08 wél een delta (zie
+  hieronder), maar nog geen push-script naar prod.
 - **De vectorindex hangt niet aan de pipeline** (G-97): nieuwe regelingen zijn
   pas semantisch vindbaar na een aparte embed-run, en `run_overnight.py`
   herbouwt `chunk_annotatie`/`chunk_categorie` volledig.

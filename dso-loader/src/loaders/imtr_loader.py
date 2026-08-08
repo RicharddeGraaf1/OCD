@@ -4,6 +4,42 @@ Two APIs:
 1. RTR v2: GET /activiteiten — list activities with metadata
 2. STTR v1: GET /toepasbareRegels — list regelbestanden
               GET /toepasbareRegels/{id}/sttrBestand — download DMN XML
+
+De delta (sinds 2026-08-08)
+---------------------------
+Waar de kosten zitten: niet in de lijsten maar in stap 2b. Per regelbestand
+wordt een DMN-XML opgehaald en geparsed; bij ~150 bestanden per bronhouder en
+343 bronhouders zijn dat ongeveer 50.000 downloads. Dat was de 5,6 uur van de
+run van 2026-08-08. De lijst-calls zelf zijn ~1.000 stuks en verdwijnen in het
+niet.
+
+Waar de delta op rust: de STTR-lijst geeft per bestand een
+`laatsteWijzigingDatum` op secondeniveau. Die slaan we op in
+`i2a.toepasbaar_regelbestand.laatste_wijziging`; is hij bij een volgende run
+gelijk, dan is de inhoud ongewijzigd en slaan we de XML over.
+
+Drie keuzes die daarbij horen, elk met een reden:
+
+* **Pas vastleggen ná een geslaagde verwerking.** Zou de datum al bij de
+  metadata-insert worden gezet, dan zou een mislukte of afgebroken download de
+  volgende run laten denken dat de inhoud er is — een stil gat van precies het
+  type dat dit project vandaag vier keer heeft opgeleverd.
+* **TEXT, geen timestamp.** De API levert `dd-mm-yyyy HH:MM:SS`. Exact
+  vergelijken van de geleverde string is robuuster dan parsen met
+  tijdzone-aannames; we hoeven er niet mee te rekenen, alleen op gelijkheid te
+  toetsen.
+* **Geen watermark over alle bestanden heen.** Eén datum per bestand, geen
+  "alles sinds X". Dat is bewust: bij p2p bleek een watermark op
+  registratietijdstip lek, omdat items later in de lijst kunnen verschijnen met
+  een ouder tijdstip (zie `full_sync.fase_p2p`). Een vergelijking per bestand
+  kent dat probleem niet.
+
+Gemeten op gm1699 (148 regelbestanden), twee runs achter elkaar: 52,3 s → 3,1 s.
+
+Wat de delta NIET dekt: verdwenen regelbestanden. Staat een bestand niet meer
+in de lijst, dan blijft de rij in `i2a.toepasbaar_regelbestand` staan — zelfde
+beperking als G-91 bij p2p, en een bewuste keuze: verdwijnen uit een lijst is
+geen bewijs van intrekking.
 """
 
 from lxml import etree

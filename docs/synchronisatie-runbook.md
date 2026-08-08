@@ -126,8 +126,14 @@ hiervoor **niet** nodig; dat is de per-bronhouder-sweep, alleen bedoeld na een
 verse restore.
 
 Duur: p2p seconden tot minuten (plus ~28 s `locatie_subdiv`-herbouw per
-bronhouder mét nieuwe regelingen), i2a ~3 min, vth ~15 min, post (drieslag-MV's)
+bronhouder mét nieuwe regelingen), i2a ~20 min, vth ~15 min, post (drieslag-MV's)
 de lange pool.
+
+> **De i2a-duur is op 2026-08-08 twee keer veranderd.** Hij stond op "~3 min",
+> maar dat was de tijd van een fase die niets deed (G-117: de RTR kreeg een
+> geprefixte bronhoudercode en gaf altijd 0 terug). Na die fix werd het **5,6
+> uur**, want toen werden er voor het eerst ~50.000 DMN-bestanden opgehaald.
+> Met de delta hieronder is het ~20 min. Zie §i2a-delta.
 
 ### Stap 2 — Verdrongen versies markeren
 
@@ -286,10 +292,48 @@ powershell -File scripts/refresh-koop-to-prod.ps1 -Push -Refresh -Verify -ProdUr
 Zonder die stap lopen `/stats`, `/facets` en `/pins` in de 20 s
 statement-timeout.
 
+### i2a-delta — hoe de fase van 5,6 uur naar ~20 min ging
+
+*Toegevoegd 2026-08-08. Relevant voor stap 1 (de i2a-fase) en voor de cadans in
+§6.*
+
+**Waar de kosten zitten.** Niet in de lijsten maar in de DMN-bestanden. De
+loader haalt per regelbestand een XML op (`GET /toepasbareRegels/{id}/sttrBestand`)
+en parseert die; bij ~150 bestanden per bronhouder en 343 bronhouders zijn dat
+ongeveer **50.000 downloads**. De lijst-calls zijn er ~1.000 en vallen weg.
+
+**Waar de delta op rust.** De STTR-lijst levert per bestand een
+`laatsteWijzigingDatum` op secondeniveau. Die staat nu in
+`i2a.toepasbaar_regelbestand.laatste_wijziging`. Is hij bij een volgende run
+gelijk, dan is de inhoud ongewijzigd en slaat de loader de XML over.
+
+| | |
+|---|---|
+| gemeten op gm1699 (148 regelbestanden) | ronde 1: **52,3 s** · ronde 2: **3,1 s** |
+| geëxtrapoleerd over 343 bronhouders | 5,6 uur → **~20 min** |
+
+**Drie eigenschappen om te kennen voordat je erop vertrouwt:**
+
+1. De datum wordt **pas vastgelegd ná een geslaagde verwerking**. Een
+   afgebroken run laat dus geen bestand achter dat ten onrechte als "bij" geldt
+   — precies het type stil gat dat deze sync vier keer opleverde.
+2. Het is **geen watermark over alle bestanden heen** maar een vergelijking per
+   bestand. Bewust: bij p2p bleek een watermark op registratietijdstip lek,
+   omdat items later in de lijst kunnen verschijnen met een ouder tijdstip.
+3. **Verdwenen regelbestanden worden niet opgeruimd.** Staat een bestand niet
+   meer in de lijst, dan blijft de rij staan — dezelfde keuze als G-91 bij p2p:
+   verdwijnen uit een lijst is geen bewijs van intrekking.
+
+**Wat de delta niet oplost**: de hardgecodeerde `datum: "10-04-2026"` in de
+RTR/STTR-calls. Zolang die er staat haalt i2a de april-toestand op, en dan is
+"niets gewijzigd" ook een uitspraak over april. De delta maakt de fase snel,
+niet actueel.
+
 ### Stap 5 — i2a naar prod (afweging)
 
-i2a heeft geen delta en geen push-script. Vergelijk na stap 1 de tellingen
-(`i2a.toepasbaar_regelbestand`, `i2a.dmn_element`) tussen lokaal en prod:
+i2a heeft sinds 2026-08-08 wél een delta (zie hierboven), maar nog steeds geen
+push-script. Vergelijk na stap 1 de tellingen
+(`i2a.toepasbaar_regelbestand`, `i2a.uitvoeringsregel`) tussen lokaal en prod:
 
 - **verschil triviaal** → laten staan tot de volgende gelegenheid;
 - **verschil substantieel** → repliceren volgens hetzelfde principe als stap 3
@@ -303,12 +347,16 @@ Twee dingen om te weten vóór je hier tijd in steekt:
   `datum: "10-04-2026"`**. Zolang die er staat, haalt i2a per definitie de
   toestand van 10 april op — een verschil dat níét verschijnt is dus geen bewijs
   van actualiteit.
-- **Het per-bestuursorgaan-kanaal levert sinds de initial commit niets op**
-  (bevinding 2026-08-07, zie `sync-2026-08-07.md`): de loader stuurt de
-  bronhouder-code mét prefix (`gm0363`) terwijl de RTR de kale code verwacht
-  (`0363` → 113 activiteiten). Geen activiteiten → geen OIN → STTR wordt
-  stilzwijgend overgeslagen. Zolang die fix niet draait, is er domweg niets te
-  pushen en is deze stap altijd "verschil triviaal".
+- **Het per-bestuursorgaan-kanaal lag sinds de initial commit stil** en is op
+  2026-08-08 gerepareerd: de loader stuurde de bronhouder-code mét prefix
+  (`gm0363`) terwijl de RTR de kale code verwacht (`0363` → 113 activiteiten).
+  Geen activiteiten → geen OIN → STTR stilzwijgend overgeslagen. Na de fix:
+  **+384.178 uitvoeringsregels (+46%)**, van 831.835 naar 1.216.013.
+- **Productie draait bewust nog op de oude stand** (831.835). Het verschil met
+  lokaal is dus geen datagat maar een openstaande keuze: eerst moet vaststaan
+  welke afnemer de toepasbare regels op prod gebruikt. Vastgelegd in de vault
+  onder Gebruikersinput 2026-08-08. Wie hier een afwijking ziet — of de
+  regressiecheck die hem meldt — weet nu waarom.
 
 ### Stap 6 — Embeddings + onderwerp-as
 
@@ -659,11 +707,11 @@ Noodroute als prod onherstelbaar afwijkt: `restore-dev-naar-prod.ps1`
 | G-98 | *opgelost 2026-08-01* — delta brak af op een ongesorteerde lijst | 16 regelingen waren stil gemist; nu gefixt + regressietests |
 | G-91 | verdwenen regelingen worden gedetecteerd maar niet opgevolgd | 11 vigerende regelingen in de DB die de DSO niet meer toont |
 | G-97 | vectorlaag herbouwt volledig en ruimt niets op | `chunk_annotatie` + `chunk_categorie` worden elke run overgedaan; chunks van verdrongen expressies blijven staan en worden pas bij het lezen weggezeefd (45% bij `gm0796`) |
-| G-94 | geen delta voor i2a/vth op prod; geen scheduling | stap 4 en 5 blijven handwerk |
+| G-94 | *deels opgelost 2026-08-08* — i2a heeft nu een delta op `laatsteWijzigingDatum` (5,6 u → ~20 min). vth heeft er nog geen; scheduling ontbreekt nog steeds | stap 4 en 5 blijven handwerk |
 | — | `repliceer_p2p_naar_prod.py` dekt p2p, maar de afgeleide herbouw (subdiv, MV's) is nog losse handmatige stappen | stap 3 is één script plus drie commando's; automatiseren kan zodra de volgorde zich bewezen heeft |
 | — | de replicatie **verwijdert** niets op prod | een rij die lokaal is opgeruimd blijft daar staan; net als G-91 een bewuste keuze, geen automatisme |
-| — | i2a-datum hardgecodeerd op `10-04-2026` | i2a laadt de april-toestand |
-| — | **i2a per-bestuursorgaan-kanaal dood sinds de initial commit** (2026-04-12): bronhoudercode gaat mét prefix naar de RTR (`gm0363`), die de kale code verwacht (`0363`) | 342 calls per sync die per definitie 0 opleveren; geen OIN → STTR stilzwijgend overgeslagen; het rapport meldde intussen "343/343 ok" |
+| — | i2a-datum hardgecodeerd op `10-04-2026` | i2a laadt de april-toestand. **Let op de wisselwerking met de delta**: "niets gewijzigd sinds vorige run" is dan een uitspraak over april, niet over vandaag |
+| — | *opgelost 2026-08-08* — i2a-kanaal lag sinds de initial commit stil (geprefixte bronhoudercode) | +384.178 uitvoeringsregels (+46%) na de fix; retry op 503 toegevoegd, want die ontbrak ook |
 | — | rapportage meet exceptions, geen volledigheid | "0 fouten" gaf jarenlang valse geruststelling |
 | — | doorwerkingsmeting (6b) hangt niet aan de pipeline, vereist lokale GPU | instructieregels.nl toont oordelen van vóór de sync tot iemand 6b draait; sinds 05-08 gaat de site tenminste niet meer stil de deur uit (pre-flight in `publish.py`) |
 | — | verschoven top-K is niet detecteerbaar zonder te herscreenen | `stand.py` kan "nieuw artikel valt nu in de top-K van een oude regel" niet zien; vandaar de vuistregel in 6b |
@@ -719,6 +767,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 | Wat | Frequentie | Hoe |
 |---|---|---|
 | Volledige sync (stap 0–4, 7–9) | wekelijks | dit runbook |
+| i2a (in de sync) | elke sync, ~20 min | kan sinds de delta van 2026-08-08 gewoon meedraaien; vóór die tijd was de keuze "3 min omdat hij niets deed" of "5,6 uur" |
 | Embeddings + onderwerp-as (stap 6) | elke sync | draait standaard mee in `full_sync.py` |
 | Onderwerp-as naar prod | na elke stap 6 die lokaal draaide | `2026-08-06-categorie-naar-productie.py --ja` (2 s) |
 | Doorwerkingsmeting (stap 6b) | na elke sync die omgevingsplannen of instructieregels raakte | lokaal, ná stap 6; `match/stand.py` zegt of het moet |
