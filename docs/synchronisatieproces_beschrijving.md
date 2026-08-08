@@ -70,6 +70,12 @@ vóór de laatste sync dateert. Met `--sinds` beperk je alsnog het venster.
 
 ## Prod-directe delta-sync (i.p.v. de 80 GB dump/restore)
 
+> ⚠️ **Niet meer de route (gebruiker-keuze 2026-08-08).** Productie draait geen
+> loaders meer; hij krijgt de rijen die de lokale werkbank al heeft geladen.
+> Zie [synchronisatie-runbook.md](synchronisatie-runbook.md) §Stap 3. Dit
+> hoofdstuk blijft staan omdat het beschrijft *hoe* de prod-directe modus werkt
+> — hij bestaat nog in de code — maar gebruik hem niet in een gewone sync.
+
 Sinds de goedkope registratietijdstip-delta hoeft een prod-verversing géén
 volledige dump→restore meer te zijn. `full_sync.py --target prod` draait dezelfde
 fasen **rechtstreeks tegen productie**, waarbij de delta alleen de bronhouders

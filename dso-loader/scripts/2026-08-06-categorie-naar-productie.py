@@ -216,11 +216,28 @@ def wissel_om(pconn, pc, verwacht: int) -> None:
     pconn.commit()
 
     with pconn.transaction():
+        # 1. vorige oude tabel weg — dat geeft ook haar indexnamen vrij
         pc.execute("DROP TABLE IF EXISTS v2a.chunk_categorie_oud")
+
+        # 2. de indices van de huidige tabel uit de weg hernoemen. Indexnamen
+        #    zijn schema-uniek en reizen mee met een tabel-rename, dus zonder
+        #    deze stap botst de nieuwe index op de naam van de oude. Dat is
+        #    precies wat op 2026-08-08 misging: de run van 06-08 had de suffix
+        #    al naar `_idx2` geschoven, waarna de volgende run nergens meer
+        #    heen kon. Nummeren i.p.v. een vaste suffix houdt het idempotent.
+        pc.execute("""SELECT indexname FROM pg_indexes
+                       WHERE schemaname='v2a' AND tablename='chunk_categorie'
+                       ORDER BY indexname""")
+        for i, (idx,) in enumerate(pc.fetchall(), 1):
+            pc.execute(f'ALTER INDEX v2a."{idx}" RENAME TO chunk_categorie_oud_idx_{i}')
+
+        # 3. omwisselen
         pc.execute("ALTER TABLE v2a.chunk_categorie RENAME TO chunk_categorie_oud")
         pc.execute("ALTER TABLE v2a.chunk_categorie_nieuw RENAME TO chunk_categorie")
-        pc.execute("ALTER INDEX v2a.chunk_categorie_nieuw_chunk_idx RENAME TO chunk_categorie_chunk_idx2")
-        pc.execute("ALTER INDEX v2a.chunk_categorie_nieuw_cat_idx RENAME TO chunk_categorie_cat_idx2")
+
+        # 4. de nieuwe indices krijgen altijd dezelfde canonieke namen
+        pc.execute("ALTER INDEX v2a.chunk_categorie_nieuw_chunk_idx RENAME TO chunk_categorie_chunk_idx")
+        pc.execute("ALTER INDEX v2a.chunk_categorie_nieuw_cat_idx RENAME TO chunk_categorie_cat_idx")
     log("omgewisseld — oude tabel staat als v2a.chunk_categorie_oud")
 
     # Foreign keys erbij, NOT VALID zodat de swap kort blijft; daarna valideren.

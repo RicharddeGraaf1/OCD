@@ -16,8 +16,17 @@ beschrijving voor *hoe het werkt* en dit runbook voor *hoe we het doen*.
    iemand heeft gezien wát hij gaat doen. De aanleiding is concreet: de
    p2p-delta miste maandenlang regelingen terwijl elke run "0 fouten" meldde
    (G-98). Een groene rapportage betekent "geen exceptions", niet "correct".
-2. **Prod-directe delta, geen dump/restore.** De 80 GB `restore-dev-naar-prod`
-   is de noodroute, niet de route (G-94).
+2. **Prod krijgt gegevens, geen loaders** *(gebruiker-keuze 2026-08-08)*. De
+   harvest draait uitsluitend op de lokale werkbank; productie wordt bijgewerkt
+   door de geladen rijen van lokaal naar prod te **repliceren**. Draai dus geen
+   `full_sync.py --target prod` meer — die stond hier tot 2026-08-08 als de
+   aanbevolen route en is dat niet meer. De 80 GB `restore-dev-naar-prod` blijft
+   wat hij was: de noodroute, niet de route (G-94).
+
+   Waarom dit beter is dan de loader tegen prod draaien: de bron wordt één keer
+   bevraagd in plaats van twee keer, prod en lokaal kunnen per definitie niet
+   uiteenlopen doordat ze onafhankelijk van de DSO hebben geladen, en een
+   API-hik tijdens de prod-fase kan productie niet meer half gevuld achterlaten.
 3. **Fasen zijn losgekoppeld.** Een mislukte deploy mag data nooit raken; een
    mislukte i2a mag p2p niet blokkeren. Elke fase heeft zijn eigen `load_run`.
 4. **Zuinig tegen de DSO.** Rate-limiter 50/s; nooit onbegrensd pagineren;
@@ -29,7 +38,7 @@ beschrijving voor *hoe het werkt* en dit runbook voor *hoe we het doen*.
 
 | | LOKAAL (Docker, `localhost:5434/dso`) | PROD (Railway PostGIS) |
 |---|---|---|
-| Rol | werkbank: evals, viewer-tests, analyses, zware herbouw | wat eindgebruikers zien |
+| Rol | werkbank: evals, viewer-tests, analyses, zware herbouw; **de enige plek waar geharvest wordt** | wat eindgebruikers zien; **ontvangt gegevens, draait geen loaders** |
 | Consumenten | jij | ocd-api → viewer, bot, ponsenkaart, instructieregels, vergunningenregister |
 | Bereikbaar | altijd | alleen met de **TCP-proxy tijdelijk aan** (dashboard → PostGIS → Settings → Networking) |
 | Parallelisme | normaal | `get_conn()` zet het uit (kleine `/dev/shm`) |
@@ -43,11 +52,11 @@ data draait; prod achterlaten betekent dat de sites stale zijn.
 
 ```
 0. PREVIEW          read-only, beide DB's            ~1 min
-1. LOKAAL laden     p2p + i2a + vth + post           ~1–3 u
+1. LOKAAL laden     p2p + i2a + vth + post           ~1–5 u
 2. NABEWERKING      verdrongen versies markeren      ~1 min
-3. PROD delta       p2p + post                       ~2–3 u
+3. P2P → prod       rijen repliceren + herbouwen     ~20–40 min
 4. VTH → prod       delta-push                       ~10 min
-5. I2A → prod       afweging, meestal overslaan      —
+5. I2A → prod       push zodra er iets te pushen is  —
 6. EMBEDDINGS       + onderwerp-as, draait standaard uren
 6b. DOORWERKING     instructieregels.nl-meting       uren, lokale GPU
 6c. ONDERWERP-AS    toewijzingen lokaal → prod       ~1 min
@@ -131,20 +140,133 @@ precies de works over die je net wilde bijwerken.
 Fysiek opruimen is een aparte, bewuste operatie:
 `prune_verouderde_versies.py` (dry-run default, `--apply` om te doen).
 
-### Stap 3 — Prod-delta
+### Stap 3 — p2p-gegevens naar prod
 
 Vereist de TCP-proxy aan en `PROD_DB_URL` in `.env`.
 
+Prod draait geen loader. Wat stap 1 lokaal heeft geharvest, wordt hier
+gerepliceerd: de rijen van de nieuw geladen expressies gaan over de lijn, en
+alles wat prod daaruit zélf kan afleiden wordt aan de andere kant herbouwd.
+
 ```bash
-python scripts/preview_sync.py --target prod          # eerst kijken
-python scripts/full_sync.py --target prod --skip-i2a --skip-vth --skip-embed \
-  --label "prod-delta-<datum>"                        # typ 'PROD' ter bevestiging
+python scripts/preview_sync.py --target prod    # read-only: wat mist prod?
 ```
 
-`--skip-i2a --skip-vth` is hier **niet optioneel**: beide hebben geen delta en
-pollen alle bronhouders — over de proxy onwerkbaar traag. Prod's
-`vth.etl_run`-watermark loopt bovendien achter op de vth-data (die komt via de
-push van stap 4), dus een vth-fase tegen prod zou dagen opnieuw ophalen.
+#### Wat kopiëren, wat herbouwen
+
+De scheiding is niet cosmetisch — hij bepaalt of dit 20 minuten of een nacht
+kost. Gemeten op 2026-08-07: `p2p` is lokaal **24 GB**, maar de tien nieuw
+geladen regelingen beslaan **14.100 `tekst_element` + 6.489 `juridische_regel` +
+0 GIO's**. De brondata van een gewone sync past dus ruim in een handvol COPY's;
+de omvang zit in afgeleide objecten die je nooit over de lijn moet sturen.
+
+| | Wat | Hoe naar prod |
+|---|---|---|
+| **Kopiëren** | `p2p.regeling`, `tekst_element`, `juridische_regel`, `locatie`, `activiteit`, `gebiedsaanwijzing`, `kaart`, `geo_informatieobject`, de junction-tabellen daartussen, `p2p.regeling_load` | gefilterde `COPY` op de nieuwe `frbr_expression`-set, in FK-volgorde |
+| **Meesturen** | `inactief` / `datum_inactief` / `reden_inactief` van stap 2 | `UPDATE` op de betrokken works |
+| **Herbouwen** | `p2p.locatie_subdiv` (12 GB lokaal, ST_Subdivide-afgeleide) | alleen voor de geraakte bronhouders |
+| **Herbouwen** | de drieslag-MV's (`naammatch_signaal`, `naammatch_signaal_intra`, `mv_regel_op_locatie`, `tekst_object_consistentie_mv`, `gio_locatie`, `gio_referentie_consistentie_mv`, `ala_punt`) | `refresh_drieslag.py` tegen prod |
+| **Herbouwen** | health + stats (`core.mv_bronhouder_health`, `core.mv_geo_health`, `v2a.ponsenkaart_gemeente_stats`) | idem |
+
+`locatie_subdiv` meesturen zou in z'n eentje meer dan de helft van het
+p2p-volume over de proxy duwen, voor geometrie die prod in seconden per
+bronhouder zelf berekent.
+
+#### Volgorde
+
+1. **Bepaal de set.** De expressies die deze run lokaal zijn geladen:
+   `SELECT frbr_expression FROM p2p.regeling_load WHERE geladen_op >= '<start van de run>'`.
+   Leg dat lijstje vast — het is de sleutel voor élke volgende stap én voor de
+   verificatie.
+2. **Kopieer in FK-volgorde**, met `ON CONFLICT DO NOTHING` zodat een herhaalde
+   run niets stukmaakt. Ouder-tabellen eerst (`regeling` → `tekst_element` →
+   `juridische_regel` → junctions), anders faalt de FK.
+3. **Trek de inactief-vlaggen gelijk** voor de works uit stap 2. Sla je dit
+   over, dan staan op prod oude én nieuwe versie naast elkaar in de retrieval —
+   hetzelfde effect als een overgeslagen stap 2, maar dan alleen op productie.
+4. **Herbouw** `locatie_subdiv` voor de geraakte bronhouders, dan de MV's.
+5. **Verifieer per tabel** met tellingen aan beide kanten, gefilterd op dezelfde
+   expressie-set. Gelijke aantallen = klaar; dit is de tegenhanger van de
+   preview-vs-uitkomst-check van stap 7.
+
+#### Gereedschap
+
+```bash
+python scripts/repliceer_p2p_naar_prod.py              # droogloop
+python scripts/repliceer_p2p_naar_prod.py --ja         # echt
+```
+
+Hij bepaalt de expressie-set zelf uit `p2p.regeling_load` (default: sinds de
+start van de laatste geslaagde lokale sync; `--sinds` overschrijft dat), volgt de
+FK-graaf naar de dimensietabellen, kopieert 27 tabellen in de juiste volgorde en
+trekt de inactief-vlaggen gelijk. Gemeten 2026-08-08 voor tien regelingen:
+68.796 rijen in scope, ruim 30 seconden.
+
+Vier dingen waar hij op let, elk omdat het bij de eerste run misging:
+
+- **Upsert, geen DO NOTHING.** Bij een nieuwe versie van een bestaand plan
+  houden de IMOW-objecten hun `identificatie` (de primaire sleutel) maar krijgen
+  ze een nieuwe `regeling_expression`. Met DO NOTHING blijven ze op prod naar de
+  oude expressie wijzen: lokaal 6.489 juridische regels voor de tien expressies,
+  op prod 244. Nu `ON CONFLICT (pk) DO UPDATE` — lokaal is de waarheid.
+- **Identity-kolommen behouden.** `tekst_element.id` is `GENERATED ALWAYS`;
+  prod nieuwe id's laten uitdelen zou `tekst_inline_referentie` en
+  `v2a.tekst_embedding.tekst_element_id` naar andere tekst laten wijzen. Dus
+  `OVERRIDING SYSTEM VALUE`, met de sequence achteraf mee.
+- **Generated kolommen weglaten.** `tekst_element.inhoud_plain` is stored
+  generated; die invoegen is een harde fout. De staging-tabel wordt daarom uit
+  de kolomlijst opgebouwd en niet met `LIKE`.
+- **`FORMAT TEXT`, geen `BINARY`.** Lokaal is PG 16.9/PostGIS 3.5, prod PG
+  17.10/PostGIS 3.7.
+
+Daarna nog met de hand, want dat is bewust niet in het script gestopt (het is
+rekenwerk op prod, geen replicatie):
+
+```bash
+# subdiv voor de geraakte bronhouders
+OCD_DB_URL="$PROD_DB_URL" python -m src.cli refresh-subdiv -b gm0160   # per code
+# dan de MV's
+OCD_DB_URL="$PROD_DB_URL" python scripts/refresh_drieslag.py
+# health-MV's: zet parallellisme UIT in dezelfde sessie
+psql "$PROD_DB_URL" \
+  -c "SET max_parallel_workers_per_gather = 0" \
+  -c "SET max_parallel_maintenance_workers = 0" \
+  -c "REFRESH MATERIALIZED VIEW core.mv_bronhouder_health" \
+  -c "REFRESH MATERIALIZED VIEW core.mv_geo_health" \
+  -c "REFRESH MATERIALIZED VIEW v2a.ponsenkaart_gemeente_stats"
+```
+
+`get_conn()` zet dat parallellisme bij een prod-DSN zelf uit, maar wie
+rechtstreeks met `psql`/`psycopg` verbindt moet het zelf doen — de
+Railway-container heeft een kleine `/dev/shm`. Gemeten 2026-08-08 op
+`core.mv_bronhouder_health`: mét parallellisme `could not resize shared memory
+segment … No space left on device`, zonder **16,2 s**.
+
+Gemeten duur op prod (2026-08-08): drieslag **21,6 min** in acht stappen
+(`naammatch_signaal` 8,2 · niet-annoteerbaar 3,9 · gio_referentie_consistentie
+4,1 · tekst_object_consistentie 2,7 · rest ~2,7), `mv_geo_health` 6,2 min,
+`mv_bronhouder_health` 16 s, ponsenkaart-stats 1 s. De "5,5 min lokaal / 11 min
+prod" verderop in §5 slaat op de naam-match alleen, niet op de hele fase.
+
+#### Verificatie
+
+Tel aan beide kanten per tabel, gefilterd op dezelfde expressie-set. Gemeten
+2026-08-08 ná de upsert-fix, alle negen controles gelijk:
+
+| | lokaal | prod |
+|---|---|---|
+| regeling | 10 | 10 |
+| tekst_element | 14.100 | 14.100 |
+| juridische_regel | 6.489 | 6.489 |
+| activiteit_locatieaanduiding (via jr) | 8.536 | 8.536 |
+| normwaarde | 9.283 | 9.283 |
+| locatie_basisgeo | 4.213 | 4.213 |
+| locatie met geometrie | 605 | 605 |
+| tekst_inline_referentie | 9.276 | 9.276 |
+| regelingen inactief (totaal) | 21 | 21 |
+
+Doe deze telling **na** de replicatie en niet ertussendoor: een tussenstand
+telt via `juridische_regel` en geeft dan misleidende cijfers.
 
 ### Stap 4 — vth naar prod
 
@@ -166,14 +288,23 @@ i2a heeft geen delta en geen push-script. Vergelijk na stap 1 de tellingen
 (`i2a.toepasbaar_regelbestand`, `i2a.dmn_element`) tussen lokaal en prod:
 
 - **verschil triviaal** → laten staan tot de volgende gelegenheid;
-- **verschil substantieel** → `full_sync.py --target prod --skip-p2p
-  --skip-vth --skip-post --skip-embed` (pollt alle 342 gemeenten over de proxy;
-  reken op traag).
+- **verschil substantieel** → repliceren volgens hetzelfde principe als stap 3
+  (rijen van lokaal naar prod). De i2a-tabellen hangen niet aan `frbr_expression`
+  maar aan `functionele_structuur_ref` / OIN, dus de filterset is een andere —
+  de route is identiek. **Niet** de loader tegen prod draaien.
 
-Bedenk daarbij: de i2a-loader bevraagt de RTR/STTR met een **hardgecodeerde
-`datum: "10-04-2026"`**. Zolang die er staat, haalt i2a per definitie de
-toestand van 10 april op — een verschil dat níét verschijnt is dus geen bewijs
-van actualiteit.
+Twee dingen om te weten vóór je hier tijd in steekt:
+
+- De i2a-loader bevraagt de RTR/STTR met een **hardgecodeerde
+  `datum: "10-04-2026"`**. Zolang die er staat, haalt i2a per definitie de
+  toestand van 10 april op — een verschil dat níét verschijnt is dus geen bewijs
+  van actualiteit.
+- **Het per-bestuursorgaan-kanaal levert sinds de initial commit niets op**
+  (bevinding 2026-08-07, zie `sync-2026-08-07.md`): de loader stuurt de
+  bronhouder-code mét prefix (`gm0363`) terwijl de RTR de kale code verwacht
+  (`0363` → 113 activiteiten). Geen activiteiten → geen OIN → STTR wordt
+  stilzwijgend overgeslagen. Zolang die fix niet draait, is er domweg niets te
+  pushen en is deze stap altijd "verschil triviaal".
 
 ### Stap 6 — Embeddings + onderwerp-as
 
@@ -184,10 +315,28 @@ doorloopt: canonieke chunk-laag → embedden → `chunk_annotatie` →
 
 > Tot 2026-08-06 stond hier "niet meenemen in de sync". Dat was achterhaald.
 > De eerste reden — `run_overnight.py` doet een `git checkout` + commit — is op
-> 2026-08-01 uit het script gehaald; het raakt git niet meer. De tweede reden
-> (volledige herbouw) staat nog, maar is kleiner dan "uren": `chunk_categorie`
-> is gemeten op **5,3 min** over 1,65 miljoen chunks. De kosten zitten in
-> `chunk_annotatie`, dat via `DROP TABLE` + `CREATE` volledig herbouwt.
+> 2026-08-01 uit het script gehaald; het raakt git niet meer.
+>
+> De tweede reden (volledige herbouw) is op 2026-08-08 **gemeten en onjuist
+> gebleken**. De volledige herbouw is goedkoop:
+>
+> | Fase | Gemeten |
+> |---|---|
+> | `chunk_annotatie` (DROP + CREATE, volle corpus) | **4,8 min** — 746.227 rijen over 515.236 chunks |
+> | `chunk_categorie` (truncate + opnieuw toewijzen) | **4,9 min** — 750.666 toewijzingen |
+> | objectnamen (fase 4b, incrementeel) | 20,5 min — +1.422 chunks |
+>
+> De uren zitten **niet** in die herbouw maar in fase 4a: die haalt álle
+> ~1.979 actieve regelingen op en draait per stuk de recursieve `kop_chain`-CTE
+> over `p2p.tekst_element` (3,1 GB), ook voor de regelingen waar de
+> `NOT EXISTS`-filter niets oplevert. Gemeten 2026-08-08: **574 van 1.979
+> regelingen in 139 minuten** (199 embeddings/min), terwijl Ollama er 25 ms
+> over doet — een twaalfde van wat het model aankan. Bij tien gewijzigde
+> regelingen is dat 1.969 keer een volledige scan voor niets.
+>
+> Dat is hetzelfde patroon als de subdiv-storm en `naammatch_signaal`: niet
+> "niet incrementeel", maar véél te veel doen. De fix is dus de **detectie**
+> scopen (waar `v2a.embed_state` voor is, zie G-97), niet de herbouw.
 
 #### Wat is incrementeel en wat niet
 
@@ -469,7 +618,10 @@ Noodroute als prod onherstelbaar afwijkt: `restore-dev-naar-prod.ps1`
 | G-91 | verdwenen regelingen worden gedetecteerd maar niet opgevolgd | 11 vigerende regelingen in de DB die de DSO niet meer toont |
 | G-97 | vectorlaag herbouwt volledig en ruimt niets op | `chunk_annotatie` + `chunk_categorie` worden elke run overgedaan; chunks van verdrongen expressies blijven staan en worden pas bij het lezen weggezeefd (45% bij `gm0796`) |
 | G-94 | geen delta voor i2a/vth op prod; geen scheduling | stap 4 en 5 blijven handwerk |
+| — | `repliceer_p2p_naar_prod.py` dekt p2p, maar de afgeleide herbouw (subdiv, MV's) is nog losse handmatige stappen | stap 3 is één script plus drie commando's; automatiseren kan zodra de volgorde zich bewezen heeft |
+| — | de replicatie **verwijdert** niets op prod | een rij die lokaal is opgeruimd blijft daar staan; net als G-91 een bewuste keuze, geen automatisme |
 | — | i2a-datum hardgecodeerd op `10-04-2026` | i2a laadt de april-toestand |
+| — | **i2a per-bestuursorgaan-kanaal dood sinds de initial commit** (2026-04-12): bronhoudercode gaat mét prefix naar de RTR (`gm0363`), die de kale code verwacht (`0363`) | 342 calls per sync die per definitie 0 opleveren; geen OIN → STTR stilzwijgend overgeslagen; het rapport meldde intussen "343/343 ok" |
 | — | rapportage meet exceptions, geen volledigheid | "0 fouten" gaf jarenlang valse geruststelling |
 | — | doorwerkingsmeting (6b) hangt niet aan de pipeline, vereist lokale GPU | instructieregels.nl toont oordelen van vóór de sync tot iemand 6b draait; sinds 05-08 gaat de site tenminste niet meer stil de deur uit (pre-flight in `publish.py`) |
 | — | verschoven top-K is niet detecteerbaar zonder te herscreenen | `stand.py` kan "nieuw artikel valt nu in de top-K van een oude regel" niet zien; vandaar de vuistregel in 6b |
