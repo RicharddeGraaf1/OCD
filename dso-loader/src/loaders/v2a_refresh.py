@@ -225,33 +225,34 @@ def verweesde_scopes(conn) -> list[str]:
 def refresh_scope(conn, scope_key: str, content_hash: str) -> int:
     """Drop-by-scope + opnieuw embedden. Geeft het aantal nieuwe chunks.
 
-    TODO — schrijf de chunks met COPY of executemany in plaats van per rij.
-    Nu gaat elke chunk als losse INSERT naar de database; bij een regeling van
-    2.844 chunks zijn dat 2.844 round-trips, en over het hele corpus ~1,7
-    miljoen. Zolang de scan de bottleneck was (fase 4a: 199 embeddings/min
-    tegenover 2.400 die Ollama aankan) viel dat niet op — nu die weg is, is dit
-    de eerstvolgende kandidaat.
+    Niet optimaliseren zonder nieuwe meting — de voor de hand liggende
+    verdachten zijn allemaal doorgemeten en geen ervan is het.
 
-    De echte kostenpost is niet het aantal round-trips maar het index-onderhoud:
-    op `embedding` ligt een **HNSW-index van 3,8 GB** die niet in shared_buffers
-    past, dus elke insert doet graafnavigatie ván disk (wait_event
-    IO/DataFileRead). De run van 2026-08-08 deed 1.442 nieuwe chunks plus het
-    opruimen van 19.506 in **102,9 minuten** — die twee zijn niet apart geklokt,
-    maar de orde van grootte is duidelijk en het zit niet in Ollama (25 ms per
-    embedding, ~2.400/min).
+    De eerste run (2026-08-08) deed 1.442 nieuwe chunks, 20 adopties en het
+    opruimen van 19.506 chunks in **102,9 minuten**. Dat leek te wijzen op de
+    per-rij-INSERT of op de HNSW-index van 3,8 GB. Op een rustige database
+    gemeten valt dat volledig uit elkaar:
 
-    Wat dat betekent voor een oplossing: `COPY` scheelt round-trips maar niet
-    het HNSW-werk. Wie dit serieus wil aanpakken kijkt naar de index tijdelijk
-    droppen bij grote herbouw, of accepteert dat een incrementele refresh alleen
-    kleine dirty-sets aankan — wat na deze run ook het normale geval is (dirty
-    was 0 direct erna).
+        embedden (Ollama)      1,48 s / 100 =  4.058/min
+        insert MET indices     5,82 s / 100 =  1.031/min
+        insert ZONDER indices  1,47 s / 100 =  4.095/min   (75% is index-werk)
+        DELETE                 1,55 s / 2.984 = 115.430/min
+        FETCH (recursieve CTE) 0,74 s per regeling (grootste: 6.911 elementen)
+        adopteerbaar()         0,59 s per regeling
+        DIRTY_SQL              42,3 s, eenmalig over het hele corpus
 
-    De cascade is het in elk geval niet: `chunk_annotatie` en `chunk_categorie`
-    hebben allebei een index op `chunk_id` (geverifieerd 2026-08-08), dus de
-    DELETE hoeft niet te scannen.
+    Opgeteld voor die run: 26× FETCH 0,3 min + 26× adopteerbaar 0,3 min +
+    DIRTY_SQL 0,7 min + DELETE 0,2 min + INSERT 1,4 min ≈ **2,9 minuten**.
 
-    Meet vóór je hier optimaliseert. Dit project heeft vandaag vier keer laten
-    zien dat de vermoede bottleneck de verkeerde was.
+    De overige 100 minuten waren **concurrentie**, geen werk: de refresh liep
+    gelijktijdig met de volledige i2a-run (5,6 uur, continu inserts) en een
+    parallelle artikel-keten-query. Drie processen op dezelfde disk.
+
+    Conclusie: de HNSW-index is per rij inderdaad duur (75% van de insert-tijd),
+    maar bij realistische dirty-sets — na de eerste run was dirty 0 — telt dat
+    niet op tot iets dat de moeite waard is. `COPY` zou hooguit de resterende
+    25% raken. Wat wél helpt is deze refresh niet naast een andere zware run
+    zetten.
     """
     with conn.cursor() as cur:
         cur.execute("DELETE FROM v2a.tekst_embedding WHERE regeling_expression = %s",
