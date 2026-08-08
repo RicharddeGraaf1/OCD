@@ -93,6 +93,50 @@ def q1(cur, sql, params=None):
     return vals[0] if len(vals) == 1 else vals
 
 
+def gemeten_subproc(args: list[str], omschrijving: str, telling_sql: str,
+                    eenheid: str, timeout: int | None = None) -> tuple[bool, str]:
+    """`subproc` met een deelmeting eromheen: duur, aangroei en tempo.
+
+    Waarom dit er is. De sync van 2026-08-07 duurde 4,3 uur, waarvan
+    **enrich-koop 98 minuten** en de **vth-geometrie-backfill 38 minuten** —
+    samen goed voor de helft. Van geen van beide bestond een meting: het
+    rapport zei alleen "ok". Zonder aantal en tempo weet je niet of 98 minuten
+    veel is (5.813 kennisgevingen ≈ 1/s, terwijl de preview zelf 4/s als tempo
+    noemt) of gewoon het werk.
+
+    Dat is dezelfde blinde vlek die `refresh_drieslag` had: het runbook noemde
+    5,5 min terwijl de fase 23 minuten kostte, omdat een deelmeting als
+    faseduur werd gelezen.
+
+    `telling_sql` moet één getal opleveren dat vóór en ná vergeleken kan
+    worden — het aantal rijen dat deze stap zou moeten aanvullen.
+    """
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        voor = q1(cur, telling_sql)
+    finally:
+        conn.close()
+
+    t0 = time.monotonic()
+    ok = subproc(args, omschrijving, timeout=timeout)
+    duur = time.monotonic() - t0
+
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        na = q1(cur, telling_sql)
+    finally:
+        conn.close()
+
+    delta = (na or 0) - (voor or 0)
+    tempo = f"{delta / duur:.1f} {eenheid}/s" if duur > 0 and delta else "—"
+    regel = (f"- {omschrijving}: {'ok' if ok else 'FOUT'} · {duur / 60:.1f} min · "
+             f"+{delta:,} {eenheid} · {tempo}")
+    log(f"METING {omschrijving}: {duur / 60:.1f} min, +{delta} {eenheid}, {tempo}")
+    return ok, regel
+
+
 def subproc(args: list[str], omschrijving: str, timeout: int | None = None) -> bool:
     """Draai een subproces, stream output naar het logbestand."""
     log(f"START {omschrijving}: {' '.join(args)}")
@@ -389,14 +433,19 @@ def _fase_vth_werk() -> int:
         ok1 = subproc([py, "-m", "src.cli", "load-koop",
                        "--from", vanaf.isoformat(), "--to", vandaag.isoformat()],
                       f"load-koop {vanaf}..{vandaag}")
-        ok2 = subproc([py, "-m", "src.cli", "enrich-koop", "--loop",
-                       "--sleep", "60", "--stop-after-empty", "2"],
-                      "enrich-koop", timeout=4 * 3600)
+        ok2, meting_enrich = gemeten_subproc(
+            [py, "-m", "src.cli", "enrich-koop", "--loop",
+             "--sleep", "60", "--stop-after-empty", "2"],
+            "enrich-koop",
+            "SELECT count(*) n FROM vth.vergunningkennisgeving "
+            "WHERE inhoud_geladen_at IS NOT NULL",
+            "kennisgevingen", timeout=4 * 3600)
         # De geometrie-backfill is rekenwerk en draait in fase_post — anders
         # zit er een rekenstap tussen twee harvest-stappen (enrich → load-ovg).
         regels.append(
-            f"- KOOP-kennisgevingen {vanaf}..{vandaag}: load {'ok' if ok1 else 'FOUT'}, "
-            f"enrich {'ok' if ok2 else 'FOUT'} (geometrie-backfill draait in post)")
+            f"- KOOP-kennisgevingen {vanaf}..{vandaag}: load {'ok' if ok1 else 'FOUT'} "
+            f"(geometrie-backfill draait in post)")
+        regels.append(meting_enrich)
 
     # DSO-afwijkvergunningen (BOPA): full-snapshot, idempotent — altijd verversen.
     ok_ovg = subproc([py, "-m", "src.cli", "load-ovg"], "load-ovg (afwijkvergunningen)")
@@ -459,8 +508,12 @@ def fase_post(run_start: datetime.datetime, gewijzigd: set[str] | None = None):
     #    harvest-stappen van fase_vth in.
     backfill = ROOT / "scripts" / "koop-poc" / "backfill_geometrie.py"
     if backfill.exists():
-        ok_bf = subproc([py, str(backfill), "--apply"], "vth geometrie-backfill")
-        rapporteer("vth geometrie-backfill", [f"- {'ok' if ok_bf else 'FOUT'}"])
+        ok_bf, meting_bf = gemeten_subproc(
+            [py, str(backfill), "--apply"], "vth geometrie-backfill",
+            "SELECT count(*) n FROM vth.vergunningkennisgeving "
+            "WHERE geometrie_rd_pt IS NOT NULL",
+            "geometrieën")
+        rapporteer("vth geometrie-backfill", [meting_bf])
 
     conn = get_conn()
     cur = conn.cursor()

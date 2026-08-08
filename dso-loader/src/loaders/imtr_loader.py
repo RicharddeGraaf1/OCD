@@ -150,6 +150,7 @@ def _load_sttr_regelbestanden(conn, oin: str, naam: str) -> int:
 
     page = 1
     total_loaded = 0
+    n_overgeslagen = 0
 
     while True:
         data = _api_get(cfg.STTR_BASE, "/toepasbareRegels", {
@@ -205,6 +206,22 @@ def _load_sttr_regelbestanden(conn, oin: str, naam: str) -> int:
                      fsr if fsr else None),
                 )
 
+                # ── delta: sla de DMN-download over als er niets is gewijzigd ──
+                # Het dure deel van deze fase is niet de lijst maar de XML: één
+                # call per regelbestand, ~50.000 per sync, samen 5,6 uur. De
+                # lijst levert `laatsteWijzigingDatum` op secondeniveau; is die
+                # gelijk aan wat we bij de vorige geslaagde verwerking hebben
+                # opgeslagen, dan is de inhoud ongewijzigd.
+                gewijzigd_op = item.get("laatsteWijzigingDatum")
+                cur.execute("SELECT laatste_wijziging FROM i2a.toepasbaar_regelbestand "
+                            "WHERE namespace = %s", (namespace,))
+                rij = cur.fetchone()
+                bekend = rij["laatste_wijziging"] if rij else None
+                if gewijzigd_op and bekend and bekend == gewijzigd_op:
+                    n_overgeslagen += 1
+                    total_loaded += 1
+                    continue
+
                 # Download DMN XML if we have an ID
                 if tr_id:
                     try:
@@ -217,6 +234,14 @@ def _load_sttr_regelbestanden(conn, oin: str, naam: str) -> int:
 
                         if xml_resp.status_code == 200:
                             _parse_and_store_dmn(conn, cur, namespace, xml_resp.content)
+                            # Pas ná geslaagde verwerking vastleggen — anders zou
+                            # een mislukte download de volgende run laten denken
+                            # dat de inhoud er is.
+                            if gewijzigd_op:
+                                cur.execute(
+                                    "UPDATE i2a.toepasbaar_regelbestand "
+                                    "   SET laatste_wijziging = %s WHERE namespace = %s",
+                                    (gewijzigd_op, namespace))
                     except Exception as e:
                         console.print(f"  [yellow]Warning: failed to download DMN for {tr_id}: {e}[/yellow]")
 
@@ -230,7 +255,11 @@ def _load_sttr_regelbestanden(conn, oin: str, naam: str) -> int:
             break
         page += 1
 
-    console.print(f"  [green]{total_loaded} regelbestanden geladen[/green]")
+    if n_overgeslagen:
+        console.print(f"  [green]{total_loaded} regelbestanden "
+                      f"({n_overgeslagen} ongewijzigd, DMN overgeslagen)[/green]")
+    else:
+        console.print(f"  [green]{total_loaded} regelbestanden geladen[/green]")
     return total_loaded
 
 
