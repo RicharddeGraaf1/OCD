@@ -211,6 +211,31 @@ CREATE TABLE IF NOT EXISTS p2p.procedurestap (
 );
 CREATE INDEX IF NOT EXISTS idx_procedurestap_besluit ON p2p.procedurestap(besluit_expression);
 
+-- Deze drie tabellen zijn LEEG en blijven dat. Vastgesteld 2026-08-08
+-- (vault gaps.md G-121, verwant aan G-108):
+--   * geen enkele loader schrijft erin — geverifieerd over de hele codebase;
+--   * Presenteren v8 heeft geen /besluiten-endpoint (404). De API levert het
+--     vigerende spoor als regelingen; het besluit als rechtshandeling zit er
+--     niet in.
+--   * de besluitvorming die de DSO wél levert komt uit /ontwerpregelingen en
+--     /besluitversies en landt in p2pwijziging.besluit (445 rijen: 321
+--     ontwerpen, 124 besluitversies).
+-- Gevolg: voor een vigerende regeling is er geen vaststellingsdatum uit deze
+-- tabellen af te leiden. Wat er wél is: 98 van de 1.979 vigerende regelingen
+-- (5%) matchen op p2pwijziging.besluit.nieuwe_expression en hebben daarmee een
+-- begin_inwerking-datum. Die dekking groeit mee met nieuwe besluitversies maar
+-- is niet historisch.
+-- Ze staan er nog omdat het STOP-model ze kent; leeg laten zonder deze notitie
+-- suggereert dat er data hoort te zijn.
+COMMENT ON TABLE p2p.besluit IS
+    'LEEG — Presenteren v8 kent geen /besluiten voor het vigerende spoor. '
+    'Besluitvorming zit in p2pwijziging.besluit. Zie vault gaps.md G-121/G-108.';
+COMMENT ON TABLE p2p.besluit_regeling IS
+    'LEEG — hoort bij p2p.besluit, dat nooit gevuld wordt. Zie gaps.md G-121.';
+COMMENT ON TABLE p2p.procedurestap IS
+    'LEEG — procedurestappen worden alleen voor ontwerpen geschreven, naar '
+    'p2pwijziging.procedurestap. Zie vault gaps.md G-108.';
+
 CREATE TABLE IF NOT EXISTS p2p.tekst_element (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     regeling_expression TEXT NOT NULL REFERENCES p2p.regeling(frbr_expression) ON DELETE CASCADE,

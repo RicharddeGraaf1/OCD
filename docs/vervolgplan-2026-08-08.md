@@ -125,7 +125,29 @@ bewaking (dan valt hij vanzelf onder maatregel 1).
 
 ---
 
-## 4. `p2p.besluit` (G-121) — vaststellen wat het is
+## 4. `p2p.besluit` (G-121) — vaststellen wat het is ✅ AFGEROND 2026-08-08
+
+**Uitkomst.** Alle drie de vragen beantwoord:
+
+1. Geen enkele loader schrijft in deze tabellen (hele codebase gecontroleerd).
+2. `GET /besluiten` op Presenteren v8 geeft **404**. De API levert het vigerende
+   spoor als regelingen; het besluit als rechtshandeling zit er niet in.
+3. De besluitvorming die de DSO wél levert komt uit `/ontwerpregelingen` en
+   `/besluitversies` en landt in `p2pwijziging.besluit` — 445 rijen (321
+   ontwerpen, 124 besluitversies).
+
+Het is dus geen vergeten laag maar een **splitsing**: vigerende toestand uit
+Presenteren, besluitvorming uit het wijzigingsspoor. De lege tabellen hebben in
+`src/ddl.py` een `COMMENT ON TABLE` gekregen met deze uitleg.
+
+**Bijvangst voor G-108**: alle 124 besluitversies hebben `nieuwe_expression` én
+`begin_inwerking`; daarvan matchen er **98 op een vigerende regeling (5% van de
+1.979)**. Voor die 98 is een inwerkingtredingsdatum af te leiden zonder aanname
+over de FRBR-datum. De dekking groeit mee maar werkt niet terug.
+
+*Oorspronkelijke opzet hieronder bewaard.*
+
+### Oorspronkelijke aanpak
 
 **Probleem.** 0 rijen in `besluit`, `besluit_regeling` en `procedurestap`, over
 de hele database. De tabellen bestaan, de FK's staan, er zit niets in.
