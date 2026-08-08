@@ -203,11 +203,16 @@ def bouw_bronhouderlijst():
 
 
 def bepaal_sinds() -> str:
-    """Ondergrens voor de p2p-delta-sweep.
+    """Ondergrens voor de p2p-delta-sweep — NIET MEER DE DEFAULT.
 
     = start van de vorige geslaagde sync minus 2 dagen marge (overlap is
     onschadelijk dankzij de skip-guard). Valt terug op 90 dagen als er geen
     geslaagde sync bekend is. Retourneert ISO-8601 UTC ("…Z").
+
+    Sinds 2026-08-08 draait `fase_p2p` standaard over de volledige lijst en
+    roept hij deze functie niet meer aan; zie de toelichting daar. Bewaard voor
+    wie bewust een venster wil zetten en voor de vth-fase, die wél een echte
+    dag-watermark heeft (`vth.etl_run`).
     """
     conn = get_conn()
     try:
@@ -241,9 +246,26 @@ def fase_p2p(bronhouders, sinds: str | None = None, full: bool = False,
         log(f"p2p VOLLEDIGE sweep over {len(bronhouders)} bronhouders (per bronhouder pollen)")
         scope = f"full-sweep:{len(bronhouders)} bronhouders"
     else:
-        sinds = sinds or bepaal_sinds()
-        log(f"p2p delta-sweep (registratietijdstip >= {sinds}) over {len(bronhouders)} bronhouders")
-        scope = f"delta:sinds {sinds}"
+        # Geen watermark meer als default. `find_regelingen_delta` pagineert de
+        # volledige lijst hoe dan ook (~10 calls); `sinds` filtert daarná op
+        # registratietijdstip en bespaart dus geen enkele API-call — het levert
+        # alleen risico op. En dat risico is echt: bij de sync van 2026-08-07
+        # hadden 7 van de 10 te laden regelingen een registratietijdstip van
+        # 2-10 juli, ruim vóór de watermark van 29 juli. Ze waren ná de vorige
+        # run in de DSO-lijst verschenen mét een oud tijdstip, en de run van
+        # 1 augustus (die met --sinds 2026-06-01 draaide) had ze dus óók niet
+        # gezien. Een watermark op tijdstipRegistratie veronderstelt dat een
+        # item zichtbaar wordt wanneer het geregistreerd is, en dat klopt niet.
+        #
+        # De skip-guard doet het echte filterwerk: een al geladen expressie
+        # wordt in ~1,1 ms herkend, dus ~1.960 keer niets doen kost seconden.
+        # `--sinds` blijft bestaan om het venster bewust te knijpen.
+        if sinds:
+            log(f"p2p delta-sweep (registratietijdstip >= {sinds}) over {len(bronhouders)} bronhouders")
+            scope = f"delta:sinds {sinds}"
+        else:
+            log(f"p2p delta-sweep (volledige lijst) over {len(bronhouders)} bronhouders")
+            scope = "delta:volledige lijst"
     with load_run("ozon-regelingen", scope=scope) as run:
         if full:
             resultaten = p2p.run(bronhouders, uitstel_subdiv=True, gewijzigd=gewijzigd)
@@ -259,7 +281,8 @@ def fase_p2p(bronhouders, sinds: str | None = None, full: bool = False,
     if full:
         detail = f"- {ok}/{len(resultaten)} bronhouders ok"
     else:
-        detail = f"- {ok} bronhouders met nieuwe regelingen sinds {sinds} (rest ongewijzigd)"
+        venster = f"sinds {sinds}" if sinds else "over de volledige lijst"
+        detail = f"- {ok} bronhouders met nieuwe regelingen {venster} (rest ongewijzigd)"
     rapporteer("p2p (Ow-regelingen)", [
         detail,
         f"- fouten: {len(err)}" + (f" — {', '.join(list(err)[:15])}" if err else ""),

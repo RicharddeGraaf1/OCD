@@ -106,20 +106,24 @@ hij zou laden.
 python scripts/full_sync.py --label "sync-<datum>" --skip-embed
 ```
 
-**Let op `--sinds`.** De watermark is "start vorige geslaagde sync − 2 dagen".
-Als de preview achterstand toont die **ouder** is dan die watermark (bv. omdat
-een eerdere run stilletjes te weinig laadde), pak dan expliciet een ruimer
-venster:
+**`--sinds` is sinds 2026-08-08 niet meer nodig.** De p2p-fase draait standaard
+over de **volledige lijst**; er is geen watermark meer als default.
 
-```bash
-python scripts/full_sync.py --label "sync-<datum>" --skip-embed \
-  --sinds 2026-06-01T00:00:00Z
-```
+De reden staat in de run van 2026-08-07: 7 van de 10 te laden regelingen hadden
+een `tijdstipRegistratie` van 2–10 juli, ruim vóór de watermark van 29 juli. Ze
+waren ná de vorige run in de DSO-lijst verschenen mét een oud tijdstip — de run
+van 1 augustus, die al met `--sinds 2026-06-01` draaide, had ze evenmin gezien.
+Een watermark op `tijdstipRegistratie` veronderstelt dat een item zichtbaar
+wordt op het moment dat het geregistreerd is, en dat klopt niet.
 
-Dat is goedkoop: de lijst-sweep kost dezelfde ~10 calls, de regelingen zijn al
-opgehaald vóór het laden, en de skip-guard herkent al-geladen expressies in
-~1 ms. `--full-p2p` heb je hiervoor **niet** nodig; dat is de per-bronhouder-
-sweep en alleen bedoeld na een verse restore.
+Het kost ook niets. `find_regelingen_delta` pagineert de volledige lijst hoe dan
+ook (~10 calls); `sinds` filtert daarná en bespaart dus geen enkele API-call. De
+skip-guard doet het echte werk: een al geladen expressie wordt in ~1,1 ms
+herkend, dus ~1.960 keer niets doen kost seconden.
+
+`--sinds` bestaat nog om het venster bewust te knijpen. `--full-p2p` heb je
+hiervoor **niet** nodig; dat is de per-bronhouder-sweep, alleen bedoeld na een
+verse restore.
 
 Duur: p2p seconden tot minuten (plus ~28 s `locatie_subdiv`-herbouw per
 bronhouder mét nieuwe regelingen), i2a ~3 min, vth ~15 min, post (drieslag-MV's)

@@ -8,6 +8,8 @@ Two APIs:
 
 from lxml import etree
 
+import re
+
 import httpx
 from rich.console import Console
 
@@ -47,16 +49,40 @@ def _api_post(base_url: str, path: str, json_body: dict) -> dict:
     return resp.json()
 
 
-def _load_rtr_activiteiten(conn, organisatie_code: str, naam: str) -> int:
-    """Load RTR activiteiten for a bestuursorgaan via organisatieCode."""
+def _rtr_organisatiecode(bronhouder_code: str) -> str:
+    """De RTR wil de kale organisatiecode, zonder bestuurslaag-prefix.
+
+    Gemeten 2026-08-08 tegen de live RTR: `gm0363` geeft 0 activiteiten,
+    `0363` geeft er 113. Idem `gm0518`/`0518` (90), `ws0621`/`0621` (78),
+    `pv27`/`27` (191). Het antwoord bevat de code zelf ook kaal
+    (`{"oin": ..., "organisatieType": "MNRE", "organisatieCode": "1034"}`).
+
+    Géén vaste breedte: `pv27` moet `27` worden, want `0027` geeft 0. Een code
+    die al kaal is (zoals cfg.POC_CBS_CODE = "0344") blijft ongemoeid.
+
+    Dit stond sinds de initial commit fout en heeft het per-bestuursorgaan-
+    kanaal al die tijd leeg gehouden — zie vault gaps.md G-117.
+    """
+    return re.sub(r"^[a-z]+", "", bronhouder_code)
+
+
+def _load_rtr_activiteiten(conn, organisatie_code: str, naam: str) -> tuple[int, str]:
+    """Load RTR activiteiten for a bestuursorgaan via organisatieCode.
+
+    Geeft altijd een tuple terug. Tot 2026-08-08 was dat bij een lege lijst
+    een kale `0`, waardoor `load_imtr_for` `oin = ""` zette en de STTR-stap
+    stilzwijgend oversloeg — zonder de "No OIN"-waarschuwing, want die staat
+    in de functie die dan niet meer wordt aangeroepen.
+    """
     console.print(f"  Loading RTR activiteiten for {naam}...")
+    rtr_code = _rtr_organisatiecode(organisatie_code)
 
     all_acts = []
     page = 1
     while True:
         data = _api_post(cfg.RTR_BASE, "/activiteiten/_zoek", {
             "datum": "10-04-2026",
-            "bestuursorgaan": {"organisatieCode": organisatie_code},
+            "bestuursorgaan": {"organisatieCode": rtr_code},
             "pageSize": 200,
             "page": page,
         })
@@ -69,7 +95,9 @@ def _load_rtr_activiteiten(conn, organisatie_code: str, naam: str) -> int:
 
     console.print(f"  Found {len(all_acts)} RTR activiteiten for {naam}")
     if not all_acts:
-        return 0
+        console.print(f"  [yellow]0 RTR activiteiten voor {naam} "
+                      f"(organisatieCode {rtr_code}) — STTR wordt overgeslagen[/yellow]")
+        return 0, ""
 
     oin = all_acts[0].get("bestuursorgaan", {}).get("oin", "")
 
