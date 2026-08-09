@@ -120,14 +120,31 @@ def _huidige_versie_datum(conn: psycopg.Connection, regeling_work: str) -> date 
 
 def _is_relevant(conn: psycopg.Connection, regeling_work: str | None,
                  nieuwe_expression: str | None,
-                 begin_inwerking: str | date | None = None) -> bool:
+                 begin_inwerking: str | date | None = None,
+                 wijzigt_expression: str | None = None) -> bool:
     """Bepaal of dit ontwerp/besluit relevant is.
 
     Strikter filter: de wijziging moet:
     1. Een regeling betreffen die wij in p2p hebben (work-niveau), EN
     2. Een ANDERE expression introduceren dan wat wij al hebben (anders al verwerkt), EN
     3. (voor besluitversies) een begin_inwerking hebben in de toekomst, of geen
-       begin_inwerking (ontwerp).
+       begin_inwerking (ontwerp), EN
+    4. voortbouwen op de expressie die vandaag vigeert (`wijzigt_expression`).
+
+    Voorwaarde 4 is op 2026-08-09 toegevoegd op aanwijzing van de gebruiker: een
+    ontwerp kan in deze keten niet op een oudere consolidatie zitten. Wijzigt het
+    een expressie die inmiddels is opgevolgd, dan is het achterhaald.
+
+    Waarom de bestaande voorwaarden dat niet al afvingen: voorwaarde 2 vergelijkt
+    `nieuwe_expression` en die is bij ontwerpen vaak leeg, waardoor hij triviaal
+    slaagt; de datumtoets in `load_ontwerp` kijkt of het ontwerp *jonger is dan*
+    onze vigerende versie, niet of het erop *voortbouwt*. Een bronhouder die in
+    juli publiceert op de januari-consolidatie terwijl juni al vigeert, glipte
+    door beide heen — 38 gevallen in de meting van 09-08 (vault gaps.md G-123).
+
+    `wijzigt_expression=None` laat de toets bewust ongemoeid: bij een
+    vervangRegeling (geen `beoogdeOpvolgerVan`) is er geen basis om tegen te
+    ijken, en dat is geen bewijs van veroudering.
     """
     if not regeling_work:
         return False
@@ -164,6 +181,10 @@ def _is_relevant(conn: psycopg.Connection, regeling_work: str | None,
 
         if iw_datum < date.today():
             return False  # al in werking, geen aankomende wijziging meer
+
+    # 4. Bouwt het voort op de expressie die vandaag vigeert?
+    if wijzigt_expression and wijzigt_expression != huidige_expression:
+        return False  # gebaseerd op een inmiddels opgevolgde consolidatie
 
     return True
 
@@ -494,6 +515,13 @@ def load_ontwerp(item: dict, conn: psycopg.Connection) -> str | None:
     basis_href = (links.get("beoogdeOpvolgerVan") or {}).get("href") if not is_vervang else None
     basis_expression = _fetch_basis_expression(basis_href)
 
+    # Voorwaarde 4 pas hier, ná `_fetch_basis_expression`: de basis kost een
+    # extra API-call, dus die halen we niet op voor ontwerpen die de goedkope
+    # filters hierboven al niet halen. Zie `_is_relevant` voor het waarom.
+    if basis_expression and not _is_relevant(conn, regeling_work, expression_id,
+                                             wijzigt_expression=basis_expression):
+        return None
+
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO p2pwijziging.besluit
@@ -587,6 +615,12 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
     is_vervang = VERVANG_LINK["besluitversie"] not in links
     basis_href = (links.get("wijzigtRegelingversie") or {}).get("href") if not is_vervang else None
     basis_expression = _fetch_basis_expression(basis_href)
+
+    # Idem als bij `load_ontwerp`: de basis-toets pas ná de extra API-call.
+    if basis_expression and not _is_relevant(conn, regeling_work, instrumentversie,
+                                             begin_inwerking,
+                                             wijzigt_expression=basis_expression):
+        return None
 
     with conn.cursor() as cur:
         cur.execute("""

@@ -74,10 +74,17 @@ def _als_datum(x) -> date | None:
 
 
 def zou_vandaag_binnenlaten(conn, rij) -> bool:
-    """Spiegelt de intake-logica van `load_ontwerp` / `load_besluitversie`."""
+    """Spiegelt de intake-logica van `load_ontwerp` / `load_besluitversie`.
+
+    `wijzigt_expression` gaat sinds 2026-08-09 mee: de loader eist nu dat een
+    ontwerp voortbouwt op de expressie die vandaag vigeert. Daarmee vallen de 38
+    gevallen die hieronder als "tegenspraak" werden gemeld alsnog binnen het
+    criterium — en blijft de regel gelden dat dit script niets weghaalt wat de
+    volgende sync terughaalt.
+    """
     inwerking = rij["begin_inwerking"] if rij["soort"] == "besluitversie" else None
     if not _is_relevant(conn, rij["regeling_work"], rij["nieuwe_expression"],
-                        inwerking):
+                        inwerking, wijzigt_expression=rij["wijzigt_expression"]):
         return False
     if rij["soort"] == "ontwerp":
         huidige = _huidige_versie_datum(conn, rij["regeling_work"])
