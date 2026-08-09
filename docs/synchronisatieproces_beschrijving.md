@@ -299,12 +299,32 @@ hele lijst. Dat is bij i2a bewust **niet** gedaan, om twee redenen:
 - **Verdwenen regelbestanden worden niet opgeruimd** — dezelfde keuze als G-91
   bij p2p: verdwijnen uit een lijst is geen bewijs van intrekking.
 
-### Wat de delta niet oplost
+### De peildatum (2026-08-09)
 
-De hardgecodeerde `datum: "10-04-2026"` in de RTR/STTR-calls staat er nog.
-Zolang die er is, haalt i2a de april-toestand op en betekent "niets gewijzigd
-sinds de vorige run" dus: niets gewijzigd *aan de april-toestand*. De delta
-maakt de fase snel, niet actueel.
+De delta maakte de fase snel; de peildatum maakt hem actueel. RTR en STTR zijn
+geldigheidsgestuurd — de `datum`-parameter bepaalt welke toestand je krijgt — en
+die stond op drie plekken hardgecodeerd op `10-04-2026`. Nu `_peildatum()`:
+standaard vandaag, met `IMTR_PEILDATUM` als ontsnapping om een oude toestand te
+reproduceren.
+
+Gemeten over 19 bronhouders (3.128 regelbestanden), april tegenover vandaag:
+2 nieuwe bestanden, 2 verdwenen, en **52 met een nieuwere
+`laatsteWijzigingDatum`** — ~1,7% van de inhoud stond vier maanden stil.
+Amsterdam ging van 161 naar 166 regelbestanden.
+
+Terzijde, bij het nameten: `page.totalElements` in de RTR is niet het aantal
+items. Amsterdam levert 120 activiteiten bij een gemeld getal van 110, gm1699
+er 100 bij een gemelde 90. De loader raakt hier niet door in de war (hij telt de
+items en pagineert door), maar `preview_sync --i2a` leest wél het veld en telt
+daarmee ~8% te laag.
+
+De twee mechanismen zijn elkaars voorwaarde: de peildatum bepaalt *wat* er
+gevraagd wordt, de delta *wat daarvan opnieuw wordt opgehaald*. Zonder de delta
+zou het verversen van de peildatum de fase terugbrengen op 5,6 uur.
+
+Praktisch: `laatste_wijziging` is nog maar voor 148 van de 59.646 bestanden
+gevuld, dus de eerstvolgende i2a-run haalt hoe dan ook alles op (~5,6 uur). Pas
+de run daarna is de fase kort.
 
 ---
 
@@ -353,14 +373,19 @@ zit een reguliere incrementele sync ruim onder het uur, gedomineerd door vth.
 
 1. **subdiv als post-fase-batch**: i.p.v. per bronhouder tijdens p2p, één
    gebundelde refresh na afloop voor alléén de gewijzigde bronhouders.
-2. ~~**i2a-delta**~~ — **gebouwd 2026-08-08**, zie hieronder.
+2. ~~**i2a-delta**~~ — **gebouwd 2026-08-08**, zie hierboven.
+3. ~~**i2a-peildatum**~~ — **gefixt 2026-08-09**, zie hierboven.
+4. **`laatste_wijziging` backfillen tegen de april-peildatum.** De ~59.500
+   bestanden die we in april laadden hebben nog geen watermerk, dus de
+   eerstvolgende run haalt ze allemaal opnieuw op. Vul je het veld met de
+   `laatsteWijzigingDatum` die de STTR *op 10-04-2026* teruggaf, dan is dat een
+   waarheidsgetrouwe uitspraak over wat er in de DB staat, en haalt de volgende
+   run alleen de ~1,7% gewijzigde bestanden op: ~1.000 lijst-calls in plaats van
+   5,6 uur. Bewust nog niet gedaan — het claimt dekking voor bestanden waarvan
+   we de download niet individueel geverifieerd hebben.
 
 ## Bekende zwakke plekken (nog niet opgelost)
 
-- **i2a bevraagt de RTR/STTR met een hardgecodeerde `datum: "10-04-2026"`**
-  (`imtr_loader.py`, drie plekken). Een sync in augustus haalt dus de
-  toestand van 10 april op. `preview_sync.py --i2a` gebruikt dezelfde datum,
-  zodat de preview toont wat de loader zóú zien — niet wat vandaag geldt.
 - **Geen delta voor vth op prod** (G-94): vth loopt via
   `refresh-koop-to-prod.ps1`. i2a heeft sinds 2026-08-08 wél een delta (zie
   hieronder), maar nog geen push-script naar prod.

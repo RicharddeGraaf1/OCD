@@ -45,6 +45,11 @@ class Config:
             return override
         return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
 
+    # Peildatum voor de RTR/STTR-calls in i2a (dd-mm-yyyy). Leeg = vandaag.
+    # Alleen zetten om een oude toestand te reproduceren; zie
+    # imtr_loader._peildatum().
+    IMTR_PEILDATUM: str = os.getenv("IMTR_PEILDATUM", "")
+
     # PoC municipality
     POC_CBS_CODE: str = os.getenv("POC_CBS_CODE", "0344")
     POC_OIN: str = os.getenv("POC_OIN", "00000001002220647000")

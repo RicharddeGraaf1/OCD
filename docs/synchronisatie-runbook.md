@@ -324,10 +324,45 @@ gelijk, dan is de inhoud ongewijzigd en slaat de loader de XML over.
    meer in de lijst, dan blijft de rij staan — dezelfde keuze als G-91 bij p2p:
    verdwijnen uit een lijst is geen bewijs van intrekking.
 
-**Wat de delta niet oplost**: de hardgecodeerde `datum: "10-04-2026"` in de
-RTR/STTR-calls. Zolang die er staat haalt i2a de april-toestand op, en dan is
-"niets gewijzigd" ook een uitspraak over april. De delta maakt de fase snel,
-niet actueel.
+### i2a-peildatum — van 10 april naar vandaag
+
+*Toegevoegd 2026-08-09. Hoort onlosmakelijk bij de delta hierboven.*
+
+RTR en STTR zijn **geldigheidsgestuurd**: de `datum`-parameter bepaalt welke
+toestand je terugkrijgt. Die stond op drie plekken hardgecodeerd op
+`10-04-2026`, en is nu `_peildatum()` — standaard vandaag, te overschrijven met
+`IMTR_PEILDATUM` in `.env` als je een oude toestand wilt reproduceren.
+
+Wat dat scheelde, gemeten over 19 bronhouders (3.128 regelbestanden), april
+tegenover vandaag:
+
+| | |
+|---|---|
+| nieuwe regelbestanden | 2 |
+| verdwenen regelbestanden | 2 |
+| **nieuwere `laatsteWijzigingDatum`** | **52 (~1,7%)** |
+| Amsterdam specifiek | 161 → 166 regelbestanden |
+
+Dus: geen instorting, maar ~1,7% van de inhoud stond vier maanden stil, en
+nieuw werk van bronhouders kwam per definitie niet binnen.
+
+**Let op bij het zelf nameten**: `page.totalElements` in de RTR is *niet* het
+aantal items. Amsterdam levert 120 activiteiten terwijl het veld 110 (april) of
+113 (vandaag) zegt; gm1699 levert er 100 bij een gemelde 90. Tel de items, niet
+het veld — `preview_sync --i2a` doet dat laatste (pageSize 1) en rapporteert
+daardoor structureel ~8% te laag.
+
+**De twee mechanismen in de juiste volgorde.** De peildatum bepaalt *wat er
+gevraagd wordt*, de delta bepaalt *wat daarvan opnieuw wordt opgehaald*. Ze zijn
+elkaars voorwaarde: zonder delta zou het bijwerken van de peildatum de fase weer
+5,6 uur maken; zonder peildatum-fix zou de delta een steeds sneller antwoord op
+een steeds oudere vraag geven.
+
+**Eén ding om te weten vóór de eerstvolgende run**: `laatste_wijziging` is nu
+gevuld voor 148 van de 59.646 bestanden (alleen de gm1699-inhaalronde). Voor de
+rest is hij `NULL`, dus die worden hoe dan ook opgehaald. **De eerstvolgende
+i2a-run duurt daarom nog een keer ~5,6 uur**; pas de run daarna profiteert van
+de delta. Plan hem 's nachts.
 
 ### Stap 5 — i2a naar prod (afweging)
 
@@ -343,10 +378,11 @@ push-script. Vergelijk na stap 1 de tellingen
 
 Twee dingen om te weten vóór je hier tijd in steekt:
 
-- De i2a-loader bevraagt de RTR/STTR met een **hardgecodeerde
-  `datum: "10-04-2026"`**. Zolang die er staat, haalt i2a per definitie de
-  toestand van 10 april op — een verschil dat níét verschijnt is dus geen bewijs
-  van actualiteit.
+- **Lokaal staat sinds 2026-08-09 op peildatum vandaag, prod op de april-stand.**
+  Het verschil tussen beide is dus deels inhoudelijk (de +46% hieronder) en
+  deels een peildatum-verschil van vier maanden. Repliceer je, dan neem je de
+  actuele stand mee — dat is de bedoeling, maar weet dat het twee wijzigingen
+  in één beweging zijn.
 - **Het per-bestuursorgaan-kanaal lag sinds de initial commit stil** en is op
   2026-08-08 gerepareerd: de loader stuurde de bronhouder-code mét prefix
   (`gm0363`) terwijl de RTR de kale code verwacht (`0363` → 113 activiteiten).
@@ -710,7 +746,8 @@ Noodroute als prod onherstelbaar afwijkt: `restore-dev-naar-prod.ps1`
 | G-94 | *deels opgelost 2026-08-08* — i2a heeft nu een delta op `laatsteWijzigingDatum` (5,6 u → ~20 min). vth heeft er nog geen; scheduling ontbreekt nog steeds | stap 4 en 5 blijven handwerk |
 | — | `repliceer_p2p_naar_prod.py` dekt p2p, maar de afgeleide herbouw (subdiv, MV's) is nog losse handmatige stappen | stap 3 is één script plus drie commando's; automatiseren kan zodra de volgorde zich bewezen heeft |
 | — | de replicatie **verwijdert** niets op prod | een rij die lokaal is opgeruimd blijft daar staan; net als G-91 een bewuste keuze, geen automatisme |
-| — | i2a-datum hardgecodeerd op `10-04-2026` | i2a laadt de april-toestand. **Let op de wisselwerking met de delta**: "niets gewijzigd sinds vorige run" is dan een uitspraak over april, niet over vandaag |
+| — | *opgelost 2026-08-09* — i2a-datum stond hardgecodeerd op `10-04-2026` | nu `_peildatum()` = vandaag. Gemeten effect over 19 bronhouders: 2 nieuw, 2 weg, 52 van 3.128 met nieuwere inhoud (~1,7%). De eerstvolgende run duurt nog ~5,6 u omdat `laatste_wijziging` nog vrijwel overal `NULL` is |
+| — | de preview stuurde de RTR een geprefixte code (`gm0344`) | *opgelost 2026-08-09* — dezelfde G-117-fout als in de loader, waardoor élke gemeente 0 activiteiten leek te hebben. Preview hergebruikt nu de loader-helpers in plaats van ze over te schrijven |
 | — | *opgelost 2026-08-08* — i2a-kanaal lag sinds de initial commit stil (geprefixte bronhoudercode) | +384.178 uitvoeringsregels (+46%) na de fix; retry op 503 toegevoegd, want die ontbrak ook |
 | — | rapportage meet exceptions, geen volledigheid | "0 fouten" gaf jarenlang valse geruststelling |
 | — | doorwerkingsmeting (6b) hangt niet aan de pipeline, vereist lokale GPU | instructieregels.nl toont oordelen van vóór de sync tot iemand 6b draait; sinds 05-08 gaat de site tenminste niet meer stil de deur uit (pre-flight in `publish.py`) |

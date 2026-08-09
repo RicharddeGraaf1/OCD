@@ -207,12 +207,21 @@ def print_vth(v: dict):
 def preview_i2a() -> dict:
     """RTR-activiteiten per gemeente (1 lichte call each) vs. wat in de DB zit.
 
-    LET OP: de i2a-loader bevraagt de RTR/STTR met een **hardgecodeerde**
-    `datum: 10-04-2026` (imtr_loader.py). De preview gebruikt dezelfde datum,
-    zodat je vergelijkt wat de loader zou zien — niet wat vandaag geldt.
+    Gebruikt bewust dezelfde twee helpers als de loader — `_rtr_organisatiecode`
+    en `_peildatum` — zodat de preview laat zien wat de loader zou zien.
+
+    Beide waren hier tot 2026-08-09 fout overgeschreven in plaats van
+    hergebruikt: de preview stuurde `gm0344` (de RTR wil `0344`, zie G-117) en
+    de hardgecodeerde april-datum. De eerste maakte dat élke gemeente 0
+    activiteiten leek te hebben — dezelfde stille nul als in de loader zelf.
+
+    LET OP: dit telt `page.totalElements` bij `pageSize=1`, en dat veld ligt in
+    de RTR structureel lager dan het werkelijke aantal items (Amsterdam: 120
+    items, veld zegt 113; gm1699: 100 om 90). Voor een preview — is er iets, en
+    grofweg hoeveel — volstaat dat; als exacte telling niet.
     """
     from src.db import get_conn
-    from src.loaders.imtr_loader import _api_post
+    from src.loaders.imtr_loader import _api_post, _peildatum, _rtr_organisatiecode
     from src.config import cfg
     from src.pipeline.bronhouders import filter_by_type
     from full_sync import bouw_bronhouderlijst
@@ -228,13 +237,15 @@ def preview_i2a() -> dict:
     for bh in gemeenten:
         try:
             data = _api_post(cfg.RTR_BASE, "/activiteiten/_zoek", {
-                "datum": "10-04-2026",
-                "bestuursorgaan": {"organisatieCode": bh.overheid_code},
+                "datum": _peildatum(),
+                "bestuursorgaan": {
+                    "organisatieCode": _rtr_organisatiecode(bh.overheid_code)},
                 "pageSize": 1, "page": 1})
             per_gem[bh.overheid_code] = data.get("page", {}).get("totalElements", 0)
         except Exception as e:
             fouten.append(f"{bh.overheid_code}: {type(e).__name__}")
-    return {"gemeenten": len(gemeenten), "activiteiten_rtr": sum(per_gem.values()),
+    return {"gemeenten": len(gemeenten), "peildatum": _peildatum(),
+            "activiteiten_rtr": sum(per_gem.values()),
             "regelbeheerobject_in_db": in_db, "zonder_activiteiten":
             sum(1 for v in per_gem.values() if not v), "fouten": fouten}
 
@@ -244,9 +255,9 @@ def print_i2a(i: dict):
     print(f"  {i['gemeenten']} gemeenten gepolld; {i['activiteiten_rtr']} activiteiten in de RTR "
           f"({i['zonder_activiteiten']} gemeenten zonder)")
     print(f"  regelbeheerobjecten in de DB: {i['regelbeheerobject_in_db']}")
-    print("  NB: i2a heeft geen delta — de fase pollt altijd alle gemeenten en laadt")
-    print("      ON CONFLICT DO NOTHING; 'te laden' is dus niet exact vooraf te bepalen.")
-    print("  NB: imtr_loader bevraagt de RTR met een HARDGECODEERDE datum 10-04-2026.")
+    print("  NB: de i2a-delta zit op de DMN-download, niet op de lijst — de fase pollt")
+    print("      altijd alle gemeenten; 'te laden' is dus niet exact vooraf te bepalen.")
+    print(f"  peildatum: {i['peildatum']}")
     if i["fouten"]:
         print(f"  fouten bij het pollen: {len(i['fouten'])} — {', '.join(i['fouten'][:5])}")
 

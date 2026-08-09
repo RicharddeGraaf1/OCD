@@ -39,12 +39,23 @@ Gemeten op gm1699 (148 regelbestanden), twee runs achter elkaar: 52,3 s → 3,1 
 Wat de delta NIET dekt: verdwenen regelbestanden. Staat een bestand niet meer
 in de lijst, dan blijft de rij in `i2a.toepasbaar_regelbestand` staan — zelfde
 beperking als G-91 bij p2p, en een bewuste keuze: verdwijnen uit een lijst is
-geen bewijs van intrekking.
+geen bewijs van intrekking. De steekproef van 09-08 vond 2 zulke gevallen op
+3.128 bestanden.
+
+De peildatum (sinds 2026-08-09)
+-------------------------------
+RTR en STTR zijn geldigheidsgestuurd: de `datum`-parameter bepaalt wélke
+toestand je krijgt. Die stond hardgecodeerd op `10-04-2026` en is nu
+`_peildatum()` — standaard vandaag. Let op de volgorde waarin deze twee
+mechanismen samenwerken: de peildatum bepaalt *wat* er gevraagd wordt, de delta
+bepaalt *wat daarvan opnieuw wordt opgehaald*. Zonder de delta zou het
+verversen van de peildatum de fase weer 5,6 uur maken.
 """
 
 from lxml import etree
 
 import re
+from datetime import date
 
 import httpx
 from rich.console import Console
@@ -64,6 +75,28 @@ DMN_NS = {
     "bedr": "http://toepasbare-regels.omgevingswet.overheid.nl/v1.0/Bedrijfsregel",
     "content": "http://toepasbare-regels.omgevingswet.overheid.nl/v1.0/Content",
 }
+
+
+def _peildatum() -> str:
+    """De `datum`-parameter voor RTR en STTR: standaard vandaag.
+
+    RTR en STTR zijn geldigheidsgestuurd: `datum` vraagt "welke activiteiten en
+    toepasbare regels golden op die dag". Tot 2026-08-09 stond hier op drie
+    plekken een hardgecodeerde `10-04-2026`, waardoor i2a vier maanden lang de
+    april-toestand laadde en nieuw werk van bronhouders per definitie niet zag.
+
+    Gemeten op 2026-08-09 over 19 bronhouders (3.128 regelbestanden), april
+    tegenover vandaag: 2 nieuw, 2 verdwenen, en **52 met een nieuwere
+    `laatsteWijzigingDatum`** — ~1,7% van de inhoud stond vier maanden stil.
+    Amsterdam ging van 110 naar 113 activiteiten en 161 naar 166 bestanden.
+
+    Dat de correctie nu pas betaalbaar is, komt door de delta: alleen die ~1,7%
+    wordt opnieuw opgehaald, niet alle ~50.000 bestanden.
+
+    `IMTR_PEILDATUM` in `.env` overschrijft dit — bedoeld om een oude toestand
+    te reproduceren, niet voor normaal gebruik.
+    """
+    return cfg.IMTR_PEILDATUM or date.today().strftime("%d-%m-%Y")
 
 
 def _api_get(base_url: str, path: str, params: dict | None = None) -> dict:
@@ -129,14 +162,14 @@ def _load_rtr_activiteiten(conn, organisatie_code: str, naam: str) -> tuple[int,
     stilzwijgend oversloeg — zonder de "No OIN"-waarschuwing, want die staat
     in de functie die dan niet meer wordt aangeroepen.
     """
-    console.print(f"  Loading RTR activiteiten for {naam}...")
+    console.print(f"  Loading RTR activiteiten for {naam} (peildatum {_peildatum()})...")
     rtr_code = _rtr_organisatiecode(organisatie_code)
 
     all_acts = []
     page = 1
     while True:
         data = _api_post(cfg.RTR_BASE, "/activiteiten/_zoek", {
-            "datum": "10-04-2026",
+            "datum": _peildatum(),
             "bestuursorgaan": {"organisatieCode": rtr_code},
             "pageSize": 200,
             "page": page,
@@ -190,7 +223,7 @@ def _load_sttr_regelbestanden(conn, oin: str, naam: str) -> int:
 
     while True:
         data = _api_get(cfg.STTR_BASE, "/toepasbareRegels", {
-            "datum": "10-04-2026",
+            "datum": _peildatum(),
             "oin": oin,
             "pageSize": 50,
             "page": page,
@@ -397,7 +430,7 @@ def _load_werkzaamheden(conn) -> dict:
             try:
                 kdata = _api_get(cfg.RTR_BASE,
                                  f"/werkzaamheden/{urn}/activiteitKoppelingen",
-                                 {"datum": "10-04-2026"})
+                                 {"datum": _peildatum()})
                 koppelingen = kdata.get("_embedded", {}).get("activiteitKoppelingen", [])
                 for k in koppelingen:
                     act_urn = k.get("urn", "")
