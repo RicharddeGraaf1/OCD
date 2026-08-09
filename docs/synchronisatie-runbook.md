@@ -126,14 +126,14 @@ hiervoor **niet** nodig; dat is de per-bronhouder-sweep, alleen bedoeld na een
 verse restore.
 
 Duur: p2p seconden tot minuten (plus ~28 s `locatie_subdiv`-herbouw per
-bronhouder mét nieuwe regelingen), i2a ~20 min, vth ~15 min, post (drieslag-MV's)
+bronhouder mét nieuwe regelingen), i2a ~40 min, vth ~15 min, post (drieslag-MV's)
 de lange pool.
 
 > **De i2a-duur is op 2026-08-08 twee keer veranderd.** Hij stond op "~3 min",
 > maar dat was de tijd van een fase die niets deed (G-117: de RTR kreeg een
 > geprefixte bronhoudercode en gaf altijd 0 terug). Na die fix werd het **5,6
 > uur**, want toen werden er voor het eerst ~50.000 DMN-bestanden opgehaald.
-> Met de delta hieronder is het ~20 min. Zie §i2a-delta.
+> Met de delta hieronder is het ~40 min. Zie §i2a-delta.
 
 ### Stap 2 — Verdrongen versies markeren
 
@@ -292,7 +292,7 @@ powershell -File scripts/refresh-koop-to-prod.ps1 -Push -Refresh -Verify -ProdUr
 Zonder die stap lopen `/stats`, `/facets` en `/pins` in de 20 s
 statement-timeout.
 
-### i2a-delta — hoe de fase van 5,6 uur naar ~20 min ging
+### i2a-delta — hoe de fase van 5,6 uur naar ~40 min ging
 
 *Toegevoegd 2026-08-08. Relevant voor stap 1 (de i2a-fase) en voor de cadans in
 §6.*
@@ -310,7 +310,8 @@ gelijk, dan is de inhoud ongewijzigd en slaat de loader de XML over.
 | | |
 |---|---|
 | gemeten op gm1699 (148 regelbestanden) | ronde 1: **52,3 s** · ronde 2: **3,1 s** |
-| geëxtrapoleerd over 343 bronhouders | 5,6 uur → **~20 min** |
+| geëxtrapoleerd over 343 bronhouders, alles ongewijzigd | 5,6 uur → ~20 min |
+| **gemeten 09-08 ná de peildatum-fix**, 2 bronhouders | Amsterdam 9,2 s (160/166 overgeslagen) · Den Haag 4,5 s (145/148) → **~40 min** landelijk |
 
 **Drie eigenschappen om te kennen voordat je erop vertrouwt:**
 
@@ -831,7 +832,7 @@ Noodroute als prod onherstelbaar afwijkt: `restore-dev-naar-prod.ps1`
 | G-98 | *opgelost 2026-08-01* — delta brak af op een ongesorteerde lijst | 16 regelingen waren stil gemist; nu gefixt + regressietests |
 | G-91 | verdwenen regelingen worden gedetecteerd maar niet opgevolgd | 11 vigerende regelingen in de DB die de DSO niet meer toont |
 | G-97 | vectorlaag herbouwt volledig en ruimt niets op | `chunk_annotatie` + `chunk_categorie` worden elke run overgedaan; chunks van verdrongen expressies blijven staan en worden pas bij het lezen weggezeefd (45% bij `gm0796`) |
-| G-94 | *deels opgelost 2026-08-08* — i2a heeft nu een delta op `laatsteWijzigingDatum` (5,6 u → ~20 min). vth heeft er nog geen; scheduling ontbreekt nog steeds | stap 4 en 5 blijven handwerk |
+| G-94 | *deels opgelost 2026-08-08* — i2a heeft nu een delta op `laatsteWijzigingDatum` (5,6 u → ~40 min). vth heeft er nog geen; scheduling ontbreekt nog steeds | stap 4 en 5 blijven handwerk |
 | — | `repliceer_p2p_naar_prod.py` dekt p2p, maar de afgeleide herbouw (subdiv, MV's) is nog losse handmatige stappen | stap 3 is één script plus drie commando's; automatiseren kan zodra de volgorde zich bewezen heeft |
 | — | de replicatie **verwijdert** niets op prod | een rij die lokaal is opgeruimd blijft daar staan; net als G-91 een bewuste keuze, geen automatisme. **Let op sinds 09-08**: stap 10 heeft lokaal 947.860 rijen uit `p2pwijziging` gehaald die op prod nog staan — dat verschil is bedoeld, niet een gat |
 | — | *opgelost 2026-08-09* — de twee koppelingen van een tekstdeel werden nooit geschreven | `tekstdeel_hoofdlijn` stond landelijk op **0 rijen** en 40% van de gebiedsaanwijzingen hing nergens aan. De API levert `hoofdlijnRefs`/`gebiedsaanwijzingRefs`; `load_divisieannotaties` las ze niet. Na fix + backfill: 4.955 en 6.965 koppelingen; wezen van 410→7 (hoofdlijn) en 1.942→196 (gebiedsaanwijzing). Zie vault G-124 |
@@ -894,7 +895,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 | Wat | Frequentie | Hoe |
 |---|---|---|
 | Volledige sync (stap 0–4, 7–9) | wekelijks | dit runbook |
-| i2a (in de sync) | elke sync, ~20 min | kan sinds de delta van 2026-08-08 gewoon meedraaien; vóór die tijd was de keuze "3 min omdat hij niets deed" of "5,6 uur" |
+| i2a (in de sync) | elke sync, ~40 min | kan sinds de delta van 2026-08-08 gewoon meedraaien; vóór die tijd was de keuze "3 min omdat hij niets deed" of "5,6 uur" |
 | Embeddings + onderwerp-as (stap 6) | elke sync | draait standaard mee in `full_sync.py` |
 | Onderwerp-as naar prod | na elke stap 6 die lokaal draaide | `2026-08-06-categorie-naar-productie.py --ja` (2 s) |
 | Doorwerkingsmeting (stap 6b) | na elke sync die omgevingsplannen of instructieregels raakte | lokaal, ná stap 6; `match/stand.py` zegt of het moet |

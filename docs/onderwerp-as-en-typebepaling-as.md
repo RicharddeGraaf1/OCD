@@ -1,6 +1,6 @@
 # Onderwerp-as en typeBepaling-as — herbouw van de categorie-indeling
 
-**Status**: fase 0 t/m 5 uitgevoerd, fase 6 (productie) open · **Datum**: 2026-08-07, bijgewerkt 2026-08-09
+**Status**: LIVE sinds 2026-08-09 · **Datum**: 2026-08-07, bijgewerkt 2026-08-09
 **Onderbouwing**: vault-analyse `Onderwerp-as en typeBepaling-as in de machinale
 categorie-indeling` (OmgevingswetKnowledgeBase), gaps G-115/G-116.
 
@@ -372,7 +372,7 @@ basis van de kopjes boven het artikel" — dat is wat er nu werkelijk gebeurt.
 Getoetst op gm0358 artikel 22.96: **milieu › geur**, typeBepaling
 **toepassingsbereik**.
 
-### Fase 6 — productie + verificatie · ~2-3 uur
+### Fase 6 — productie + verificatie · UITGEVOERD 2026-08-09
 
 `2026-08-06-categorie-naar-productie.py` uitbreiden met de twee nieuwe
 tabellen. Pariteitscontrole moet nu op `p2p.tekst_element.id` in plaats van
@@ -387,6 +387,26 @@ waaronder gm0358 artikel 22.96.
 > doorlooptijd. Die rekende met de oude pijplijn — discovery, HDBSCAN,
 > hercuratie van centroïdes, 738.000 chunks opnieuw embedden — machinerie die
 > dit ontwerp juist overbodig maakt. Bijgesteld 2026-08-09.
+
+**Kopiëren op de natuurlijke sleutel, niet op id.** De pariteitscheck sloeg
+alarm en had gelijk: lokaal en prod hebben allebei 154.725 artikelen maar een
+verschillende md5 over de id-lijst — de serials zijn in een andere volgorde
+uitgedeeld. Kopiëren op `tekst_element_id` zou de indeling aan de verkeerde
+artikelen hebben gehangen. `indeling_naar_productie.py` gaat daarom over
+`(regeling_expression, wid)`, aan beide kanten uniek voor alle 154.725
+artikelen met nul ontbrekende wids, en zoekt de FK op prod opnieuw op.
+
+Dat is een verschil met `2026-08-06-categorie-naar-productie.py`, dat wél op id
+mag kopiëren omdat `v2a.tekst_embedding` daar aantoonbaar identiek is. Wie een
+volgend script schrijft: meet het, neem het niet aan.
+
+**Uitgerold**: 9.999 paden + 148.282 artikelen, 0 wezen bij het opzoeken.
+Oude tabellen staan als `*_oud`; terugdraaien is twee renames.
+
+**Live geverifieerd** op `omgevingsdocumentenregister.nl/api/…/onderwerpen`
+voor gm0358: 549 artikelen, 505 ingedeeld, 44 niet, 229 met een typeBepaling.
+Bouwen 224 · milieu 92 (geur 35) · water 37 · geluid 36. TypeBepalingen:
+toepassingsbereik 76 · beoordelingsregel 49 · gegevens en bescheiden 25.
 
 ## 5. Wat we NIET doen
 

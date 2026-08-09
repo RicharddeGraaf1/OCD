@@ -275,7 +275,12 @@ Die datum wordt sinds 2026-08-08 opgeslagen in
 overeen, dan is de inhoud ongewijzigd en slaat de loader de XML over.
 
 **Gemeten** op gm1699 (148 regelbestanden), twee runs achter elkaar: **52,3 s →
-3,1 s**. Over 343 bronhouders geëxtrapoleerd: 5,6 uur → ~20 min.
+3,1 s**. Over 343 bronhouders geëxtrapoleerd: 5,6 uur → ~20 min — dat was
+mét de april-peildatum, waarbij niets meer wijzigde. Ná de peildatum-fix
+gemeten op 09-08: Amsterdam 9,2 s (160 van 166 overgeslagen), Den Haag 4,5 s
+(145 van 148). Landelijk dus **~40 min**: de delta slaat het meeste over, maar
+de ~1,7% die sinds april is gewijzigd wordt nu wél opgehaald — en dat is
+precies de bedoeling.
 
 ### Waarom niet dezelfde vorm als de p2p-delta
 
@@ -336,7 +341,7 @@ de run daarna is de fase kort.
 | 1 | snapshot | actualiteit vorige sync → `audit.*_hist` | seconden |
 | 2 | dedup | ALA/normwaarde-restgroepen (idempotent) | seconden |
 | 3 | **p2p** | Ow-regelingen via Presenteren (delta) | **seconden** (was ~3u door subdiv-bug) |
-| 4 | i2a | IMTR toepasbare regels, 343 bronhouders + landelijke catalogus | **~20 min** (was 3 min toen de fase niets deed, 5,6 u na de fix, ~20 min met de delta) |
+| 4 | i2a | IMTR toepasbare regels, 343 bronhouders + landelijke catalogus | **~40 min** (was 3 min toen de fase niets deed, 5,6 u na de prefixfix, ~20 min met de delta op de april-peildatum, ~40 min nu de peildatum meebeweegt) |
 | 5 | vth | KOOP-kennisgevingen + enrich + geometrie + BOPA | **~15–20 min** (van oudsher de langere) |
 | 6 | post | backfill, repair-pons, drieslag-MV's, health | ~enkele minuten |
 | 7 | embed | nieuwe chunks embedden (Ollama, resumable) | seconden bij weinig nieuw |
