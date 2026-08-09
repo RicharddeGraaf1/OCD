@@ -1,8 +1,12 @@
-"""Bouw p2p.locatie_generalisatie op uit p2p.locatie_subdiv.
+"""Bouw de generalisatietabellen voor de vector-tile-lagen.
 
-Voorberekende, vereenvoudigde geometrie voor de vector-tile-laag. Zie
-OCDviewer docs/plans/vector-tiles.md en het DDL-script
-scripts/2026-08-08-add-locatie-generalisatie.sql.
+Twee bronnen, identieke bewerking (`--bron`):
+
+    ow   p2p.locatie_subdiv  ->  p2p.locatie_generalisatie
+    wro  wro.planobject      ->  wro.planobject_generalisatie
+
+Zie OCDviewer docs/plans/vector-tiles.md en de DDL-scripts
+2026-08-08-add-locatie-generalisatie.sql / 2026-08-09-add-planobject-generalisatie.sql.
 
 Per niveau gebeuren er twee dingen:
 
@@ -58,26 +62,42 @@ NIVEAUS: dict[int, float] = {
 
 BLOKKEN_PER_CHUNK = 20_000  # ~6,5 rijen per pagina → ~130.000 rijen per chunk
 
+# Twee bronnen, identieke bewerking. Wro is niet opgedeeld (wro.planobject
+# draagt de hele vorm) en bevat naast vlakken ook lijnen — voor het
+# vereenvoudigen en de sub-pixeltoets maakt dat niet uit: een lijn die binnen
+# één pixel past is even onzichtbaar als een vlakje.
+BRONNEN: dict[str, dict[str, str]] = {
+    "ow": {
+        "bron": "p2p.locatie_subdiv",
+        "doel": "p2p.locatie_generalisatie",
+        "prefix": "idx_locatie_gen",
+    },
+    "wro": {
+        "bron": "wro.planobject",
+        "doel": "wro.planobject_generalisatie",
+        "prefix": "idx_planobject_gen",
+    },
+}
+
+
 # De indexen staan in het DDL-script, maar worden voor een herbouw weggegooid
 # en achteraf opnieuw gelegd: een GIST-index bijhouden tijdens miljoenen
-# inserts is duurder dan hem in één keer bouwen.
-# Per niveau alleen zijn eigen partiele GIST-index, zodat het herbouwen van
-# een enkel niveau de indexen van de andere niveaus niet aanraakt.
-def _index_ddl(niveau: int) -> tuple[str, str]:
-    naam = f"idx_locatie_gen_geom_n{niveau}"
+# inserts is duurder dan hem in één keer bouwen. Per niveau alleen zijn eigen
+# partiele GIST-index, zodat het herbouwen van één niveau de indexen van de
+# andere niveaus niet aanraakt.
+def _index_ddl(cfg: dict[str, str], niveau: int) -> tuple[str, str]:
+    naam = f"{cfg['prefix']}_geom_n{niveau}"
     return naam, (
-        f"CREATE INDEX {naam} ON p2p.locatie_generalisatie "
+        f"CREATE INDEX {naam} ON {cfg['doel']} "
         f"USING gist (geometrie) WHERE niveau = {niveau}"
     )
 
 
 # De koppeling tegel-feature -> object staat los van het niveau en wordt alleen
 # herbouwd als alle niveaus opnieuw gevuld worden.
-ID_INDEX = (
-    "idx_locatie_gen_id",
-    "CREATE INDEX idx_locatie_gen_id ON p2p.locatie_generalisatie "
-    "(identificatie, niveau)",
-)
+def _id_index(cfg: dict[str, str]) -> tuple[str, str]:
+    naam = f"{cfg['prefix']}_id"
+    return naam, f"CREATE INDEX {naam} ON {cfg['doel']} (identificatie, niveau)"
 
 # Vereenvoudig, gooi weg wat binnen een pixel past, en leg de vingerafdruk van
 # de bron vast. De sub-pixeltoets gebruikt de bounding box (niet de
@@ -93,13 +113,13 @@ ID_INDEX = (
 # (ST_IsValid + ST_MakeValid per rij) verdubbelde de bouwtijd — 0,8 naar 1,7 min
 # op 120.000 bronpagina's — voor nul verschil in het resultaat.
 INSERT_SQL = """
-INSERT INTO p2p.locatie_generalisatie (identificatie, niveau, geometrie, bron_hash)
+INSERT INTO {doel} (identificatie, niveau, geometrie, bron_hash)
 SELECT identificatie, %(niveau)s, g, bron_hash
   FROM (
     SELECT identificatie,
            ST_SimplifyPreserveTopology(geometrie, %(tol)s) AS g,
            md5(ST_AsBinary(geometrie))::uuid               AS bron_hash
-      FROM p2p.locatie_subdiv
+      FROM {bron}
      WHERE ctid >= %(van)s::tid AND ctid < %(tot)s::tid
        AND NOT (ST_XMax(geometrie) - ST_XMin(geometrie) < %(tol)s
             AND ST_YMax(geometrie) - ST_YMin(geometrie) < %(tol)s)
@@ -108,13 +128,16 @@ SELECT identificatie, %(niveau)s, g, bron_hash
 """
 
 
-def _paginas(conn) -> int:
+def _paginas(conn, cfg: dict[str, str]) -> int:
     with conn.cursor() as cur:
-        cur.execute("SELECT relpages FROM pg_class WHERE oid = 'p2p.locatie_subdiv'::regclass")
+        cur.execute("SELECT relpages FROM pg_class WHERE oid = %s::regclass", (cfg["bron"],))
         return cur.fetchone()["relpages"]
 
 
-def _bouw_niveau(niveau: int, tol: float, laatste_blok: int, vanaf: int, workers: int) -> None:
+def _bouw_niveau(
+    cfg: dict[str, str], niveau: int, tol: float, laatste_blok: int, vanaf: int, workers: int
+) -> None:
+    sql = INSERT_SQL.format(**cfg)
     chunks = [
         (b, min(b + BLOKKEN_PER_CHUNK, laatste_blok + 1))
         for b in range(vanaf, laatste_blok + 1, BLOKKEN_PER_CHUNK)
@@ -139,7 +162,7 @@ def _bouw_niveau(niveau: int, tol: float, laatste_blok: int, vanaf: int, workers
         conn = verbinding()
         with conn.cursor() as cur:
             cur.execute(
-                INSERT_SQL,
+                sql,
                 {"niveau": niveau, "tol": tol, "van": f"({van},0)", "tot": f"({tot},0)"},
             )
             n = cur.rowcount
@@ -165,25 +188,31 @@ def _bouw_niveau(niveau: int, tol: float, laatste_blok: int, vanaf: int, workers
     )
 
 
-def _te_bouwen_indexen(niveaus: dict[int, float], alles: bool) -> list[tuple[str, str]]:
-    lijst = [_index_ddl(n) for n in niveaus]
+def _te_bouwen_indexen(
+    cfg: dict[str, str], niveaus: dict[int, float], alles: bool
+) -> list[tuple[str, str]]:
+    lijst = [_index_ddl(cfg, n) for n in niveaus]
     if alles:
-        lijst.append(ID_INDEX)
+        lijst.append(_id_index(cfg))
     return lijst
 
 
-def _zonder_indexen(conn, indexen: list[tuple[str, str]]) -> None:
+def _schema(cfg: dict[str, str]) -> str:
+    return cfg["doel"].split(".")[0]
+
+
+def _zonder_indexen(conn, cfg: dict[str, str], indexen: list[tuple[str, str]]) -> None:
     with conn.cursor() as cur:
         for naam, _ in indexen:
-            cur.execute(f"DROP INDEX IF EXISTS p2p.{naam}")
+            cur.execute(f"DROP INDEX IF EXISTS {_schema(cfg)}.{naam}")
     conn.commit()
 
 
-def _met_indexen(conn, indexen: list[tuple[str, str]]) -> None:
+def _met_indexen(conn, cfg: dict[str, str], indexen: list[tuple[str, str]]) -> None:
     for naam, ddl in indexen:
         start = time.monotonic()
         with conn.cursor() as cur:
-            cur.execute(f"DROP INDEX IF EXISTS p2p.{naam}")
+            cur.execute(f"DROP INDEX IF EXISTS {_schema(cfg)}.{naam}")
             cur.execute(ddl)
         conn.commit()
         console.print(f"  index {naam} in {time.monotonic() - start:.0f} s")
@@ -204,54 +233,62 @@ def _met_indexen(conn, indexen: list[tuple[str, str]]) -> None:
     help="Niet eerst leegmaken (alleen zinvol samen met --vanaf-blok).",
 )
 @click.option("--workers", type=int, default=6, help="Parallelle verbindingen.")
+@click.option(
+    "--bron",
+    type=click.Choice(["ow", "wro"]),
+    default="ow",
+    help="ow = p2p.locatie_subdiv, wro = wro.planobject.",
+)
 def main(
     niveau: int | None,
     steekproef: int | None,
     vanaf_blok: int,
     behoud: bool,
     workers: int,
+    bron: str,
 ) -> None:
+    cfg = BRONNEN[bron]
     conn = get_conn()
     try:
-        paginas = _paginas(conn)
+        paginas = _paginas(conn, cfg)
         laatste_blok = (steekproef or paginas) - 1
         niveaus = {niveau: NIVEAUS[niveau]} if niveau else NIVEAUS
 
         console.print(
-            f"[bold]p2p.locatie_subdiv[/bold]: {paginas:,} pagina's"
+            f"[bold]{cfg['bron']}[/bold]: {paginas:,} pagina's"
             + (f" — steekproef tot blok {laatste_blok:,}" if steekproef else "")
         )
 
         alles = niveau is None
-        indexen = _te_bouwen_indexen(niveaus, alles=alles)
-        _zonder_indexen(conn, indexen)
+        indexen = _te_bouwen_indexen(cfg, niveaus, alles=alles)
+        _zonder_indexen(conn, cfg, indexen)
 
         # Bij een volledige herbouw TRUNCATE in plaats van DELETE: 7 miljoen
         # dode tuples laten de tabel met 2 GB opzwellen tot de autovacuum
         # bijtrekt. Bij een enkel niveau kan dat niet en is DELETE de prijs.
         if alles and not behoud:
             with conn.cursor() as cur:
-                cur.execute("TRUNCATE p2p.locatie_generalisatie")
+                cur.execute(f"TRUNCATE {cfg['doel']}")
             conn.commit()
             console.print("  tabel geleegd (TRUNCATE)")
 
         for n, tol in niveaus.items():
             if not behoud and not alles:
                 with conn.cursor() as cur:
-                    cur.execute("DELETE FROM p2p.locatie_generalisatie WHERE niveau = %s", (n,))
+                    cur.execute(f"DELETE FROM {cfg['doel']} WHERE niveau = %s", (n,))
                     console.print(f"  {cur.rowcount:,} bestaande rijen op niveau {n} verwijderd")
                 conn.commit()
-            _bouw_niveau(n, tol, laatste_blok, vanaf_blok, workers)
+            _bouw_niveau(cfg, n, tol, laatste_blok, vanaf_blok, workers)
 
         console.print("\n[bold]Indexen opnieuw bouwen[/bold]")
-        _met_indexen(conn, indexen)
+        _met_indexen(conn, cfg, indexen)
 
         with conn.cursor() as cur:
-            cur.execute("ANALYZE p2p.locatie_generalisatie")
+            cur.execute(f"ANALYZE {cfg['doel']}")
             cur.execute(
-                """SELECT niveau, count(*) AS n,
-                          sum(ST_NPoints(geometrie)) AS punten
-                     FROM p2p.locatie_generalisatie GROUP BY niveau ORDER BY niveau"""
+                f"""SELECT niveau, count(*) AS n,
+                           sum(ST_NPoints(geometrie)) AS punten
+                      FROM {cfg['doel']} GROUP BY niveau ORDER BY niveau"""
             )
             for r in cur.fetchall():
                 console.print(
@@ -259,7 +296,7 @@ def main(
                     f"{r['punten']:,} punten"
                 )
             cur.execute(
-                "SELECT pg_size_pretty(pg_total_relation_size('p2p.locatie_generalisatie')) AS s"
+                f"SELECT pg_size_pretty(pg_total_relation_size('{cfg['doel']}')) AS s"
             )
             console.print(f"[bold]omvang[/bold]: {cur.fetchone()['s']}")
         conn.commit()

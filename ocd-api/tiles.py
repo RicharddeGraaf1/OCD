@@ -69,6 +69,15 @@ LAGEN: dict[str, dict] = {
         "generalisatie": "p2p.locatie_generalisatie",
         "sleutel": "identificatie",
     },
+    # Wro-planobjecten (bestemmingen, bouwvlakken, maatvoering, figuren).
+    # Anders dan de Ow-kant: de bron is niet opgedeeld, en ~5% van de objecten
+    # is een lijn in plaats van een vlak — de kaartlaag moet die als lijn
+    # tekenen, want een lijn heeft geen vulling.
+    "planobjecten": {
+        "bron": "wro.planobject",
+        "generalisatie": "wro.planobject_generalisatie",
+        "sleutel": "identificatie",
+    },
 }
 
 

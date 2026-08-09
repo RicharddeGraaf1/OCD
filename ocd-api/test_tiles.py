@@ -107,6 +107,31 @@ def test_hoge_zoom_komt_uit_de_brontabel():
     assert r.headers["X-Tegel-Bron"] == "subdiv"
 
 
+def test_wro_laag_levert_planobjecten():
+    x, y = _tegel_van(UTR_X, UTR_Y, 12)
+    r = client.get(f"/v1/tiles/planobjecten/12/{x}/{y}.mvt")
+    assert r.status_code == 200
+    assert r.headers["X-Tegel-Bron"] == "subdiv"   # z11+ = rechtstreeks uit wro.planobject
+    assert b"planobjecten" in r.content
+
+
+def test_wro_laag_gebruikt_ook_de_generalisatie():
+    x, y = _tegel_van(UTR_X, UTR_Y, 8)
+    r = client.get(f"/v1/tiles/planobjecten/8/{x}/{y}.mvt")
+    assert r.status_code == 200
+    assert r.headers["X-Tegel-Bron"] == "generalisatie-n8"
+
+
+def test_beide_lagen_zijn_los_van_elkaar():
+    """Ow en Wro delen de piramide maar niet hun inhoud — een tegel van de ene
+    laag mag nooit features van de andere bevatten."""
+    x, y = _tegel_van(UTR_X, UTR_Y, 12)
+    ow = client.get(f"/v1/tiles/locaties/12/{x}/{y}.mvt").content
+    wro = client.get(f"/v1/tiles/planobjecten/12/{x}/{y}.mvt").content
+    assert b"locaties" in ow and b"planobjecten" not in ow
+    assert b"planobjecten" in wro and b"locaties" not in wro
+
+
 def test_leeg_gebied_geeft_een_lege_tegel_geen_404():
     """Noordzee ver ten noordwesten van de kust. Voor een tegelbron is 'hier is
     niets' een geldig antwoord — een 404 zou OpenLayers als laadfout tonen.
