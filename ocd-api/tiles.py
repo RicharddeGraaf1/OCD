@@ -37,7 +37,14 @@ TEGEL_PX = 256
 MAX_ZOOM = 14                # 15 niveaus: z0 t/m z14
 
 MVT_EXTENT = 4096            # rasterresolutie binnen de tegel
-MVT_BUFFER = 64              # px-marge, tegen randartefacten bij lijnen/labels
+
+# Geen buffer. De gebruikelijke 64 laat naburige tegels elkaar overlappen zodat
+# lijnen en labels niet aan de rand afbreken -- maar deze laag tekent
+# half-doorzichtige vlakken zonder contour, en dan wordt elke overlap twee keer
+# ingekleurd: een donkere band langs elke tegelrand, precies het raster dat je
+# niet wilt zien. Bij buffer 0 sluiten de vlakken exact op elkaar aan.
+# Komen hier ooit lijnen of labels bij, dan moet dit terug omhoog.
+MVT_BUFFER = 0
 
 MEDIATYPE = "application/vnd.mapbox-vector-tile"
 
