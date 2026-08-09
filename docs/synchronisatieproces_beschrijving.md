@@ -381,8 +381,17 @@ zit een reguliere incrementele sync ruim onder het uur, gedomineerd door vth.
    `laatsteWijzigingDatum` die de STTR *op 10-04-2026* teruggaf, dan is dat een
    waarheidsgetrouwe uitspraak over wat er in de DB staat, en haalt de volgende
    run alleen de ~1,7% gewijzigde bestanden op: ~1.000 lijst-calls in plaats van
-   5,6 uur. Bewust nog niet gedaan — het claimt dekking voor bestanden waarvan
-   we de download niet individueel geverifieerd hebben.
+   5,6 uur.
+
+   Dekking is per bestand na te meten en dat is gebeurd: **59.598 van de 59.646
+   hebben inhoud** in `dmn_element` of `uitvoeringsregel` (99,92%), 48 hebben
+   niets. Zet de backfill onder die voorwaarde, dan blijven die 48 zonder
+   watermerk en worden ze de volgende run alsnog opgehaald.
+
+   Meet die dekking over **beide** tabellen. Alleen `dmn_element` tellen geeft
+   22.599 schijnbaar lege bestanden: *Maatregelen*-bestanden bevatten per
+   ontwerp geen `<semantic:decision>` of `<semantic:inputData>`, alleen
+   uitvoeringsregels.
 
 ## Bekende zwakke plekken (nog niet opgelost)
 
