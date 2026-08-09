@@ -282,6 +282,18 @@ telt via `juridische_regel` en geeft dan misleidende cijfers.
 
 Alleen als stap 1 nieuwe kennisgevingen laadde.
 
+> **Een dag die tijdens zijn eigen looptijd op `ok` komt te staan is géén gat**
+> — nagemeten 2026-08-09. De KOOP-run van 07-08 sloot die dag af om **23:55
+> UTC op 07-08 zelf**, vijf minuten voor middernacht, wat de vraag opriep of er
+> daarna nog publicaties waren gemist. Herdraaid met `--force`: 1.053 upserts,
+> en het dagtotaal bleef **1.053**. KOOP publiceert eerder op de dag, dus een
+> late avondrun heeft de dag compleet.
+>
+> Twee dingen om te onthouden. De loader slaat een dag met `status='ok'`
+> standaard over, dus voor zo'n controle heb je **`--force`** nodig. En
+> `--force` **overschrijft de `etl_run`-rij**: het oorspronkelijke tijdstip is
+> daarna weg. Noteer dat vóór je hem draait als je de historie wilt bewaren.
+
 ```powershell
 powershell -File scripts/refresh-koop-to-prod.ps1 -Push -Refresh -Verify -ProdUrl "<PROD_DB_URL>"
 ```
