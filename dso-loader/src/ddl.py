@@ -431,6 +431,22 @@ CREATE TABLE IF NOT EXISTS p2p.tekstdeel_hoofdlijn (
     PRIMARY KEY (tekstdeel_id, hoofdlijn_id)
 );
 
+-- Gebiedsaanwijzing op een tekstdeel: de vrijetekst-tegenhanger van
+-- p2p.juridische_regel_gebiedsaanwijzing. In een omgevingsvisie zijn er geen
+-- juridische regels, dus hangt de gebiedsaanwijzing aan het tekstdeel. Deze
+-- tabel ontbrak tot 2026-08-09, waardoor 1.942 van de 4.828 gebiedsaanwijzingen
+-- (40%) nergens aan leken te hangen — zie vault gaps.md G-124.
+CREATE TABLE IF NOT EXISTS p2p.tekstdeel_gebiedsaanwijzing (
+    tekstdeel_id          TEXT NOT NULL REFERENCES p2p.tekstdeel(identificatie) ON DELETE CASCADE,
+    gebiedsaanwijzing_id  TEXT NOT NULL REFERENCES p2p.gebiedsaanwijzing(identificatie) ON DELETE CASCADE,
+    PRIMARY KEY (tekstdeel_id, gebiedsaanwijzing_id)
+);
+
+CREATE INDEX IF NOT EXISTS tekstdeel_ga_ga_idx
+    ON p2p.tekstdeel_gebiedsaanwijzing (gebiedsaanwijzing_id);
+CREATE INDEX IF NOT EXISTS tekstdeel_hoofdlijn_hl_idx
+    ON p2p.tekstdeel_hoofdlijn (hoofdlijn_id);
+
 CREATE TABLE IF NOT EXISTS p2p.pons (
     identificatie       TEXT PRIMARY KEY,
     locatie_id          TEXT NOT NULL REFERENCES p2p.locatie(identificatie),

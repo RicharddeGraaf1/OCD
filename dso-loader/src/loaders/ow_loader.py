@@ -546,10 +546,27 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
             console.print(f"      [green]{len(normen)} omgevingsnormen + {nw_count} normwaarden geladen[/green]")
 
         # --- OW Tekstdelen (vrijetekst-instrumenten) ---
+        # --- OW Hoofdlijnen ---
+        # Móet vóór de tekstdelen: die schrijven `tekstdeel_hoofdlijn`, en die
+        # tabel heeft een FK hierheen. Tot 2026-08-09 stond dit blok eronder,
+        # zodat elke relatie op een niet-bestaande hoofdlijn wees.
+        if "OW-bestanden/hoofdlijnen.xml" in z.namelist():
+            hoofdlijnen = parse_hoofdlijnen(z.read("OW-bestanden/hoofdlijnen.xml"))
+            for hl in hoofdlijnen:
+                cur.execute(
+                    """INSERT INTO p2p.hoofdlijn (identificatie, soort, naam)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (identificatie) DO NOTHING""",
+                    (hl["identificatie"], hl["soort"], hl["naam"]),
+                )
+            console.print(f"      [green]{len(hoofdlijnen)} hoofdlijnen geladen[/green]")
+
         if "OW-bestanden/tekstdelen.xml" in z.namelist():
             tekstdelen = parse_tekstdelen(z.read("OW-bestanden/tekstdelen.xml"))
             td_count = 0
             hl_rel_count = 0
+            ga_rel_count = 0
+            zonder_doel = 0
             for td in tekstdelen:
                 loc_id = td.get("locatie_id")
                 if loc_id:
@@ -578,33 +595,48 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                     td_count += 1
                 except Exception:
                     conn.rollback()
+                # De hoofdlijn- en gebiedsaanwijzing-relaties: `WHERE EXISTS` in
+                # plaats van een kale INSERT met try/except. Dat oude patroon
+                # deed `conn.rollback()` bij een FK-schending, wat niet alleen
+                # de relatie maar de hele lopende transactie ongedaan maakte —
+                # inclusief de zojuist geladen tekstdelen. Nu wordt een
+                # verwijzing zonder doel netjes overgeslagen en geteld.
                 for hl_ref in td.get("hoofdlijn_refs", []):
-                    try:
-                        cur.execute(
-                            """INSERT INTO p2p.tekstdeel_hoofdlijn
+                    cur.execute(
+                        """INSERT INTO p2p.tekstdeel_hoofdlijn
                                (tekstdeel_id, hoofdlijn_id)
-                               VALUES (%s, %s) ON CONFLICT DO NOTHING""",
-                            (td["identificatie"], hl_ref),
-                        )
+                           SELECT %s, %s
+                            WHERE EXISTS (SELECT 1 FROM p2p.hoofdlijn
+                                           WHERE identificatie = %s)
+                           ON CONFLICT DO NOTHING""",
+                        (td["identificatie"], hl_ref, hl_ref),
+                    )
+                    if cur.rowcount:
                         hl_rel_count += 1
-                    except Exception:
-                        conn.rollback()
+                    else:
+                        zonder_doel += 1
+                for ga_ref in td.get("gebiedsaanwijzing_refs", []):
+                    cur.execute(
+                        """INSERT INTO p2p.tekstdeel_gebiedsaanwijzing
+                               (tekstdeel_id, gebiedsaanwijzing_id)
+                           SELECT %s, %s
+                            WHERE EXISTS (SELECT 1 FROM p2p.gebiedsaanwijzing
+                                           WHERE identificatie = %s)
+                           ON CONFLICT DO NOTHING""",
+                        (td["identificatie"], ga_ref, ga_ref),
+                    )
+                    if cur.rowcount:
+                        ga_rel_count += 1
+                    else:
+                        zonder_doel += 1
             msg = f"      [green]{td_count} tekstdelen geladen[/green]"
             if hl_rel_count:
                 msg += f" + {hl_rel_count} hoofdlijn-relaties"
+            if ga_rel_count:
+                msg += f" + {ga_rel_count} gebiedsaanwijzing-relaties"
+            if zonder_doel:
+                msg += f" ([yellow]{zonder_doel} verwijzingen zonder doel[/yellow])"
             console.print(msg)
-
-        # --- OW Hoofdlijnen ---
-        if "OW-bestanden/hoofdlijnen.xml" in z.namelist():
-            hoofdlijnen = parse_hoofdlijnen(z.read("OW-bestanden/hoofdlijnen.xml"))
-            for hl in hoofdlijnen:
-                cur.execute(
-                    """INSERT INTO p2p.hoofdlijn (identificatie, soort, naam)
-                       VALUES (%s, %s, %s)
-                       ON CONFLICT (identificatie) DO NOTHING""",
-                    (hl["identificatie"], hl["soort"], hl["naam"]),
-                )
-            console.print(f"      [green]{len(hoofdlijnen)} hoofdlijnen geladen[/green]")
 
         # --- GIO's (Geo-InformatieObjecten with GML geometry) ---
         # Step 1: Build basisgeo_id → GML string index from all GIO files

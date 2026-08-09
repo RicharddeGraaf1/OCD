@@ -398,6 +398,7 @@ def parse_regelteksten(xml_bytes: bytes) -> list[dict]:
 
 
 VT_NS = "http://www.geostandaarden.nl/imow/vrijetekst"
+GA_NS = NS["ga"]
 
 
 def parse_tekstdelen(xml_bytes: bytes) -> list[dict]:
@@ -439,6 +440,18 @@ def parse_tekstdelen(xml_bytes: bytes) -> list[dict]:
             if href:
                 hoofdlijn_refs.append(href)
 
+        # `<vt:gebiedsaanwijzing><ga:GebiedsaanwijzingRef>` — let op de andere
+        # namespace: de ref staat in de ga:-ruimte, de wrapper in vt:. Deze
+        # verwijzing werd tot 2026-08-09 niet uitgelezen, waardoor 40% van de
+        # gebiedsaanwijzingen nergens aan hing (vault gaps.md G-124). Het is de
+        # vrijetekst-tegenhanger van de gebiedsaanwijzing op een juridische
+        # regel: in een omgevingsvisie zijn er geen regels om aan te hangen.
+        gebiedsaanwijzing_refs = []
+        for ga_ref in td.findall(f"{{{VT_NS}}}gebiedsaanwijzing/{{{GA_NS}}}GebiedsaanwijzingRef"):
+            href = ga_ref.get(f"{{{NS['xlink']}}}href")
+            if href:
+                gebiedsaanwijzing_refs.append(href)
+
         if identificatie and divisie_ref:
             results.append({
                 "identificatie": identificatie,
@@ -448,6 +461,7 @@ def parse_tekstdelen(xml_bytes: bytes) -> list[dict]:
                 "themas": themas,                          # nieuwe naam, list[str]
                 "thema": themas[0] if themas else None,    # backwards-compat (eerste)
                 "hoofdlijn_refs": hoofdlijn_refs,
+                "gebiedsaanwijzing_refs": gebiedsaanwijzing_refs,
             })
 
     return results

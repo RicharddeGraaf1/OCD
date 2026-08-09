@@ -706,7 +706,9 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
                 params={"locatieSelectie": "primair"})
 
     stats = {"tekstdelen": 0, "locaties": 0, "geometrieen": 0, "ga": 0,
-             "hoofdlijnen": 0, "kaarten": 0, "kaartlagen": 0}
+             "hoofdlijnen": 0, "kaarten": 0, "kaartlagen": 0,
+             "td_hoofdlijn": 0, "td_gebiedsaanwijzing": 0,
+             "td_ref_zonder_doel": 0}
 
     with conn.cursor() as cur:
         # ── Locaties ──
@@ -812,6 +814,40 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
                      ga_refs[0] if ga_refs else None),
                 )
                 stats["kaartlagen"] += 1
+
+        # ── Koppelingen tekstdeel → hoofdlijn / gebiedsaanwijzing ──
+        #
+        # Bewust hier, ná alle objecten: beide junctions hebben een FK naar een
+        # tabel die hierboven pas gevuld wordt. Tot 2026-08-09 werden ze
+        # helemaal niet geschreven, hoewel de API ze wel levert
+        # (`hoofdlijnRefs`, `gebiedsaanwijzingRefs` op elk tekstdeel). Gevolg:
+        # `tekstdeel_hoofdlijn` stond landelijk op 0 rijen en 40% van de
+        # gebiedsaanwijzingen leek nergens aan te hangen — vault gaps.md G-124.
+        #
+        # De `WHERE EXISTS` slaat een verwijzing over waarvan het doel niet in
+        # deze respons zat, in plaats van de hele transactie te laten klappen.
+        # Overgeslagen refs worden geteld, niet verzwegen.
+        for td in data.get("tekstdelen", []):
+            for hl_ref in td.get("hoofdlijnRefs", []):
+                cur.execute(
+                    """INSERT INTO p2p.tekstdeel_hoofdlijn (tekstdeel_id, hoofdlijn_id)
+                       SELECT %s, %s
+                        WHERE EXISTS (SELECT 1 FROM p2p.hoofdlijn WHERE identificatie = %s)
+                       ON CONFLICT DO NOTHING""",
+                    (td["identificatie"], hl_ref, hl_ref),
+                )
+                stats["td_hoofdlijn" if cur.rowcount else "td_ref_zonder_doel"] += 1
+            for ga_ref in td.get("gebiedsaanwijzingRefs", []):
+                cur.execute(
+                    """INSERT INTO p2p.tekstdeel_gebiedsaanwijzing
+                           (tekstdeel_id, gebiedsaanwijzing_id)
+                       SELECT %s, %s
+                        WHERE EXISTS (SELECT 1 FROM p2p.gebiedsaanwijzing
+                                       WHERE identificatie = %s)
+                       ON CONFLICT DO NOTHING""",
+                    (td["identificatie"], ga_ref, ga_ref),
+                )
+                stats["td_gebiedsaanwijzing" if cur.rowcount else "td_ref_zonder_doel"] += 1
 
     conn.commit()
     return stats
