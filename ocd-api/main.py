@@ -1,3 +1,4 @@
+import collections
 import logging
 import os
 import re
@@ -3871,15 +3872,22 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
             for row in cur.fetchall()
         ]
 
-        # Wro-bestemmingen
+        # Wro-bestemmingen. `planobject_ids` is de sleutel waarmee de
+        # vector-tile-laag zijn features aan dit object koppelt — hetzelfde
+        # patroon als `locatie_ids` aan de Ow-kant. Zonder die lijst weet de
+        # kaart niet welke vlakken bij welke bestemming horen en blijft de
+        # Wro-laag onzichtbaar. Groeperen op de kolommen die het object
+        # identificeren; één bestemming beslaat vaak tientallen planobjecten.
         cur.execute(
             f"""
-            SELECT DISTINCT po.object_type, po.naam, po.bestemmingshoofdgroep,
-                   ri.naam AS plan
+            SELECT po.object_type, po.naam, po.bestemmingshoofdgroep,
+                   ri.naam AS plan,
+                   ARRAY_AGG(DISTINCT po.identificatie) AS planobject_ids
             FROM wro.planobject po
             JOIN wro.ruimtelijk_instrument ri ON ri.idn = po.instrument_idn
             WHERE ST_Intersects(po.geometrie, {point})
               AND ri.pons_status = 'actief'
+            GROUP BY po.object_type, po.naam, po.bestemmingshoofdgroep, ri.naam
             ORDER BY ri.naam, po.object_type
             """,
             (x, y),
@@ -4291,141 +4299,110 @@ def viewer_gio(expression: str):
 
 @app.get("/v1/viewer/regeling/{expression:path}/onderwerpen", dependencies=[Depends(verify_key)])
 def viewer_onderwerpen(expression: str):
-    """Waar gaat dit document over — de onderwerp-as uit de vector-laag.
+    """Waar gaat dit document over, en wat voor bepalingen staan erin.
 
-    Achtergrond en metingen: `omgevingsdocumentenregister.nl/docs/onderwerpen-plan.md`.
+    Twee onafhankelijke assen, en dat onderscheid is de hele reden dat dit
+    endpoint herbouwd is:
 
-    Drie dingen zitten hier bewust in:
+      categorie / subcategorie  waar gaat de bepaling OVER  (milieu > geur)
+      type_bepaling             wat voor bepaling het IS    (toepassingsbereik)
 
-    1. KOPPELEN OP WERK, NIET OP EXPRESSIE. `v2a.tekst_embedding` draagt de
-       expressie van het moment waarop de vector-laag draaide; die loopt achter
-       op `p2p.regeling`. Voor Arnhem staat er `…@2026-03-05` terwijl het
-       register `…@2026-06-26` toont — joinen op expressie geeft daar NUL
-       onderwerpen, joinen op werk 1.267.
+    Tot 2026-08 zat dat op één as gepropt. Gevolg: "toepassingsbereik" werd een
+    subcategorie onder de naam *Tanken en vloeibare brandstoffen*, en artikel
+    22.96 van gm0358 (geur van landbouwhuisdieren en paarden) stond daarin —
+    niet omdat het over brandstof ging maar omdat het een toepassingsbereik-
+    bepaling is. Zie `OCD/docs/onderwerp-as-en-typebepaling-as.md`.
 
-    2. `split_part(…, '/nld@', 1)` en niet `LIKE …/nld@%`. Dezelfde kolom
-       bevat twee vormen: voor Arnhem 6.420 chunks onder het kale werk én
-       1.722 onder de expressie. Een LIKE op de expressie-vorm telt stilzwijgend
-       de helft niet mee. Er ligt een index op precies deze uitdrukking
-       (`tekst_embedding_werk_idx`).
+    Drie dingen die deze versie eenvoudiger maken dan de vorige:
 
-    3. TWEE NIVEAUS. Toewijzingen gaan naar één categorie: soms een IMOW-thema,
-       soms een gecureerde subcategorie. De recursieve CTE geeft de wortel erbij,
-       zodat het antwoord beide lagen draagt — hoofdcategorie met daaronder de
-       subcategorieën die in dít document voorkomen. Het hoofdniveau is de UNIE
-       van zijn eigen toewijzingen en die van zijn subcategorieën, niet de som:
-       hetzelfde tekst-element kan langs twee wegen binnenkomen.
+    1. EEN OPZOEKING, GEEN MODEL. `v2a.artikel_indeling` is gevuld door een
+       lookup op het genormaliseerde opschriftpad (categorie) en op het
+       artikelopschrift (type_bepaling). Geen embeddings, dus ook geen
+       argmax-muntworp: bij de vorige opzet had 45% van de toewijzingen een
+       marge onder 0,01 tussen nummer 1 en nummer 2.
 
-    4. ALLEEN REGELS, GEEN TOELICHTING. `kop_pad` met "toelicht" erin valt af.
-       Dat scheelt fors en het scheelt terecht: over het hele Arnhemse plan
-       zakt het van 1.267 naar 771 ingedeelde onderdelen, en bij `water` van 41
-       naar 3 — dat onderwerp stond daar dus vrijwel volledig in de
-       artikelsgewijze toelichting. Wie vraagt "waar staat hierover een regel"
-       heeft niets aan een treffer in een toelichting.
+    2. GEEN WERK/EXPRESSIE-KUNSTGREEP MEER. De oude versie moest op het WERK
+       joinen omdat de vector-laag achterliep op `p2p.regeling`, met een
+       wId-zeef om te corrigeren voor elementen die intussen verdwenen waren.
+       Deze tabel hangt rechtstreeks aan `p2p.tekst_element`, dus de expressie
+       klopt per definitie.
 
-    Geen onderwerpen voor Wro-plannen: daar is de vector-laag niet over gedraaid
-    (0 van 39.594). Dat is iets anders dan "geen onderwerpen", en de frontend
-    hoort dat onderscheid te maken.
+    3. NULL = NIET INGEDEELD, en dat wordt geteld en getoond. Geen categorie is
+       een geldig antwoord; een gok die als feit op het scherm komt niet
+       (gebruikersbesluit 2026-08-09). Vandaar `niet_ingedeeld` als eersterangs
+       veld in het antwoord en niet als stil verschil tussen twee tellingen.
+
+    Wro-plannen zitten niet in deze tabel: die staan in het `wro`-schema en
+    hebben hun eigen structuur. Leeg antwoord betekent daar "nog niet
+    ingedeeld", niet "geen onderwerpen".
     """
-    werk = expression if expression.startswith("/") else "/" + expression
-    werk = werk.split("/nld@")[0]
+    expr = expression if expression.startswith("/") else "/" + expression
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            WITH RECURSIVE wortel AS (
-              SELECT categorie_id, naam AS root
-              FROM v2a.categorie WHERE parent_id IS NULL
-              UNION ALL
-              SELECT c.categorie_id, w.root
-              FROM v2a.categorie c JOIN wortel w ON c.parent_id = w.categorie_id
-            )
-            SELECT w.root AS hoofd,
-                   k.naam  AS toegewezen,
-                   (k.parent_id IS NULL) AS is_hoofd,
-                   count(DISTINCT ch.wid) AS n_elementen,
-                   array_agg(DISTINCT ch.wid) AS wids
-            FROM v2a.tekst_embedding ch
-            JOIN v2a.chunk_categorie cc ON cc.chunk_id = ch.id
-            JOIN wortel w ON w.categorie_id = cc.categorie_id
-            JOIN v2a.categorie k ON k.categorie_id = cc.categorie_id
-            WHERE split_part(ch.regeling_expression, '/nld@', 1) = %s
-              AND ch.wid IS NOT NULL
-              AND coalesce(ch.kop_pad, '') NOT ILIKE '%%toelicht%%'
-            GROUP BY w.root, k.naam, k.parent_id IS NULL
-            ORDER BY 4 DESC
+            SELECT categorie, subcategorie, type_bepaling, wid
+            FROM v2a.artikel_indeling
+            WHERE regeling_expression = %s AND wid IS NOT NULL
             """,
-            (werk,),
+            (expr,),
         )
         rijen = cur.fetchall()
 
-        # De wId's van DIT document ophalen — noemer én zeef in één query.
-        #
-        # Zeef, want de vector-laag draait op het WERK en dus soms op een oudere
-        # versie van het document. Een wId die daar geclassificeerd is hoeft in
-        # de versie op het scherm niet meer te bestaan: bij gm0796 bestaat 45%
-        # van de geclassificeerde wId's niet in de getoonde expressie. Zonder
-        # deze zeef belooft de knop "Geluidbeperkende maatregelen 29" terwijl de
-        # boom er twee kan aanwijzen. Elementen die tussen versies ongewijzigd
-        # bleven houden hun wId, dus de tolerantie voor de achterstand blijft:
-        # alleen wat écht verdwenen is valt af.
-        #
-        # Noemer op de EXPRESSIE en niet op het werk: anders tel je alle versies
-        # bij elkaar op (Arnhem: 3.161 in plaats van 1.597) en zegt de dekking
-        # niets over het document op het scherm. Scheelt bovendien een seq scan
-        # over 687k rijen — hier pakt idx_tekst_element_regeling.
-        cur.execute(
-            "SELECT wid, (inhoud IS NOT NULL) AS heeft_inhoud FROM p2p.tekst_element "
-            "WHERE regeling_expression = %s",
-            (expression if expression.startswith("/") else "/" + expression,),
-        )
-        elementen = cur.fetchall()
-        in_document = {r["wid"] for r in elementen if r["wid"]}
-        met_inhoud = sum(1 for r in elementen if r["heeft_inhoud"])
+    # Categorie -> subcategorie, allebei op wId-verzamelingen zodat de
+    # frontend knopen kan aanwijzen. Een artikel telt in zijn categorie ook mee
+    # als het geen subcategorie heeft.
+    cats: dict[str, dict] = {}
+    types: dict[str, set] = {}
+    niet_ingedeeld: set[str] = set()
 
-        # Twee niveaus opbouwen. De toewijzing zit op één categorie — soms een
-        # hoofdcategorie, soms een subcategorie — en de recursieve CTE geeft er
-        # de wortel bij. Het hoofdniveau is dus de UNIE van zijn eigen directe
-        # toewijzingen en die van zijn subcategorieën; niet de som, want
-        # hetzelfde tekst-element kan via twee wegen binnenkomen.
-        hoofd: dict[str, dict] = {}
-        for r in rijen:
-            treffers = sorted(set(r["wids"]) & in_document)
-            if not treffers:
-                continue
-            h = hoofd.setdefault(r["hoofd"], {"naam": r["hoofd"], "wids": set(), "sub": []})
-            h["wids"].update(treffers)
-            if not r["is_hoofd"]:
-                h["sub"].append({
-                    "naam": r["toegewezen"],
-                    "n_elementen": len(treffers),
-                    "wids": treffers,
-                })
-        onderwerpen = sorted(
-            (
-                {
-                    "naam": h["naam"],
-                    "n_elementen": len(h["wids"]),
-                    "wids": sorted(h["wids"]),
-                    "sub": sorted(h["sub"], key=lambda s: -s["n_elementen"]),
-                }
-                for h in hoofd.values()
-            ),
-            key=lambda h: -h["n_elementen"],
+    for r in rijen:
+        wid = r["wid"]
+        if r["categorie"]:
+            c = cats.setdefault(r["categorie"], {"wids": set(), "sub": {}})
+            c["wids"].add(wid)
+            if r["subcategorie"]:
+                c["sub"].setdefault(r["subcategorie"], set()).add(wid)
+        else:
+            niet_ingedeeld.add(wid)
+        if r["type_bepaling"]:
+            types.setdefault(r["type_bepaling"], set()).add(wid)
+
+    def lijst(d):
+        return sorted(
+            ({"naam": naam, "n_elementen": len(wids), "wids": sorted(wids)}
+             for naam, wids in d.items()),
+            key=lambda x: -x["n_elementen"],
         )
 
-        cur.execute("SELECT DISTINCT taxonomie_versie FROM v2a.chunk_categorie LIMIT 1")
-        versie = (cur.fetchone() or {}).get("taxonomie_versie")
+    categorieen = sorted(
+        (
+            {
+                "naam": naam,
+                "n_elementen": len(v["wids"]),
+                "wids": sorted(v["wids"]),
+                "sub": lijst(v["sub"]),
+            }
+            for naam, v in cats.items()
+        ),
+        key=lambda c: -c["n_elementen"],
+    )
 
-    geclassificeerd = len({w for o in onderwerpen for w in o["wids"]})
     return {
-        "frbr_work": werk,
-        "taxonomie_versie": versie,
-        "onderwerpen": onderwerpen,
+        "frbr_expression": expr,
+        "categorieen": categorieen,
+        # Alias voor de frontend die nog op de oude sleutel staat. Weg zodra
+        # het register op `categorieen` draait.
+        "onderwerpen": categorieen,
+        "type_bepalingen": lijst(types),
+        "niet_ingedeeld": {
+            "n_elementen": len(niet_ingedeeld),
+            "wids": sorted(niet_ingedeeld),
+        },
         "dekking": {
-            "elementen_met_inhoud": met_inhoud,
-            "geclassificeerd": geclassificeerd,
-            "toelichting_uitgesloten": True,
+            "artikelen": len(rijen),
+            "ingedeeld": len(rijen) - len(niet_ingedeeld),
+            "met_type_bepaling": sum(1 for r in rijen if r["type_bepaling"]),
         },
     }
 
@@ -5058,6 +5035,107 @@ def _row_to_besluit_meta(r: dict) -> dict:
     }
 
 
+def _artikel_categorieen(cur, regeling_work: str, ob_ids: list[str],
+                         artikel_wids: set[str]) -> dict[str, dict]:
+    """Onderwerp per artikel-wid, voor de categorie-as van de wijzigingentour.
+
+    Twee lagen, in deze volgorde:
+
+    1. DIRECT — de toewijzing uit `v2a.wijziging_artikel_categorie`, gemaakt door
+       classify_wijziging.py op de ontwerp-tekst zelf. Dat is de betrouwbare laag:
+       hij classificeert wat er in dít besluit staat, niet wat er in de geldende
+       regeling stond, en werkt daarmee ook voor nieuwe artikelen.
+
+    2. OVERERVING — voor artikelen zonder eigen tekst (containers, en de
+       bruidsschat-placeholders die formeel vervallen zonder ooit inhoud te hebben
+       gehad; landelijk ~25% van de gewijzigde artikelen). Die krijgen het
+       onderwerp dat het vaakst voorkomt onder de wél geclassificeerde artikelen
+       in de dichtstbijzijnde container erboven.
+
+    Elke toewijzing draagt `herkomst` ('tekst' of 'overerving'). Zonder dat veld
+    is een winst in dekking niet te onderscheiden van een verlies in precisie —
+    de UI kan overgeërfde onderwerpen zwakker zetten en een meting kan ze
+    uitsplitsen.
+    """
+    if not artikel_wids:
+        return {}
+
+    cur.execute(
+        """
+        SELECT artikel_wid, hoofdcategorie, categorie, is_hoofd, afstand
+        FROM   v2a.wijziging_artikel_categorie
+        WHERE  regeling_work = %s AND artikel_wid = ANY(%s)
+        """,
+        (regeling_work, list(artikel_wids)),
+    )
+    uit: dict[str, dict] = {
+        r["artikel_wid"]: {
+            "hoofd": r["hoofdcategorie"],
+            "sub": None if r["is_hoofd"] else r["categorie"],
+            "afstand": round(r["afstand"], 3) if r["afstand"] is not None else None,
+            "herkomst": "tekst",
+        }
+        for r in cur.fetchall()
+    }
+
+    ontbreekt = artikel_wids - set(uit)
+    if not ontbreekt or not ob_ids:
+        return uit
+
+    # Boom ophalen voor de overervingsstap. De volle mirror, want de klim gaat
+    # door containers heen die zelf geen artikel zijn.
+    cur.execute(
+        """
+        SELECT id, parent_id, wid, element_type
+        FROM   p2pwijziging.tekst_element
+        WHERE  ontwerpbesluit_id = ANY(%s)
+        """,
+        (ob_ids,),
+    )
+    rijen = cur.fetchall()
+    ouder = {r["id"]: r["parent_id"] for r in rijen}
+    artikelen = [r for r in rijen if r["element_type"] == "Artikel"]
+
+    def voorouders(node_id):
+        gezien = set()
+        p = ouder.get(node_id)
+        while p is not None and p not in gezien and len(gezien) < 20:
+            gezien.add(p)
+            yield p
+            p = ouder.get(p)
+
+    # Stemmen omhoog tellen: elk geclassificeerd artikel stemt in al zijn
+    # voorouder-containers.
+    stemmen: dict[int, collections.Counter] = collections.defaultdict(collections.Counter)
+    for r in artikelen:
+        gevonden = uit.get(r["wid"])
+        if not gevonden:
+            continue
+        for anc in voorouders(r["id"]):
+            stemmen[anc][gevonden["hoofd"]] += 1
+
+    # Dichtstbijzijnde container met stemmen wint. Gelijkspel valt op de
+    # alfabetisch eerste naam — deterministisch, en de UI toont 'overerving'
+    # dus de gebruiker weet dat het een afgeleide is.
+    for r in artikelen:
+        if r["wid"] in uit or r["wid"] not in ontbreekt:
+            continue
+        for anc in voorouders(r["id"]):
+            teller = stemmen.get(anc)
+            if not teller:
+                continue
+            hoofd = min(teller.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+            uit[r["wid"]] = {
+                "hoofd": hoofd,
+                "sub": None,
+                "afstand": None,
+                "herkomst": "overerving",
+            }
+            break
+
+    return uit
+
+
 @app.get("/v1/viewer/regeling/{expression:path}/wijzigingen",
         dependencies=[Depends(verify_key)])
 def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
@@ -5204,12 +5282,35 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
                     "opschrift": r["opschrift"],
                 }
 
+        # Onderwerp per artikel — zijkanaal in dezelfde vorm als artikelTitels,
+        # zodat de tour er één call voor nodig heeft. Leeg wanneer
+        # classify_wijziging.py nog niet over deze regeling is gelopen; de
+        # frontend valt dan terug op de artikel-as.
+        artikel_categorieen = _artikel_categorieen(
+            cur, regeling_work,
+            [b["ontwerpbesluit_id"] for b in besluiten],
+            alle_artikel_wids,
+        )
+        cur.execute("SELECT DISTINCT taxonomie_versie FROM v2a.wijziging_categorie "
+                    "WHERE regeling_work = %s LIMIT 1", (regeling_work,))
+        rij = cur.fetchone()
+        taxonomie = rij["taxonomie_versie"] if rij else None
+
+    uit_tekst = sum(1 for v in artikel_categorieen.values() if v["herkomst"] == "tekst")
     return {
         "regelingWork": regeling_work,
         "regelingOpschrift": regeling_opschrift,
         "wijzigingen": wijzigingen,
         "verouderdVerborgen": verouderd_verborgen,
         "artikelTitels": artikel_titels,
+        "artikelCategorieen": artikel_categorieen,
+        "categorieDekking": {
+            "artikelen": len(alle_artikel_wids),
+            "geclassificeerd": len(artikel_categorieen),
+            "uitTekst": uit_tekst,
+            "overgeerfd": len(artikel_categorieen) - uit_tekst,
+            "taxonomieVersie": taxonomie,
+        },
     }
 
 
