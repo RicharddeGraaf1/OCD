@@ -181,6 +181,36 @@ def rapporteer(conn, weg, blijft):
     return ids
 
 
+def leg_vangnet(conn, ids: list[str], stempel: str):
+    """Kopieer eerst weg wat we gaan verwijderen.
+
+    Dit is geen overdreven voorzichtigheid: deze rijen zijn **niet opnieuw op te
+    halen**. Het verwijdercriterium is juist dat de loader ze vandaag niet meer
+    zou binnenlaten, dus een herstelrun bestaat niet. Zonder vangnet is een
+    verkeerde aanname definitief.
+
+    Opruimen kan met:  DROP SCHEMA vangnet CASCADE;
+    """
+    with conn.cursor() as cur:
+        cur.execute("CREATE SCHEMA IF NOT EXISTS vangnet")
+        for tabel in AFHANKELIJK:
+            doel = f"vangnet.w{stempel}_{tabel}"
+            cur.execute(f"DROP TABLE IF EXISTS {doel}")
+            cur.execute(f"""CREATE TABLE {doel} AS
+                            SELECT * FROM p2pwijziging.{tabel}
+                             WHERE ontwerpbesluit_id = ANY(%s)""", (ids,))
+            console.print(f"  {doel}: {cur.rowcount} rijen bewaard")
+        cur.execute(f"""CREATE TABLE vangnet.w{stempel}_besluit_ids AS
+                        SELECT * FROM p2pwijziging.besluit
+                         WHERE ontwerpbesluit_id = ANY(%s)""", (ids,))
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("""SELECT pg_size_pretty(sum(pg_total_relation_size(c.oid))) AS g
+                         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                        WHERE n.nspname='vangnet'""")
+        console.print(f"[dim]vangnet-schema: {cur.fetchone()['g']}[/dim]")
+
+
 def verwijder(conn, ids: list[str]):
     with conn.cursor() as cur:
         for tabel in AFHANKELIJK:
@@ -206,10 +236,15 @@ def main():
             console.print("\n[bold]Droogloop — er is niets verwijderd.[/bold] "
                           "Draai met --uitvoeren om door te zetten.")
             return
+        stempel = date.today().isoformat().replace("-", "_")
+        console.print("\n[bold]Vangnet aanleggen…[/bold]")
+        leg_vangnet(conn, ids, stempel)
         console.print("\n[bold red]Verwijderen…[/bold red]")
         verwijder(conn, ids)
-        console.print("[green]Klaar.[/green] Draai hierna VACUUM ANALYZE op "
-                      "p2pwijziging als je de ruimte wilt terugzien.")
+        console.print(f"[green]Klaar.[/green] Vangnet staat in schema `vangnet` "
+                      f"(prefix w{stempel}_). Draai VACUUM ANALYZE op "
+                      f"p2pwijziging om de ruimte terug te zien; ruim het vangnet "
+                      f"pas op als de sync erna schoon is verlopen.")
     finally:
         conn.close()
 

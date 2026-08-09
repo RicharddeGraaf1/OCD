@@ -657,6 +657,74 @@ commit, publiceert dus al.
 - **Nooit tijdens een lopende run**: een `git checkout` wisselt de code onder
   de draaiende processen. Wacht tot het rapport geschreven is.
 
+### Stap 10 — Wijzigingsspoor opruimen (periodiek, niet elke sync)
+
+*Toegevoegd 2026-08-09 na de eerste uitvoering. Achtergrond: vault `gaps.md`
+G-123.*
+
+`ontwerp_loader` beslist **bij binnenkomst** of een ontwerp of besluitversie
+relevant is. Niets past die toets later opnieuw toe, dus rijen komen binnen
+onder een voorwaarde en vertrekken niet als die vervalt. Een besluitversie die
+in werking is getreden, of een ontwerp dat ouder is dan onze vigerende versie,
+blijft met zijn hele gevolg staan.
+
+```bash
+python scripts/ruim_wijzigingsspoor_op.py               # droogloop
+python scripts/ruim_wijzigingsspoor_op.py --uitvoeren   # vangnet + verwijderen
+```
+
+**Het criterium is de intake-logica van de loader zelf**, niet een eigen regel.
+Dat is geen esthetiek: verwijder je iets wat de loader morgen weer binnenlaat,
+dan koop je churn — weggooien, opnieuw downloaden, weggooien. Door precies te
+spiegelen wat `load_ontwerp` en `load_besluitversie` vandaag zouden doen, is het
+resultaat stabiel.
+
+**Uitgevoerd 2026-08-09** — 225 van de 445 besluiten (119 ontwerpen, 106
+besluitversies):
+
+| tabel | verwijderd | van | aandeel |
+|---|---|---|---|
+| `annotatie_delta` | 320.529 | 721.253 | 44% |
+| `locatie_delta` | 318.195 | 1.588.950 | 20% |
+| `tekst_element` | 305.877 | 725.428 | 42% |
+| `procedurestap` | 2.028 | 6.027 | 34% |
+| `juridische_regel_*_delta` | 3.231 | 95.895 | 3% |
+
+Vier dingen die deze stap bewust **niet** doet, elk met een reden:
+
+1. **De rij in `p2pwijziging.besluit` blijft staan** (alle 445). Die is de enige
+   bron van inwerkingtredingsdatum die we hebben (zie G-121 → G-108: 98 van de
+   124 besluitversies matchen op een vigerende regeling) én de enige rem op
+   herladen — zonder die rij is er niets dat zegt "hier is al over besloten".
+2. **De OW-objecten blijven staan.** `p2p.activiteit`, `locatie`, `norm` en
+   `gebiedsaanwijzing` hebben geen regeling-kolom; het zijn IMOW-objecten op
+   `identificatie`, gedeeld over regelingen. Gemeten op de inactieve regelingen:
+   0 van de 18 activiteiten en 0 van de 22 locaties was exclusief. Wie op
+   OW-objectniveau wil opruimen, ruimt per definitie bijna nooit iets op.
+3. **De vectorlaag blijft ongemoeid.** Van de 469.666 chunks met
+   `source_type='ontwerp'` hoort er 0 bij de opgeruimde set. Er staan wél 70.376
+   chunks op deze expressies, maar dat zijn gewone vigerende artikelen van de 98
+   expressies die inmiddels vigeren.
+4. **De 39 gevallen waar twee toetsen elkaar tegenspreken blijven staan**, en
+   het script meldt ze. Hun basis-expressie vigeert niet meer, maar de loader
+   zou ze wel opnieuw binnenlaten: hij toetst of een ontwerp *jonger is dan*
+   onze vigerende versie, niet of het erop *voortbouwt*. Een bronhouder die in
+   juli publiceert op de januari-consolidatie terwijl juni al vigeert, glipt
+   daar doorheen. Wil je die ook kwijt, dan hoort de voorwaarde in de **loader**
+   — niet in dit script, anders komen ze elke sync terug.
+
+**Vangnet.** `--uitvoeren` kopieert eerst alles naar schema `vangnet`
+(prefix `w<datum>_`, 660 MB op 09-08). Dat is geen overdreven voorzichtigheid:
+het verwijdercriterium is juist dat de loader deze rijen niet meer binnenlaat,
+dus **een herstelrun bestaat niet**. Ruim het vangnet pas op als de eerstvolgende
+sync schoon is verlopen: `DROP SCHEMA vangnet CASCADE;`
+
+**Ruimte.** `VACUUM` geeft de ruimte terug aan de tabel, niet aan de schijf; de
+bestandsgroottes blijven dus staan tot nieuwe rijen ze hervullen. Op 09-08 pakte
+autovacuum de tabellen zelf op. Draai je 'm handmatig, zet dan eerst
+`max_parallel_maintenance_workers = 0` — anders loopt hij lokaal stuk op
+`could not resize shared memory segment` (Docker `/dev/shm`).
+
 ---
 
 ## 3b. Repo-hygiëne: één branch, `main`
@@ -745,7 +813,8 @@ Noodroute als prod onherstelbaar afwijkt: `restore-dev-naar-prod.ps1`
 | G-97 | vectorlaag herbouwt volledig en ruimt niets op | `chunk_annotatie` + `chunk_categorie` worden elke run overgedaan; chunks van verdrongen expressies blijven staan en worden pas bij het lezen weggezeefd (45% bij `gm0796`) |
 | G-94 | *deels opgelost 2026-08-08* — i2a heeft nu een delta op `laatsteWijzigingDatum` (5,6 u → ~20 min). vth heeft er nog geen; scheduling ontbreekt nog steeds | stap 4 en 5 blijven handwerk |
 | — | `repliceer_p2p_naar_prod.py` dekt p2p, maar de afgeleide herbouw (subdiv, MV's) is nog losse handmatige stappen | stap 3 is één script plus drie commando's; automatiseren kan zodra de volgorde zich bewezen heeft |
-| — | de replicatie **verwijdert** niets op prod | een rij die lokaal is opgeruimd blijft daar staan; net als G-91 een bewuste keuze, geen automatisme |
+| — | de replicatie **verwijdert** niets op prod | een rij die lokaal is opgeruimd blijft daar staan; net als G-91 een bewuste keuze, geen automatisme. **Let op sinds 09-08**: stap 10 heeft lokaal 947.860 rijen uit `p2pwijziging` gehaald die op prod nog staan — dat verschil is bedoeld, niet een gat |
+| — | de relevantietoets van `ontwerp_loader` wordt alleen bij intake toegepast | rijen komen binnen onder een voorwaarde en vertrekken niet als die vervalt; stap 10 ruimt op, maar de loader blijft het opnieuw opbouwen. Structureel zou de toets bij elke run over de bestaande voorraad moeten (vault G-123) |
 | — | *opgelost 2026-08-09* — i2a-datum stond hardgecodeerd op `10-04-2026` | nu `_peildatum()` = vandaag. Gemeten effect over 19 bronhouders: 2 nieuw, 2 weg, 52 van 3.128 met nieuwere inhoud (~1,7%). De eerstvolgende run duurt nog ~5,6 u omdat `laatste_wijziging` nog vrijwel overal `NULL` is |
 | — | de preview stuurde de RTR een geprefixte code (`gm0344`) | *opgelost 2026-08-09* — dezelfde G-117-fout als in de loader, waardoor élke gemeente 0 activiteiten leek te hebben. Preview hergebruikt nu de loader-helpers in plaats van ze over te schrijven |
 | — | *opgelost 2026-08-08* — i2a-kanaal lag sinds de initial commit stil (geprefixte bronhoudercode) | +384.178 uitvoeringsregels (+46%) na de fix; retry op 503 toegevoegd, want die ontbrak ook |
@@ -813,6 +882,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 | MER (`load-mer`) | los, seconden | aparte harvester-repo |
 | `core.gemeentegrens` | 1×/jaar | gemeente-herindelingen |
 | Prune verouderde versies | op indicatie | dry-run eerst |
+| Wijzigingsspoor opruimen (stap 10) | maandelijks, of als `p2pwijziging` hard groeit | `ruim_wijzigingsspoor_op.py`; droogloop eerst, vangnet daarna opruimen |
 
 ---
 
