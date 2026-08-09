@@ -358,11 +358,25 @@ elkaars voorwaarde: zonder delta zou het bijwerken van de peildatum de fase weer
 5,6 uur maken; zonder peildatum-fix zou de delta een steeds sneller antwoord op
 een steeds oudere vraag geven.
 
-**Eén ding om te weten vóór de eerstvolgende run**: `laatste_wijziging` is nu
-gevuld voor 148 van de 59.646 bestanden (alleen de gm1699-inhaalronde). Voor de
-rest is hij `NULL`, dus die worden hoe dan ook opgehaald. **De eerstvolgende
-i2a-run duurt daarom nog een keer ~5,6 uur**; pas de run daarna profiteert van
-de delta. Plan hem 's nachts.
+**Het watermerk moest eerst worden ingehaald.** `laatste_wijziging` was maar
+voor 148 van de 59.646 bestanden gevuld (de gm1699-inhaalronde); voor de rest
+`NULL`, dus de eerstvolgende i2a-run zou hoe dan ook ~5,6 uur duren. Daarom op
+09-08 `scripts/backfill_i2a_watermerk.py` gedraaid:
+
+- **Eén kolom in één tabel** — `i2a.toepasbaar_regelbestand.laatste_wijziging`.
+  Geen regelbestand, geen `dmn_element`, geen `uitvoeringsregel`; de inhoud
+  blijft ongemoeid.
+- **Waarde komt van de STTR op peildatum `10-04-2026`**, de datum waarop die
+  inhoud is geladen. We leggen dus vast wat er wérkelijk in de database staat,
+  niet wat vandaag geldt — waardoor de eerstvolgende run (peildatum vandaag)
+  precies de sindsdien gewijzigde bestanden ophaalt.
+- **Twee guards**: alleen bestanden met aantoonbare inhoud in `dmn_element`
+  **of** `uitvoeringsregel` (59.450 van de 59.498; de 48 zonder inhoud blijven
+  leeg en worden dus opgehaald), en alleen waar het watermerk nu leeg is.
+
+Meet die dekking over **beide** tabellen. Alleen `dmn_element` tellen geeft
+22.599 schijnbaar lege bestanden: *Maatregelen*-bestanden bevatten per ontwerp
+geen `<semantic:decision>`, alleen uitvoeringsregels.
 
 ### Stap 5 — i2a naar prod (afweging)
 
@@ -705,13 +719,19 @@ Vier dingen die deze stap bewust **niet** doet, elk met een reden:
    `source_type='ontwerp'` hoort er 0 bij de opgeruimde set. Er staan wél 70.376
    chunks op deze expressies, maar dat zijn gewone vigerende artikelen van de 98
    expressies die inmiddels vigeren.
-4. **De 39 gevallen waar twee toetsen elkaar tegenspreken blijven staan**, en
-   het script meldt ze. Hun basis-expressie vigeert niet meer, maar de loader
-   zou ze wel opnieuw binnenlaten: hij toetst of een ontwerp *jonger is dan*
-   onze vigerende versie, niet of het erop *voortbouwt*. Een bronhouder die in
-   juli publiceert op de januari-consolidatie terwijl juni al vigeert, glipt
-   daar doorheen. Wil je die ook kwijt, dan hoort de voorwaarde in de **loader**
-   — niet in dit script, anders komen ze elke sync terug.
+4. **Niets weghalen wat de volgende sync terugbrengt.** Het criterium is één
+   functie — `ontwerp_loader._is_relevant` — die zowel de loader als dit script
+   gebruikt. Loopt dat uiteen, dan krijg je churn: weggooien, opnieuw
+   downloaden, weggooien.
+
+   Dat is op 09-08 ook de reden geweest om de *loader* aan te scherpen in plaats
+   van het script. Er stonden 39 ontwerpen op een basis-expressie die niet meer
+   vigeerde, terwijl de loader ze wél opnieuw binnenliet — hij toetste of een
+   ontwerp *jonger is dan* onze vigerende versie, niet of het erop *voortbouwt*.
+   Nu eist voorwaarde 4 dat `wijzigt_expression` de vigerende expressie is
+   (een ontwerp kan in deze keten niet op een oudere consolidatie zitten).
+   Tweede ronde daarna: 684.519 locatie_delta (54%), 79.451 tekst_element,
+   68.513 annotatie_delta.
 
 **Vangnet.** `--uitvoeren` kopieert eerst alles naar schema `vangnet`
 (prefix `w<datum>_`, 660 MB op 09-08). Dat is geen overdreven voorzichtigheid:
