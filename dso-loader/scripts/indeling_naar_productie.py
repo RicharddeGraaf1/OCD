@@ -26,6 +26,18 @@ daaraan. De rename blokkeert milliseconden.
 
 De oude tabellen blijven staan als `*_oud`. Terugdraaien is twee renames.
 
+`v2a.wijziging_indeling` gaat hier NIET mee, en dat is opzet. Die tabel bouw je
+rechtstreeks op prod:
+
+    OCD_DB_URL=$PROD_DB_URL python scripts/bouw_indeling.py --alleen-wijzigingen
+
+Twee redenen. Ten eerste kán het: 61 seconden gemeten op 2026-08-10, tegenover
+een veelvoud voor de artikel-indeling — de renvooi-boom is een orde kleiner.
+Ten tweede MOET het, want de twee `p2pwijziging`-mirrors lopen uiteen: prod had
+24.824 renvooi-artikelen over 152 werken waar lokaal er 13.987 over 107 stonden,
+omdat de opruimrondes van 2026-08-09 alleen lokaal gedraaid hebben. Kopiëren zou
+op prod dus ruwweg de helft van de gewijzigde artikelen ongeclassificeerd laten.
+
 Draaien:  python scripts/indeling_naar_productie.py [--ja]
 Zonder --ja alleen meten en vergelijken (droogloop).
 """

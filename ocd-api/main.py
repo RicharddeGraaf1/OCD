@@ -5040,6 +5040,40 @@ def _row_to_besluit_meta(r: dict) -> dict:
     }
 
 
+def _tour_artikel_wids(tekst_rows: list[dict]) -> set[str]:
+    """Artikel-wids die daadwerkelijk een tour-scherm opleveren.
+
+    Nadrukkelijk NIET alle artikelen uit de mirror: die bevat de hele boom,
+    inclusief alles wat niet wijzigt. Bij Putten staan er 340 artikelen in
+    terwijl het ontwerp er negen raakt — de dekkingsteller op de volle mirror
+    meldde daardoor "0% ingedeeld · 340 niet ingedeeld" bij een tour van één
+    scherm, en dreef de as-keuze in de frontend op datzelfde getal.
+
+    De tour bucket op STRUCTURELE wijzigingen (`wijzigactie` of `vervallen`);
+    renvooi-only knopen krijgen geen eigen scherm. Van daar klimt hij naar het
+    dichtstbijzijnde Artikel. Dit spiegelt `artikelWidVoorTekst` in
+    wijziging.store.ts.
+
+    Wijzigingen bóven artikel-niveau — een hele nieuwe Afdeling, wat bij nieuwe
+    ontwikkelgebieden de regel is — leveren geen anker op. Die belanden in de
+    "Algemene wijzigingen"-bucket en tellen hier dus niet mee: er valt aan een
+    Afdeling geen artikel-indeling te hangen.
+    """
+    per_id = {r["id"]: r for r in tekst_rows}
+    uit: set[str] = set()
+    for r in tekst_rows:
+        if r["wijzigactie"] is None and not r["vervallen"]:
+            continue
+        huidig, diepte = r, 0
+        while huidig is not None and diepte < 20:
+            if huidig["element_type"] == "Artikel":
+                uit.add(huidig["wid"])
+                break
+            huidig = per_id.get(huidig["parent_id"]) if huidig["parent_id"] else None
+            diepte += 1
+    return uit
+
+
 def _artikel_categorieen(cur, regeling_work: str,
                          artikel_wids: set[str]) -> dict[str, dict]:
     """Onderwerp én typeBepaling per artikel-wid, voor de categorie-as van de tour.
@@ -5151,6 +5185,11 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
         # die in de p2pwijziging-mirror nummer/opschrift missen (artikelen
         # die zelf niet wijzigen maar wel een annotatie geraakt zien).
         alle_artikel_wids: set[str] = set()
+        # Subset die de tour standaard toont — de noemer van categorieDekking.
+        tour_artikel_wids: set[str] = set()
+        # Artikelen die alleen een annotatie krijgen: zichtbaar zodra het
+        # drift-filter uitgaat, dus apart geteld.
+        drift_artikel_wids: set[str] = set()
         for b in besluiten:
             ob_id = b["ontwerpbesluit_id"]
 
@@ -5212,6 +5251,15 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
             for wids in artikel_wids_per_ann.values():
                 alle_artikel_wids.update(wids)
 
+            # Twee smallere sets voor de dekkingsteller. `tour_artikel_wids` =
+            # wat de tour standaard toont; `drift_artikel_wids` = de artikelen
+            # die er alleen bij komen als de gebruiker het annotatie-drift-
+            # filter uitzet. Zie _tour_artikel_wids en de toelichting bij
+            # categorieDekking.
+            tour_artikel_wids |= _tour_artikel_wids(tekst_rows)
+            for wids in artikel_wids_per_ann.values():
+                drift_artikel_wids.update(wids)
+
         # Titel-fallback uit p2p.tekst_element (fase 1 sub 1.5). Wids zijn
         # STOP-stabiel over versies; label ophalen bij de geldende expression
         # dekt alle artikelen — ook die in dit ontwerp niet wijzigen. UI
@@ -5249,7 +5297,24 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
 
     # Tellen op `hoofd`: een rij die alleen een typeBepaling draagt is niet
     # ingedeeld, en de UI beslist op dit getal of de categorie-as zinvol is.
-    met_onderwerp = [v for v in artikel_categorieen.values() if v["hoofd"]]
+    #
+    # Noemer is `tour_artikel_wids`, niet de volle mirror. Die laatste bevat de
+    # hele boom: bij Putten 340 artikelen terwijl het ontwerp er nul raakt op
+    # artikel-niveau — alle negentien structurele wijzigingen zitten op
+    # Afdeling-niveau (nieuwe ontwikkelgebieden). De teller meldde daardoor
+    # "0% ingedeeld · 340 niet ingedeeld" bij een tour van één scherm.
+    #
+    # Annotatie-ankers staan apart: die verschijnen pas als het drift-filter
+    # uitgaat, en dat is frontend-state die de backend niet kent.
+    drift_only = drift_artikel_wids - tour_artikel_wids
+    met_onderwerp = [
+        v for wid, v in artikel_categorieen.items()
+        if v["hoofd"] and wid in tour_artikel_wids
+    ]
+    met_onderwerp_drift = [
+        v for wid, v in artikel_categorieen.items()
+        if v["hoofd"] and wid in drift_only
+    ]
     uit_register = sum(1 for v in met_onderwerp if v["herkomst"] == "register")
     return {
         "regelingWork": regeling_work,
@@ -5259,10 +5324,13 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
         "artikelTitels": artikel_titels,
         "artikelCategorieen": artikel_categorieen,
         "categorieDekking": {
-            "artikelen": len(alle_artikel_wids),
+            "artikelen": len(tour_artikel_wids),
             "geclassificeerd": len(met_onderwerp),
             "uitRegister": uit_register,
             "uitRenvooi": len(met_onderwerp) - uit_register,
+            # Wat erbij komt als het annotatie-drift-filter uitgaat.
+            "driftArtikelen": len(drift_only),
+            "driftGeclassificeerd": len(met_onderwerp_drift),
             "curatieVersie": taxonomie,
         },
     }

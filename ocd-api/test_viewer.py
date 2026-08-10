@@ -787,7 +787,8 @@ class TestWijzigingCategorie:
             assert isinstance(data["artikelCategorieen"], dict)
             dekking = data["categorieDekking"]
             for key in ("artikelen", "geclassificeerd", "uitRegister",
-                        "uitRenvooi", "curatieVersie"):
+                        "uitRenvooi", "driftArtikelen", "driftGeclassificeerd",
+                        "curatieVersie"):
                 assert key in dekking, f"Veld {key} ontbreekt in categorieDekking"
 
     def test_gm0394_heeft_onderwerpen(self):
