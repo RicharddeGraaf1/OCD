@@ -135,51 +135,66 @@ Reikwijdte, gemeten 2026-08-10 op de productie-API:
   `/besluitversies/{technischId}` levert het niet. Daar valt de loader terug op
   regeling-niveau.
 
-### Correctie: besluitversies hébben wél een besluit-citeertitel
+### Besluitversies: tweede bron — de Ontsluiten-API
 
-Alleen niet in Presenteren. Het Omgevingsloket toont hem, en haalt hem uit zijn
-eigen backend-for-frontend:
+Presenteren heeft de naam niet, maar de DSO wel. Het Omgevingsloket toont voor
+besluitversies wél een besluitnaam, en haalt die uit de **Omgevingsinformatie
+ontsluiten API v2** — een gepubliceerde API op dezelfde service-host, met eigen
+OpenAPI-spec, pre-productie-omgeving en `apiKey`-security. Hetzelfde
+volwassenheidsniveau als Presenteren v8; `document-viewer.dso.kadaster.nl/bff/…`
+staat er letterlijk als één van de `servers` in.
 
 ```
-GET https://document-viewer.dso.kadaster.nl/bff/ois/ontsluiten/v2/documenten/{technischId}
-    ?synchroniseerMetTileset=Actueel
+GET https://service.omgevingswet.overheid.nl/publiek/omgevingsinformatie/api/ontsluiten/v2
+    /documenten/{uriIdentificatie}
 → omgevingsdocumentMetadata.besluitCiteertitel
 ```
 
-Zelfde `technischId` als in `p2pwijziging.besluit.technisch_id`, geen API-sleutel
-nodig. Gemeten over onze 124 besluitversies (2026-08-10, sequentieel — bij acht
-parallelle verbindingen faalt tweederde):
+`uriIdentificatie` = onze `p2pwijziging.besluit.technisch_id`.
+`besluitCiteertitel` is een eersterangs veld op de schema's `BesluitVersie`,
+`OntwerpDocumentVersie` én `OmgevingsdocumentMetadata`.
+
+Gemeten 2026-08-10 over onze 124 besluitversies:
 
 | | met besluit-eigen naam | gelijk aan opschrift | leeg |
 |---|---|---|---|
 | besluitversies | **115 (93%)** | 9 | 0 |
 
-Voorbeelden: "Elshagenweg 3 Wesepe" (Raalte), "Vaststelling wijziging
-Omgevingsplan gemeente Oss - Postzegelplan Golfbad", "Wijziging omgevingsplan
-gebiedsontwikkeling 'Zwembad Wervershoof'" (Medemblik) — waar Presenteren voor
-alle drie alleen "Omgevingsplan gemeente X" geeft.
+Voorbeelden: "Elshagenweg 3 Wesepe" (Raalte), "Veegplan 2026-1" (Oude
+IJsselstreek), "H23 - postzegelplan \"Landelijk gebied Ede, partiële herziening
+2026, 1e ronde\"", "Wijziging omgevingsplan gebiedsontwikkeling 'Zwembad
+Wervershoof'" (Medemblik) — waar Presenteren voor alle vier alleen
+"Omgevingsplan gemeente X" geeft.
 
-De twee bronnen zijn complementair, niet overlappend: voor het Putten-ontwerp
-geeft de BFF juist de generieke `titel` en Presenteren de specifieke
-`besluitMetadata.citeerTitel`. De BFF heeft ze allebei —
-`omgevingsdocumentMetadata.besluitCiteertitel` klopt daar ook voor het ontwerp.
+**Voor ontwerpen voegt Ontsluiten niets toe.** Gemeten op de 65 ontwerpen zonder
+`besluitMetadata`: **0** krijgen daar alsnog een naam. Andersom geeft Ontsluiten
+voor het Putten-ontwerp als `titel` juist de generieke regelingsnaam. Daarom
+roept alleen `load_besluitversie` de tweede bron aan — ontwerpen zouden er
+alleen een extra call per stuk aan overhouden.
 
-**Nog niet aangesloten.** Het is de BFF van het Omgevingsloket, geen
-gepubliceerde API met een contract; een tweede bron in de sync is een
-afweging die apart gemaakt moet worden. Zie de openstaande vraag hieronder.
+**Twee bedieningsdetails.** Er is geen batch-route: `/documenten/_zoek` geeft op
+een work- of uriIdentificatie alleen de geconsolideerde versie terug, niet de
+besluitversies. En deze host rate-limit steviger dan de rest — 65 calls zonder
+pauze leverde 52 fouten, met ~0,4 s ertussen nul. Vandaar `time.sleep(0.4)` in
+het backfill-script.
 
 ### Doorgevoerd
 
-1. **Loader** — `_besluit_citeertitel()` in
-   [ontwerp_loader.py](../dso-loader/src/loaders/ontwerp_loader.py): eerst
-   `besluitMetadata.citeerTitel`, dan het top-level veld. Beide UPSERTs
-   verversen `citeertitel` nu ook in de `ON CONFLICT DO UPDATE`; dat ontbrak,
-   waardoor een herload de oude waarde had laten staan.
+1. **Loader** — in [ontwerp_loader.py](../dso-loader/src/loaders/ontwerp_loader.py):
+   `_besluit_citeertitel()` voor ontwerpen (eerst `besluitMetadata.citeerTitel`,
+   dan het top-level veld) en `_ontsluiten_citeertitel()` voor besluitversies.
+   Die tweede is **best-effort**: bij een fout of time-out `None` en terugval op
+   de regeling-citeertitel — een besluitnaam is een siersel, geen dragend
+   gegeven, en één hikkende API mag geen load stukmaken. Beide UPSERTs verversen
+   `citeertitel` nu ook in de `ON CONFLICT DO UPDATE`; dat ontbrak, waardoor een
+   herload de oude waarde had laten staan.
 2. **Backfill** —
-   [scripts/backfill_besluit_citeertitel.py](../dso-loader/scripts/backfill_besluit_citeertitel.py).
-   Paginaert alleen de goedkope listing, raakt uitsluitend de
-   `citeertitel`-kolom. Droogloop by default. Resultaat: 224 van de 321
-   ontwerpen bijgewerkt; 239 zijn nu onderscheidend tegenover ~15 daarvoor.
+   [scripts/backfill_besluit_citeertitel.py](../dso-loader/scripts/backfill_besluit_citeertitel.py),
+   `--soort ontwerp|besluitversie|beide`. Raakt uitsluitend de
+   `citeertitel`-kolom, droogloop by default. Resultaat op lokaal én prod:
+   224 van de 321 ontwerpen en 116 van de 124 besluitversies bijgewerkt.
+   Onderscheidend van het opschrift: ontwerpen 239 (was ~15), besluitversies
+   115 (was 3).
 3. **Semantiek** — `COMMENT ON COLUMN` op beide kolommen, in `ddl.py` en als
    losse migratie
    ([2026-08-besluit-citeertitel-commentaar.sql](../dso-loader/scripts/2026-08-besluit-citeertitel-commentaar.sql)).
@@ -194,12 +209,7 @@ afweging die apart gemaakt moet worden. Zie de openstaande vraag hieronder.
 - [x] De drie Putten-ontwerpen hebben elk een eigen citeertitel in
       `p2pwijziging.besluit`
 - [x] `/v1/viewer/regeling/…/wijzigingen` geeft ze alle drie verschillend terug
-- [x] Besluitversies houden hun regeling-citeertitel (geen NULL, geen lege string)
-- [x] 328 viewer-tests groen, 65 loader-tests groen
-
-### Openstaand
-
-- [ ] Besluitversies aansluiten op `besluitCiteertitel` uit de Kadaster-BFF —
-      93% dekking, maar wel een tweede bron zonder gepubliceerd contract.
-      Ontwerp bij aansluiten: best-effort per besluit, faalt nooit de load, en
-      de volgorde blijft `besluitMetadata` → BFF → regeling-citeertitel.
+- [x] Besluitversies dragen hun eigen besluitnaam: Raalte = "Elshagenweg 3
+      Wesepe", niet "Omgevingsplan gemeente Raalte"
+- [x] Geen enkele besluitversie op NULL of lege string na de backfill
+- [x] 328 viewer-tests groen, 69 loader-tests groen

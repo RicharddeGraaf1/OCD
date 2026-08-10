@@ -20,6 +20,11 @@ class Config:
     CATALOGUS_BASE = "https://service.omgevingswet.overheid.nl/publiek/catalogus/api/opvragen/v3"
     RTR_BASE = "https://service.omgevingswet.overheid.nl/publiek/toepasbare-regels/api/rtrgegevens/v2"
     STTR_BASE = "https://service.omgevingswet.overheid.nl/publiek/toepasbare-regels/api/toepasbareregelsuitvoerengegevens/v1"
+    # Ontsluiten v2 — de API achter het Omgevingsloket zelf. Levert per document
+    # `omgevingsdocumentMetadata.besluitCiteertitel`, de naam van het besluit.
+    # Presenteren heeft dat veld alleen op ontwerpen; hier zit het óók op
+    # besluitversies. Zie docs/citeertitel-uit-presenteren-api.md.
+    ONTSLUITEN_BASE = "https://service.omgevingswet.overheid.nl/publiek/omgevingsinformatie/api/ontsluiten/v2"
 
     # IHR (Informatiehuis Ruimte) for Wro planteksten
     IHR_BASE = "https://ruimte.omgevingswet.overheid.nl/ruimtelijke-plannen/api/opvragen/v4"

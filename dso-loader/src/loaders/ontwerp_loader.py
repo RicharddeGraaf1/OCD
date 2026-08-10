@@ -58,20 +58,50 @@ def _besluit_citeertitel(item: dict) -> str | None:
     niet in de listing (0 van 2812) en ook niet op de detail-endpoint. Vandaar
     de terugval op het regeling-niveau, zodat de kolom niet leegloopt.
 
-    Let op: dat is een beperking van Presenteren, niet van de DSO. Het
-    Omgevingsloket toont voor besluitversies wél een besluitnaam
-    ("Elshagenweg 3 Wesepe" waar Presenteren "Omgevingsplan gemeente Raalte"
-    geeft) en haalt die uit zijn eigen BFF —
-    `document-viewer.dso.kadaster.nl/bff/ois/ontsluiten/v2/documenten/{technischId}`,
-    veld `omgevingsdocumentMetadata.besluitCiteertitel`, 93% dekking over onze
-    124 besluitversies. Nog niet aangesloten; zie docs/citeertitel-uit-
-    presenteren-api.md §Openstaand.
+    Let op: dat is een beperking van Presenteren, niet van de DSO — voor
+    besluitversies haalt `_ontsluiten_citeertitel` de naam alsnog op bij de
+    Ontsluiten-API. Deze functie blijft de Presenteren-kant.
     """
     besluit = (item.get("besluitMetadata") or {}).get("citeerTitel")
     if besluit and besluit.strip():
         return besluit.strip()
     regeling = item.get("citeerTitel")
     return regeling.strip() if regeling and regeling.strip() else None
+
+
+def _ontsluiten_citeertitel(technisch_id: str | None) -> str | None:
+    """Besluitnaam uit de Ontsluiten-API — de API achter het Omgevingsloket.
+
+    Nodig omdat Presenteren `besluitMetadata` alleen op ontwerpen zet. Voor een
+    besluitversie geeft Presenteren enkel "Omgevingsplan gemeente Raalte",
+    terwijl het Omgevingsloket "Elshagenweg 3 Wesepe" toont. Dat verschil komt
+    hiervandaan: `omgevingsdocumentMetadata.besluitCiteertitel` op
+    `GET /documenten/{uriIdentificatie}`, met dezelfde `technischId` als sleutel.
+
+    Gemeten 2026-08-10: 115 van 124 besluitversies (93%) hebben hier een
+    besluit-eigen naam. Voor ontwerpen voegt de API niets toe — de 65 die geen
+    `besluitMetadata` hebben, hebben hier evenmin een naam (0 van 65). Daarom
+    roept alleen `load_besluitversie` dit aan; ontwerpen zouden er alleen een
+    extra call per stuk aan overhouden.
+
+    **Best-effort.** Een besluitnaam is een siersel, geen dragend gegeven: bij
+    een fout of time-out geven we None terug en valt de aanroeper terug op de
+    regeling-citeertitel. Nooit een exception naar buiten — één hikkende
+    tweede API mag geen besluitversie-load stukmaken.
+
+    Let op bij bulk: deze host rate-limit steviger dan de Kadaster-BFF. 65
+    calls zonder pauze leverde 52 fouten; met ~0,4 s ertussen 0 fouten.
+    """
+    if not technisch_id:
+        return None
+    try:
+        data = _get(f"{cfg.ONTSLUITEN_BASE}/documenten/{technisch_id}")
+    except Exception as e:
+        console.print(f"      [dim]ontsluiten-citeertitel faalde ({technisch_id[-12:]}): "
+                      f"{str(e)[:60]}[/dim]")
+        return None
+    titel = (data.get("omgevingsdocumentMetadata") or {}).get("besluitCiteertitel")
+    return titel.strip() if titel and titel.strip() else None
 
 
 def _fetch_basis_expression(href: str | None) -> str | None:
@@ -644,6 +674,12 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
     # renvooi haalt de link ook de basis-expression waarop dit besluit
     # voortbouwt — wordt opgeslagen als `wijzigt_expression` voor de
     # viewer-A1-filter (verouderde ontwerpen verbergen).
+    # Besluitnaam: Presenteren levert 'm hier nooit (geen besluitMetadata op
+    # besluitversies), dus de Ontsluiten-API erbij. Faalt die, dan houdt
+    # `_besluit_citeertitel` de regeling-citeertitel over.
+    citeertitel = (_ontsluiten_citeertitel(technisch_id)
+                   or _besluit_citeertitel(item))
+
     links = item.get("_links", {}) or {}
     is_vervang = VERVANG_LINK["besluitversie"] not in links
     basis_href = (links.get("wijzigtRegelingversie") or {}).get("href") if not is_vervang else None
@@ -679,7 +715,7 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
               bekend_op, ontvangen_op, begin_geldigheid, begin_inwerking,
               item.get("eindverantwoordelijke"), bronhouder_code,
               item.get("type", {}).get("waarde"),
-              item.get("opschrift"), _besluit_citeertitel(item),
+              item.get("opschrift"), citeertitel,
               item.get("publicatieID"), is_vervang))
 
         # Procedurestappen
