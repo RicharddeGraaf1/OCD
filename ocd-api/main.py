@@ -5025,6 +5025,12 @@ def _row_to_besluit_meta(r: dict) -> dict:
         "soort": r["soort"],
         "status": r["status"],
         "opschrift": r["opschrift"],
+        # Citeertitel van het besluit zelf ("Wijziging omgevingsplan … t.b.v.
+        # ontwikkeling Stenenkamerseweg 38/38a"). `opschrift` is de naam van de
+        # regeling en dus gelijk voor elk besluit op die regeling; hiermee kan
+        # de viewer bronnen uit elkaar houden. Alleen ontwerpen leveren dit —
+        # bij besluitversies valt de loader terug op de regeling-citeertitel.
+        "citeertitel": r.get("citeertitel"),
         "bekendOp": r["bekend_op"].isoformat() if r["bekend_op"] else None,
         "beginGeldigheid": r["begin_geldigheid"].isoformat() if r["begin_geldigheid"] else None,
         "beginInwerking": r["begin_inwerking"].isoformat() if r["begin_inwerking"] else None,
@@ -5114,6 +5120,7 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
         cur.execute(
             """
             SELECT b.ontwerpbesluit_id, b.soort, b.status, b.opschrift,
+                   b.citeertitel,
                    b.bekend_op, b.begin_geldigheid, b.begin_inwerking,
                    b.bronhouder, b.documenttype, b.is_vervang_regeling,
                    NOT EXISTS (

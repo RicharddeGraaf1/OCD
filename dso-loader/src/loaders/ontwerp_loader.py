@@ -42,6 +42,29 @@ VERVANG_LINK = {
 }
 
 
+def _besluit_citeertitel(item: dict) -> str | None:
+    """Citeertitel van het BESLUIT, niet van de regeling.
+
+    De Presenteren-API kent twee titel-niveaus op een ontwerpregeling. Het
+    top-level `citeerTitel` hoort bij de regeling ("Omgevingsplan gemeente
+    Putten") en is dus per definitie niet onderscheidend tussen ontwerpen op
+    dezelfde regeling. `besluitMetadata.citeerTitel` hoort bij het besluit dat
+    deze versie veroorzaakt ("Wijziging omgevingsplan gemeente Putten t.b.v.
+    ontwikkeling Stenenkamerseweg 38/38a") — dát is wat een gebruiker wil zien
+    boven een wijzigingentour.
+
+    Gemeten 2026-08-10: 805 van de 1028 ontwerpregelingen leveren
+    `besluitMetadata`. Op besluitversies bestaat het veld niet (0 van 2812) —
+    het staat alleen op het `Ontwerpregeling`-schema. Vandaar de terugval op
+    het regeling-niveau, zodat de kolom niet leegloopt.
+    """
+    besluit = (item.get("besluitMetadata") or {}).get("citeerTitel")
+    if besluit and besluit.strip():
+        return besluit.strip()
+    regeling = item.get("citeerTitel")
+    return regeling.strip() if regeling and regeling.strip() else None
+
+
 def _fetch_basis_expression(href: str | None) -> str | None:
     """Volg beoogdeOpvolgerVan/wijzigtRegelingversie en lees `expressionId`
     van de basis-versie waarop dit ontwerp/besluit voortbouwt.
@@ -535,13 +558,14 @@ def load_ontwerp(item: dict, conn: psycopg.Connection) -> str | None:
                 wijzigt_expression = EXCLUDED.wijzigt_expression,
                 nieuwe_expression = EXCLUDED.nieuwe_expression,
                 opschrift = EXCLUDED.opschrift,
+                citeertitel = EXCLUDED.citeertitel,
                 is_vervang_regeling = EXCLUDED.is_vervang_regeling,
                 beschikbaar_op = NOW()
         """, (ontwerpbesluit_id, item.get("technischId"),
               item.get("identificatie"), basis_expression, expression_id,
               bekend_op, ontvangen_op, bronhouder_code,
               item.get("type", {}).get("waarde"),
-              item.get("opschrift"), item.get("citeerTitel"),
+              item.get("opschrift"), _besluit_citeertitel(item),
               item.get("publicatieID"), is_vervang))
 
         # Procedurestappen
@@ -638,6 +662,7 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
                 nieuwe_expression = EXCLUDED.nieuwe_expression,
                 begin_inwerking = EXCLUDED.begin_inwerking,
                 begin_geldigheid = EXCLUDED.begin_geldigheid,
+                citeertitel = EXCLUDED.citeertitel,
                 is_vervang_regeling = EXCLUDED.is_vervang_regeling,
                 beschikbaar_op = NOW()
         """, (besluit_id, technisch_id, item.get("identificatie"),
@@ -645,7 +670,7 @@ def load_besluitversie(item: dict, conn: psycopg.Connection) -> str | None:
               bekend_op, ontvangen_op, begin_geldigheid, begin_inwerking,
               item.get("eindverantwoordelijke"), bronhouder_code,
               item.get("type", {}).get("waarde"),
-              item.get("opschrift"), item.get("citeerTitel"),
+              item.get("opschrift"), _besluit_citeertitel(item),
               item.get("publicatieID"), is_vervang))
 
         # Procedurestappen

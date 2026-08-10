@@ -3,6 +3,13 @@
 > Status: Open
 > Datum: 2026-08-07
 
+> **Let op — dit gaat over de REGELING.** Er is een tweede, inmiddels opgelost
+> geval één niveau lager: de citeertitel van het **besluit**, uit
+> `besluitMetadata.citeerTitel`. Zie [Citeertitel van het besluit
+> (`p2pwijziging.besluit`)](#citeertitel-van-het-besluit-p2pwijzigingbesluit)
+> onderaan. De twee kolommen heten hetzelfde maar dragen iets anders; verwar ze
+> niet.
+
 ## Probleem
 
 `p2p.regeling.citeertitel` is voor **alle 1977 regelingen identiek aan
@@ -97,3 +104,61 @@ bijschriften, chips en verwijzingen).
 - [ ] Een verse load van één bronhouder vult het veld meteen goed (geen backfill nodig)
 - [ ] `opschrift` is voor geen enkele regeling gewijzigd (diff vóór/na)
 - [ ] De viewer toont dezelfde korte namen als nu, maar zonder `korteRegelingnaam`
+
+---
+
+## Citeertitel van het besluit (`p2pwijziging.besluit`)
+
+> Status: Opgelost
+> Datum: 2026-08-10
+
+Hetzelfde patroon, één niveau lager, en met een grotere opbrengst.
+
+Een ontwerpregeling draagt in de Presenteren-API **twee** titel-niveaus:
+
+| veld | hoort bij | Putten |
+|---|---|---|
+| `opschrift` / `citeerTitel` (top-level) | de regeling | "Omgevingsplan gemeente Putten" |
+| `besluitMetadata.citeerTitel` | het besluit dat deze versie veroorzaakt | "Wijziging omgevingsplan gemeente Putten t.b.v. ontwikkeling Stenenkamerseweg 38/38a" |
+
+`ontwerp_loader` las alleen het top-level veld. Gevolg: `citeertitel` was op
+regeling-niveau gevuld en daarmee **gelijk voor elk besluit op dezelfde
+regeling**. Putten heeft drie lopende ontwerpen; in de viewer heetten die alle
+drie "Omgevingsplan gemeente Putten". De bron-selector, de tour-header en de
+renvooi-pills in de leestekst waren dus onderling niet te onderscheiden.
+
+Reikwijdte, gemeten 2026-08-10 op de productie-API:
+
+- **ontwerpregelingen**: 805 van de 1028 leveren `besluitMetadata`
+- **besluitversies**: 0 van de 2812 — het veld staat alleen op het
+  `Ontwerpregeling`-schema. Voor vastgestelde besluiten is er niets op te halen;
+  daar valt de loader terug op regeling-niveau.
+
+### Doorgevoerd
+
+1. **Loader** — `_besluit_citeertitel()` in
+   [ontwerp_loader.py](../dso-loader/src/loaders/ontwerp_loader.py): eerst
+   `besluitMetadata.citeerTitel`, dan het top-level veld. Beide UPSERTs
+   verversen `citeertitel` nu ook in de `ON CONFLICT DO UPDATE`; dat ontbrak,
+   waardoor een herload de oude waarde had laten staan.
+2. **Backfill** —
+   [scripts/backfill_besluit_citeertitel.py](../dso-loader/scripts/backfill_besluit_citeertitel.py).
+   Paginaert alleen de goedkope listing, raakt uitsluitend de
+   `citeertitel`-kolom. Droogloop by default. Resultaat: 224 van de 321
+   ontwerpen bijgewerkt; 239 zijn nu onderscheidend tegenover ~15 daarvoor.
+3. **Semantiek** — `COMMENT ON COLUMN` op beide kolommen, in `ddl.py` en als
+   losse migratie
+   ([2026-08-besluit-citeertitel-commentaar.sql](../dso-loader/scripts/2026-08-besluit-citeertitel-commentaar.sql)).
+4. **API** — `/v1/viewer/regeling/{expression}/wijzigingen` geeft `citeertitel`
+   mee per bron.
+5. **Viewer** — `besluitNaam()` in `wijziging.model.ts` (citeertitel, terugval
+   op opschrift), gebruikt door de bron-selector, de tour-header en de
+   renvooi-bron-pill. `MetBron.bronOpschrift` heet daarom nu `bronNaam`.
+
+### Verificatie
+
+- [x] De drie Putten-ontwerpen hebben elk een eigen citeertitel in
+      `p2pwijziging.besluit`
+- [x] `/v1/viewer/regeling/…/wijzigingen` geeft ze alle drie verschillend terug
+- [x] Besluitversies houden hun regeling-citeertitel (geen NULL, geen lege string)
+- [x] 328 viewer-tests groen

@@ -636,6 +636,11 @@ CREATE TABLE IF NOT EXISTS p2pwijziging.besluit (
     is_vervang_regeling      BOOLEAN NOT NULL DEFAULT FALSE,
     beschikbaar_op           TIMESTAMP NOT NULL DEFAULT NOW()
 );
+COMMENT ON COLUMN p2pwijziging.besluit.opschrift IS
+    'Opschrift van de REGELING die dit besluit wijzigt (bv. "Omgevingsplan gemeente Putten") — niet onderscheidend tussen besluiten op dezelfde regeling.';
+COMMENT ON COLUMN p2pwijziging.besluit.citeertitel IS
+    'Citeertitel van het BESLUIT zelf, uit besluitMetadata.citeerTitel (bv. "Wijziging omgevingsplan gemeente Putten t.b.v. ontwikkeling Stenenkamerseweg 38/38a"). Valt terug op de citeertitel van de regeling wanneer de bron geen besluitMetadata levert — dat is bij alle besluitversies zo, want het veld bestaat alleen op ontwerpregelingen.';
+
 CREATE INDEX IF NOT EXISTS idx_ontwerp_besluit_work ON p2pwijziging.besluit(regeling_work);
 CREATE INDEX IF NOT EXISTS idx_ontwerp_besluit_wijzigt ON p2pwijziging.besluit(wijzigt_expression);
 CREATE INDEX IF NOT EXISTS idx_ontwerp_besluit_inwerking ON p2pwijziging.besluit(begin_inwerking);
