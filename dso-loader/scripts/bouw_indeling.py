@@ -17,10 +17,21 @@ dichtstbijzijnde buur schuiven.
 De typeBepaling-as heeft GEEN curatie nodig en kan dus vooruitlopen op het
 invullen van de xlsx.
 
+Twee doelen, dezelfde regels:
+
+  v2a.artikel_indeling    de vigerende regelingen (p2p)
+  v2a.wijziging_indeling  de renvooi-tekst van ontwerpen en besluiten
+                          (p2pwijziging), voor de wijzigingentour
+
+Die tweede fase hoort hier en niet in een eigen script: liepen de regelsets
+uiteen, dan zou hetzelfde artikel in het register een ander onderwerp krijgen
+dan in de tour ernaast.
+
 Draaien:
-    python scripts/bouw_indeling.py                 # alles
-    python scripts/bouw_indeling.py --alleen-type   # zonder de xlsx
-    python scripts/bouw_indeling.py --ddl           # tabellen (her)aanmaken
+    python scripts/bouw_indeling.py                     # alles
+    python scripts/bouw_indeling.py --alleen-type       # zonder de xlsx
+    python scripts/bouw_indeling.py --alleen-wijzigingen
+    python scripts/bouw_indeling.py --ddl               # tabellen (her)aanmaken
 """
 import argparse
 import os
@@ -40,6 +51,7 @@ DB = (os.environ.get("OCD_DB_URL")
       or "postgresql://postgres:postgres@localhost:5434/dso")
 HIER = os.path.dirname(os.path.abspath(__file__))
 DDL_PAD = os.path.join(HIER, "2026-08-add-pad-categorie.sql")
+DDL_WIJZ = os.path.join(HIER, "2026-08-add-wijziging-indeling.sql")
 XLSX = os.path.join(HIER, "..", "curatie", "lijsten.xlsx")
 CURATIE_VERSIE = "v2-2026-08"
 
@@ -267,6 +279,43 @@ WHERE NOT coalesce(r.inactief, false)
 """
 
 
+# Zelfde klim als PAD_SQL, maar door de renvooi-boom. Scope = artikelen die in
+# dit besluit iets doen (wijzigactie / vervallen / renvooi), want alleen die
+# komen in de tour. De besluit-join levert regeling_work: p2pwijziging is per
+# ontwerpbesluit gevuld en heeft geen expression van de geldende regeling.
+WIJZIGING_PAD_SQL = """
+WITH RECURSIVE elems AS (
+    SELECT t.id, t.parent_id, t.wid, t.opschrift, t.element_type,
+           b.regeling_work, t.wijzigactie, t.vervallen, t.bevat_renvooi
+    FROM p2pwijziging.tekst_element t
+    JOIN p2pwijziging.besluit b USING (ontwerpbesluit_id)
+),
+keten AS (
+    SELECT e.id AS art, e.regeling_work, e.parent_id, e.wid, e.opschrift AS art_op,
+           ARRAY[]::text[] AS ops, 0 AS d
+    FROM elems e
+    WHERE e.element_type = 'Artikel'
+      AND (e.wijzigactie IS NOT NULL OR e.vervallen OR e.bevat_renvooi)
+  UNION ALL
+    SELECT k.art, k.regeling_work, p.parent_id, k.wid, k.art_op,
+           coalesce(p.opschrift,'') || k.ops, k.d + 1
+    FROM keten k JOIN elems p ON p.id = k.parent_id WHERE k.d < 8
+)
+SELECT DISTINCT ON (art) art, regeling_work, wid, art_op,
+       array_to_string(array_remove(ops,''), ' > ') AS pad
+FROM keten ORDER BY art, d DESC
+"""
+
+# De vigerende indeling als route 1. `regeling_expression` is een expression,
+# p2pwijziging kent alleen de work — vandaar het afkappen op '/nld@'.
+REGISTER_SQL = """
+SELECT split_part(regeling_expression, '/nld@', 1) AS work, wid,
+       categorie, subcategorie
+FROM v2a.artikel_indeling
+WHERE categorie IS NOT NULL AND wid IS NOT NULL
+"""
+
+
 def _laad_regels():
     """De curatie uit curatie/subcategorie_regels.py.
 
@@ -384,15 +433,87 @@ def lees_xlsx(pad):
     return uit
 
 
-def main(ddl: bool, alleen_type: bool) -> None:
+def bouw_wijzigingen(cur, curatie: dict) -> None:
+    """Vult v2a.wijziging_indeling — de indeling op de renvooi-tekst.
+
+    Draait ná de artikel-indeling en leest die: route 1 is de vigerende
+    indeling op (work, wid), route 2 het opschriftpad uit de renvooi-boom.
+    Alleen route 2 kent nieuwe artikelen; alleen route 1 houdt de tour gelijk
+    aan wat het register bij hetzelfde artikel toont.
+    """
+    print("\nwijzigingen indelen...", flush=True)
+    # Zelf aanmaken als de tabel er nog niet is, zodat dit ook draait wanneer
+    # full_sync.py het script zonder --ddl aanroept. De DDL is DROP+CREATE, dus
+    # hij mag níet onvoorwaardelijk lopen.
+    cur.execute("SELECT to_regclass('v2a.wijziging_indeling')")
+    if cur.fetchone()[0] is None:
+        cur.execute(open(DDL_WIJZ, encoding="utf-8").read())
+        print("  v2a.wijziging_indeling aangemaakt")
+
+    cur.execute(REGISTER_SQL)
+    register = {}
+    for work, wid, cat, sub in cur.fetchall():
+        register.setdefault((work, wid), (cat, sub))
+    print(f"  {len(register)} ingedeelde artikelen in het register als route 1")
+
+    cur.execute(WIJZIGING_PAD_SQL)
+    rijen, tel, gezien = [], Counter(), set()
+    for _art, work, wid, art_op, pad in cur.fetchall():
+        if wid is None or (work, wid) in gezien:
+            continue
+        gezien.add((work, wid))
+        sleutel = pad_sleutel(pad)
+
+        hit = register.get((work, wid))
+        if hit:
+            cat, sub, bron_cat = hit[0], hit[1], "register"
+        else:
+            # Zelfde volgorde als in de artikel-indeling: handmatige
+            # pad-koppeling boven de regels.
+            pc = curatie.get(sleutel)
+            if pc:
+                cat, sub, bron_cat = pc["categorie"], pc["subcategorie"], "renvooi"
+            else:
+                uit = cureer(ruw_label(pad.split(" > "))) if pad else None
+                cat, sub = uit if uit else (None, None)
+                bron_cat = "renvooi" if uit else None
+
+        tb = bepaal_type(art_op)
+        rijen.append((work, wid, sleutel, cat, sub, tb, bron_cat, CURATIE_VERSIE))
+        tel["totaal"] += 1
+        tel["met_categorie"] += bool(cat)
+        tel["met_type"] += bool(tb)
+        tel[f"via_{bron_cat}"] += bool(cat)
+
+    cur.execute("TRUNCATE v2a.wijziging_indeling")
+    with cur.copy("""COPY v2a.wijziging_indeling
+        (regeling_work, artikel_wid, pad_sleutel, categorie, subcategorie,
+         type_bepaling, herkomst, curatie_versie) FROM STDIN""") as cp:
+        for r in rijen:
+            cp.write_row(r)
+
+    t = tel["totaal"] or 1
+    print(f"  gewijzigde artikelen : {tel['totaal']}")
+    print(f"  met categorie        : {tel['met_categorie']:7} ({100*tel['met_categorie']/t:5.1f}%)"
+          f"  — register {tel['via_register']}, renvooi {tel['via_renvooi']}")
+    print(f"  met typeBepaling     : {tel['met_type']:7} ({100*tel['met_type']/t:5.1f}%)")
+
+
+def main(ddl: bool, alleen_type: bool, alleen_wijzigingen: bool) -> None:
     conn = psycopg.connect(DB, autocommit=True)
     cur = conn.cursor()
 
     if ddl:
         cur.execute(open(DDL_PAD, encoding="utf-8").read())
+        cur.execute(open(DDL_WIJZ, encoding="utf-8").read())
         print("tabellen aangemaakt")
 
     curatie = {} if alleen_type else lees_xlsx(os.path.abspath(XLSX))
+
+    if alleen_wijzigingen:
+        bouw_wijzigingen(cur, curatie)
+        conn.close()
+        return
 
     if curatie:
         cur.execute("TRUNCATE v2a.pad_categorie CASCADE")
@@ -464,6 +585,8 @@ def main(ddl: bool, alleen_type: bool) -> None:
                    FROM v2a.artikel_indeling GROUP BY 1 ORDER BY 2 DESC""")
     for waarde, n in cur.fetchall():
         print(f"    {n:7}  {waarde}")
+
+    bouw_wijzigingen(cur, curatie)
     conn.close()
 
 
@@ -471,5 +594,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--ddl", action="store_true", help="tabellen (her)aanmaken")
     p.add_argument("--alleen-type", action="store_true", help="xlsx negeren")
+    p.add_argument("--alleen-wijzigingen", action="store_true",
+                   help="alleen v2a.wijziging_indeling herbouwen")
     a = p.parse_args()
-    main(a.ddl, a.alleen_type)
+    main(a.ddl, a.alleen_type, a.alleen_wijzigingen)

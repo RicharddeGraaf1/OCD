@@ -544,10 +544,13 @@ def fase_post(run_start: datetime.datetime, gewijzigd: set[str] | None = None):
     # artikelen kijkt zou dat gat niet dichten. Precies het soort stille
     # achteruitgang waar het onderwerp-filter niets van laat zien: wat het niet
     # kent, toont het gewoon niet.
-    with load_run("indeling", scope="categorie + typeBepaling per artikel") as run:
+    # Dezelfde run doet ook v2a.wijziging_indeling voor de wijzigingentour —
+    # één script, want liepen de regelsets uiteen dan zou hetzelfde artikel in
+    # het register een ander onderwerp krijgen dan in de tour ernaast.
+    with load_run("indeling", scope="categorie + typeBepaling, register + wijzigingen") as run:
         ok_ind, meting_ind = gemeten_subproc(
             [py, str(ROOT / "scripts" / "bouw_indeling.py")],
-            "artikel-indeling (categorie + typeBepaling)",
+            "indeling (categorie + typeBepaling)",
             "SELECT count(*) n FROM v2a.artikel_indeling WHERE categorie IS NOT NULL",
             "ingedeelde artikelen")
         run.set(n_fout=0 if ok_ind else 1)
@@ -560,15 +563,31 @@ def fase_post(run_start: datetime.datetime, gewijzigd: set[str] | None = None):
         LEFT JOIN v2a.artikel_indeling ai ON ai.tekst_element_id = te.id
         WHERE te.element_type = 'Artikel' AND NOT coalesce(r.inactief, false)
           AND ai.tekst_element_id IS NULL""")
+    # Zelfde vraag voor de renvooi-kant. Hier is er géén FK die kan casseren —
+    # de sleutel is (regeling_work, artikel_wid), juist om de cascade-val te
+    # vermijden — maar een mislukte herbouw laat de tour wél verouderen, en die
+    # klaagt daar net zo min over als het register.
+    gat_wijz = q1(cur, """
+        SELECT count(*) n
+        FROM   p2pwijziging.tekst_element te
+        JOIN   p2pwijziging.besluit b USING (ontwerpbesluit_id)
+        LEFT JOIN v2a.wijziging_indeling wi
+               ON wi.regeling_work = b.regeling_work AND wi.artikel_wid = te.wid
+        WHERE  te.element_type = 'Artikel' AND te.wid IS NOT NULL
+          AND  (te.wijzigactie IS NOT NULL OR te.vervallen OR te.bevat_renvooi)
+          AND  wi.artikel_wid IS NULL""")
     conn.close()
-    rapporteer("Artikel-indeling", [
+    rapporteer("Indeling", [
         meting_ind,
         f"- artikelen in vigerende regelingen zónder indelingsrij: {gat}",
-        "", "> Hoort 0 te zijn. Anders is de herbouw stukgelopen en toont het",
-        "> register die artikelen zonder categorie, zonder dat iets klaagt.",
+        f"- gewijzigde artikelen zónder indelingsrij: {gat_wijz}",
+        "", "> Beide horen 0 te zijn. Anders is de herbouw stukgelopen en tonen",
+        "> register en tour die artikelen zonder categorie, zonder dat iets klaagt.",
     ])
     if gat:
         fouten.append(f"artikel-indeling: {gat} artikelen zonder indelingsrij")
+    if gat_wijz:
+        fouten.append(f"wijziging-indeling: {gat_wijz} artikelen zonder indelingsrij")
 
     with load_run("drieslag-mv", scope="naammatch/tekst-object/gio-consistentie MV's") as run:
         ok = subproc([py, str(ROOT / "scripts" / "refresh_drieslag.py")], "drieslag-MV-refresh",

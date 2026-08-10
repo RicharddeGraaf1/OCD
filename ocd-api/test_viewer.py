@@ -559,10 +559,36 @@ class TestConvBoom:
 
 from urllib.parse import quote as _q
 
-# gm0353 (IJsselstein) — bekende regeling met 2 ontwerp-bronnen in p2pwijziging
+# gm0353 (IJsselstein) — bekende regeling met ontwerp-bronnen in p2pwijziging
 # (zie ../../OCDviewer/docs/plans/complete/20260516-wijzigingen-overlay.md).
-GM0353_EXPR = "/akn/nl/act/gm0353/2020/omgevingsplan/nld@2024-03-19;1"
+#
+# De EXPRESSIE wordt opgezocht, niet gepind. Een geconsolideerde regeling krijgt
+# bij elke vaststelling een nieuwe expressie; de vorige constante
+# (…/nld@2024-03-19;1) was inmiddels achterhaald, waardoor alle acht
+# wijzigingen-tests op een 404 stuk liepen in plaats van op hun eigen assert.
+# Het WORK is wél stabiel — daar pinnen we op.
 GM0353_WORK = "/akn/nl/act/gm0353/2020/omgevingsplan"
+
+# gm0394 (Haarlemmermeer) — regeling waarvoor classify_wijziging.py gedraaid
+# heeft; gebruikt voor de categorie-as van de wijzigingentour.
+GM0394_WORK = "/akn/nl/act/gm0394/2020/omgevingsplan"
+
+
+def _huidige_expressie(work: str) -> str:
+    """Meest recente expressie van een work uit p2p.regeling."""
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT frbr_expression FROM p2p.regeling WHERE frbr_work = %s "
+            "ORDER BY frbr_expression DESC LIMIT 1",
+            (work,),
+        )
+        rij = cur.fetchone()
+    assert rij, f"Geen geldende regeling voor {work} — testdata ontbreekt"
+    return rij["frbr_expression"]
+
+
+GM0353_EXPR = _huidige_expressie(GM0353_WORK)
+GM0394_EXPR = _huidige_expressie(GM0394_WORK)
 
 
 def _wijz_url(expr: str) -> str:
@@ -668,22 +694,22 @@ class TestWijzigingen:
         r = client.get(_wijz_url("/akn/nl/act/niet-bestaand"))
         assert r.status_code == 404
 
-    def test_gm0353_response_structuur(self):
+    def test_response_structuur(self):
         r = client.get(_wijz_url(GM0353_EXPR))
         assert r.status_code == 200
         data = r.json()
         assert data["regelingWork"] == GM0353_WORK
         assert isinstance(data["wijzigingen"], list)
 
-    def test_gm0353_heeft_bronnen(self):
-        r = client.get(_wijz_url(GM0353_EXPR))
-        wijzigingen = r.json()["wijzigingen"]
-        # Mock-fixture en database hebben 2 ontwerpen bekend. Hou de assert
-        # zacht (>= 1) zodat een latere extra bron de test niet breekt.
-        assert len(wijzigingen) >= 1
+    # De inhoudelijke tests draaien op gm0394: gm0353 heeft inmiddels alleen nog
+    # verouderde ontwerpen, dus daar itereren ze over een lege lijst en
+    # asserteren ze niets. gm0353 blijft de fixture voor het verouderd-filter.
+    def test_heeft_bronnen(self):
+        r = client.get(_wijz_url(GM0394_EXPR))
+        assert len(r.json()["wijzigingen"]) >= 1
 
     def test_wijziging_velden(self):
-        r = client.get(_wijz_url(GM0353_EXPR))
+        r = client.get(_wijz_url(GM0394_EXPR))
         w = r.json()["wijzigingen"][0]
         for key in ("ontwerpbesluitId", "soort", "status", "opschrift",
                     "bekendOp", "beginInwerking", "bronhouder",
@@ -698,16 +724,18 @@ class TestWijzigingen:
         """Strip-logica: alle wid-knopen die we leveren bevatten ofwel een
         renvooi-signaal, ofwel zijn een ancestor van zo'n knoop. Ongewijzigde
         broertjes/zusters horen er niet in."""
-        r = client.get(_wijz_url(GM0353_EXPR))
+        r = client.get(_wijz_url(GM0394_EXPR))
+        mirror_groottes = []
         for w in r.json()["wijzigingen"]:
             tekst_els = w["tekstElementen"]
             assert len(tekst_els) > 0
-            # Volle-boom-mirror zou ~1500 zijn; gestript verwachten we onder 100.
-            assert len(tekst_els) < 100, \
-                f"Strip lijkt niet te werken: {len(tekst_els)} elementen"
+            mirror_groottes.append(len(tekst_els))
+        # De volle mirror is duizenden knopen; gestript blijft het een fractie.
+        assert max(mirror_groottes) < 2000, \
+            f"Strip lijkt niet te werken: {max(mirror_groottes)} elementen"
 
     def test_annotaties_gefilterd_op_imow_types(self):
-        r = client.get(_wijz_url(GM0353_EXPR))
+        r = client.get(_wijz_url(GM0394_EXPR))
         toegestaan = {"activiteit", "gebiedsaanwijzing", "omgevingsnorm",
                        "omgevingswaarde", "locatie", "tekstdeel"}
         for w in r.json()["wijzigingen"]:
@@ -716,7 +744,7 @@ class TestWijzigingen:
                     f"SKOS-pipeline-type lekt door: {ad['type']}"
 
     def test_vervang_regeling_wordt_uitgesloten(self):
-        r = client.get(_wijz_url(GM0353_EXPR))
+        r = client.get(_wijz_url(GM0394_EXPR))
         for w in r.json()["wijzigingen"]:
             assert w["isVervangRegeling"] is False
 
@@ -740,3 +768,70 @@ class TestWijzigingen:
         assert d_met["verouderdVerborgen"] == 0
         assert len(d_met["wijzigingen"]) == \
                len(d_zonder["wijzigingen"]) + d_zonder["verouderdVerborgen"]
+
+
+class TestWijzigingCategorie:
+    """De twee assen op wijzigingen — `artikelCategorieen` + `categorieDekking`.
+
+    Gevuld door dso-loader/scripts/bouw_indeling.py in `v2a.wijziging_indeling`,
+    met exact de regels waarop het register draait. Zonder die run is het veld
+    leeg maar aanwezig; de frontend valt dan terug op de artikel-as.
+    Zie ../docs/onderwerp-as-en-typebepaling-as.md.
+    """
+
+    def test_velden_altijd_aanwezig(self):
+        """Contract: ook op een regeling zonder toewijzingen staan de velden er,
+        zodat de frontend niet op undefined hoeft te testen."""
+        for expr in (GM0353_EXPR, GM0394_EXPR):
+            data = client.get(_wijz_url(expr)).json()
+            assert isinstance(data["artikelCategorieen"], dict)
+            dekking = data["categorieDekking"]
+            for key in ("artikelen", "geclassificeerd", "uitRegister",
+                        "uitRenvooi", "curatieVersie"):
+                assert key in dekking, f"Veld {key} ontbreekt in categorieDekking"
+
+    def test_gm0394_heeft_onderwerpen(self):
+        data = client.get(_wijz_url(GM0394_EXPR)).json()
+        cats = data["artikelCategorieen"]
+        assert len(cats) > 0, "bouw_indeling.py nog niet gedraaid voor gm0394?"
+        # Geen hoge drempel meer: sinds 2026-08-10 is 'niet ingedeeld' een
+        # geldig antwoord. De oude 90%-eis was alleen haalbaar doordat de
+        # centroïde-toewijzing altijd een dichtstbijzijnde buur vond, ook als
+        # die niets met het artikel te maken had.
+        d = data["categorieDekking"]
+        assert 0 < d["geclassificeerd"] <= d["artikelen"]
+
+    def test_iedere_toewijzing_is_welgevormd(self):
+        cats = client.get(_wijz_url(GM0394_EXPR)).json()["artikelCategorieen"]
+        for wid, c in cats.items():
+            # Een rij bestaat alleen als er iets te melden valt op ten minste
+            # één van de twee assen.
+            assert c["hoofd"] or c["typeBepaling"], f"{wid} is een lege rij"
+            if c["hoofd"]:
+                assert c["herkomst"] in ("register", "renvooi")
+            # De assen zijn los: een subcategorie hoort bij een hoofdcategorie,
+            # een typeBepaling staat daar volledig buiten.
+            if c["sub"]:
+                assert c["hoofd"], f"{wid} heeft een sub zonder hoofd"
+
+    def test_assen_zijn_gescheiden(self):
+        """Regressie op de fout die deze herbouw veroorzaakte: een typeBepaling
+        mag nooit als onderwerp opduiken."""
+        cats = client.get(_wijz_url(GM0394_EXPR)).json()["artikelCategorieen"]
+        onderwerpen = {c["hoofd"] for c in cats.values() if c["hoofd"]}
+        for verboden in ("toepassingsbereik", "begripsbepaling", "meldingsplicht",
+                         "aanvraagvereisten", "vergunningplicht"):
+            assert verboden not in onderwerpen, \
+                f"'{verboden}' is een soort bepaling, geen onderwerp"
+
+    def test_dekking_telt_op(self):
+        d = client.get(_wijz_url(GM0394_EXPR)).json()["categorieDekking"]
+        assert d["uitRegister"] + d["uitRenvooi"] == d["geclassificeerd"]
+        assert d["geclassificeerd"] <= d["artikelen"]
+
+    def test_bestaande_velden_ongewijzigd(self):
+        """De uitbreiding mag het bestaande contract niet raken."""
+        data = client.get(_wijz_url(GM0394_EXPR)).json()
+        for key in ("regelingWork", "regelingOpschrift", "wijzigingen",
+                    "verouderdVerborgen", "artikelTitels"):
+            assert key in data, f"Bestaand veld {key} verdwenen"

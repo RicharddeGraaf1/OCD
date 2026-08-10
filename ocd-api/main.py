@@ -1,4 +1,3 @@
-import collections
 import logging
 import os
 import re
@@ -5035,105 +5034,52 @@ def _row_to_besluit_meta(r: dict) -> dict:
     }
 
 
-def _artikel_categorieen(cur, regeling_work: str, ob_ids: list[str],
+def _artikel_categorieen(cur, regeling_work: str,
                          artikel_wids: set[str]) -> dict[str, dict]:
-    """Onderwerp per artikel-wid, voor de categorie-as van de wijzigingentour.
+    """Onderwerp én typeBepaling per artikel-wid, voor de categorie-as van de tour.
 
-    Twee lagen, in deze volgorde:
+    Leest `v2a.wijziging_indeling`, gevuld door dso-loader/scripts/bouw_indeling.py
+    met exact de regels waarop het register draait. Twee assen:
 
-    1. DIRECT — de toewijzing uit `v2a.wijziging_artikel_categorie`, gemaakt door
-       classify_wijziging.py op de ontwerp-tekst zelf. Dat is de betrouwbare laag:
-       hij classificeert wat er in dít besluit staat, niet wat er in de geldende
-       regeling stond, en werkt daarmee ook voor nieuwe artikelen.
+        hoofd / sub    waar de bepaling OVER gaat  <- opschriftpad
+        typeBepaling   wat voor bepaling het IS    <- artikelopschrift
 
-    2. OVERERVING — voor artikelen zonder eigen tekst (containers, en de
-       bruidsschat-placeholders die formeel vervallen zonder ooit inhoud te hebben
-       gehad; landelijk ~25% van de gewijzigde artikelen). Die krijgen het
-       onderwerp dat het vaakst voorkomt onder de wél geclassificeerde artikelen
-       in de dichtstbijzijnde container erboven.
+    Tot 2026-08-10 kwam dit uit `v2a.wijziging_artikel_categorie`, en daarmee uit
+    de centroïde-taxonomie die beide assen op één hoop gooide: de grootste
+    "categorie" op wijzigingen was "Tanken en vloeibare brandstoffen" (6.026
+    artikelen), gevolgd door drie waarden die in werkelijkheid typeBepaling zijn.
 
-    Elke toewijzing draagt `herkomst` ('tekst' of 'overerving'). Zonder dat veld
-    is een winst in dekking niet te onderscheiden van een verlies in precisie —
-    de UI kan overgeërfde onderwerpen zwakker zetten en een meting kan ze
-    uitsplitsen.
+    `hoofd` mag NULL zijn — dat is "niet ingedeeld", een geldig antwoord, en de
+    rij zit hier dan alleen om zijn typeBepaling. `categorieDekking` telt daarom
+    op `hoofd`, niet op het aantal rijen.
+
+    De overervingsstap die hier stond is vervallen. Die bestond omdat de oude
+    classificatie op de artikéltekst draaide en een tekstloos artikel dus niets
+    kreeg; nu komt het onderwerp uit de voorouderketen, die broers en zussen
+    delen. Gemeten 2026-08-10: overerving zou nog 11 van de 3.705 niet-ingedeelde
+    artikelen raken — geen boomwandeling waard.
     """
     if not artikel_wids:
         return {}
 
     cur.execute(
         """
-        SELECT artikel_wid, hoofdcategorie, categorie, is_hoofd, afstand
-        FROM   v2a.wijziging_artikel_categorie
+        SELECT artikel_wid, categorie, subcategorie, type_bepaling, herkomst
+        FROM   v2a.wijziging_indeling
         WHERE  regeling_work = %s AND artikel_wid = ANY(%s)
+          AND  (categorie IS NOT NULL OR type_bepaling IS NOT NULL)
         """,
         (regeling_work, list(artikel_wids)),
     )
-    uit: dict[str, dict] = {
+    return {
         r["artikel_wid"]: {
-            "hoofd": r["hoofdcategorie"],
-            "sub": None if r["is_hoofd"] else r["categorie"],
-            "afstand": round(r["afstand"], 3) if r["afstand"] is not None else None,
-            "herkomst": "tekst",
+            "hoofd": r["categorie"],
+            "sub": r["subcategorie"],
+            "typeBepaling": r["type_bepaling"],
+            "herkomst": r["herkomst"],
         }
         for r in cur.fetchall()
     }
-
-    ontbreekt = artikel_wids - set(uit)
-    if not ontbreekt or not ob_ids:
-        return uit
-
-    # Boom ophalen voor de overervingsstap. De volle mirror, want de klim gaat
-    # door containers heen die zelf geen artikel zijn.
-    cur.execute(
-        """
-        SELECT id, parent_id, wid, element_type
-        FROM   p2pwijziging.tekst_element
-        WHERE  ontwerpbesluit_id = ANY(%s)
-        """,
-        (ob_ids,),
-    )
-    rijen = cur.fetchall()
-    ouder = {r["id"]: r["parent_id"] for r in rijen}
-    artikelen = [r for r in rijen if r["element_type"] == "Artikel"]
-
-    def voorouders(node_id):
-        gezien = set()
-        p = ouder.get(node_id)
-        while p is not None and p not in gezien and len(gezien) < 20:
-            gezien.add(p)
-            yield p
-            p = ouder.get(p)
-
-    # Stemmen omhoog tellen: elk geclassificeerd artikel stemt in al zijn
-    # voorouder-containers.
-    stemmen: dict[int, collections.Counter] = collections.defaultdict(collections.Counter)
-    for r in artikelen:
-        gevonden = uit.get(r["wid"])
-        if not gevonden:
-            continue
-        for anc in voorouders(r["id"]):
-            stemmen[anc][gevonden["hoofd"]] += 1
-
-    # Dichtstbijzijnde container met stemmen wint. Gelijkspel valt op de
-    # alfabetisch eerste naam — deterministisch, en de UI toont 'overerving'
-    # dus de gebruiker weet dat het een afgeleide is.
-    for r in artikelen:
-        if r["wid"] in uit or r["wid"] not in ontbreekt:
-            continue
-        for anc in voorouders(r["id"]):
-            teller = stemmen.get(anc)
-            if not teller:
-                continue
-            hoofd = min(teller.items(), key=lambda kv: (-kv[1], kv[0]))[0]
-            uit[r["wid"]] = {
-                "hoofd": hoofd,
-                "sub": None,
-                "afstand": None,
-                "herkomst": "overerving",
-            }
-            break
-
-    return uit
 
 
 @app.get("/v1/viewer/regeling/{expression:path}/wijzigingen",
@@ -5284,19 +5230,20 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
 
         # Onderwerp per artikel — zijkanaal in dezelfde vorm als artikelTitels,
         # zodat de tour er één call voor nodig heeft. Leeg wanneer
-        # classify_wijziging.py nog niet over deze regeling is gelopen; de
+        # bouw_indeling.py nog niet over deze regeling is gelopen; de
         # frontend valt dan terug op de artikel-as.
         artikel_categorieen = _artikel_categorieen(
-            cur, regeling_work,
-            [b["ontwerpbesluit_id"] for b in besluiten],
-            alle_artikel_wids,
+            cur, regeling_work, alle_artikel_wids,
         )
-        cur.execute("SELECT DISTINCT taxonomie_versie FROM v2a.wijziging_categorie "
+        cur.execute("SELECT DISTINCT curatie_versie FROM v2a.wijziging_indeling "
                     "WHERE regeling_work = %s LIMIT 1", (regeling_work,))
         rij = cur.fetchone()
-        taxonomie = rij["taxonomie_versie"] if rij else None
+        taxonomie = rij["curatie_versie"] if rij else None
 
-    uit_tekst = sum(1 for v in artikel_categorieen.values() if v["herkomst"] == "tekst")
+    # Tellen op `hoofd`: een rij die alleen een typeBepaling draagt is niet
+    # ingedeeld, en de UI beslist op dit getal of de categorie-as zinvol is.
+    met_onderwerp = [v for v in artikel_categorieen.values() if v["hoofd"]]
+    uit_register = sum(1 for v in met_onderwerp if v["herkomst"] == "register")
     return {
         "regelingWork": regeling_work,
         "regelingOpschrift": regeling_opschrift,
@@ -5306,10 +5253,10 @@ def viewer_wijzigingen(expression: str, include_verouderd: bool = False):
         "artikelCategorieen": artikel_categorieen,
         "categorieDekking": {
             "artikelen": len(alle_artikel_wids),
-            "geclassificeerd": len(artikel_categorieen),
-            "uitTekst": uit_tekst,
-            "overgeerfd": len(artikel_categorieen) - uit_tekst,
-            "taxonomieVersie": taxonomie,
+            "geclassificeerd": len(met_onderwerp),
+            "uitRegister": uit_register,
+            "uitRenvooi": len(met_onderwerp) - uit_register,
+            "curatieVersie": taxonomie,
         },
     }
 

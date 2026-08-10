@@ -11,13 +11,14 @@ eigen source_type en een eigen (toekomstige) include_ontwerp-flag in de query.
 
 Resumable (per-chunk NOT EXISTS op source_ref), commit op feat/vector-chunk-lagen (geen push).
 """
-import os, re, time, subprocess, traceback
+import os, re, sys, time, subprocess, traceback
 import httpx, psycopg
 from psycopg.rows import dict_row
 
 DB = "postgresql://postgres:postgres@localhost:5434/dso"
 OLLAMA = "http://localhost:11434"; MODEL = "nomic-embed-text"
 REPO = r"C:\GIT\OCD"; SCRIPTS = r"C:\GIT\OCD\dso-loader\scripts"
+REPO_LOADER = r"C:\GIT\OCD\dso-loader"
 LOG = os.path.join(SCRIPTS, "overnight_ontwerp.log")
 REPORT = os.path.join(SCRIPTS, "MORNING-REPORT-ONTWERP.md")
 BRANCH = "feat/vector-chunk-lagen"; BATCH = 64
@@ -143,6 +144,35 @@ def git_commit():
         log(f"  git FOUT: {e}")
 
 
+def fase6c_categorie():
+    """Onderwerp + soort bepaling toewijzen aan de zojuist geladen ontwerp-tekst.
+
+    Hoort direct achter de embed-stap: zonder deze stap heeft een vers geladen
+    ontwerp geen indeling en valt de wijzigingentour terug op de artikel-as.
+
+    Sinds 2026-08-10 via `bouw_indeling.py --alleen-wijzigingen` en niet meer via
+    `classify_wijziging.py`. Die laatste legde de ontwerp-tekst tegen de
+    centroïden van `v2a.categorie`, en droeg daarmee dezelfde asvermenging die
+    het register op 2026-08-09 kwijtraakte: de grootste "categorie" op
+    wijzigingen was "Tanken en vloeibare brandstoffen" (6.026 artikelen). De
+    indeling komt nu uit de opschriftketen, met exact de regels van het register.
+
+    Bijvangst: deze stap heeft géén Ollama meer nodig — het is een opzoeking, geen
+    vectorvergelijking. Hij draait dus ook door als de embed-stap hierboven strandt.
+    """
+    log("FASE 6c — indeling toewijzen aan ontwerp-tekst")
+    r = subprocess.run(
+        [sys.executable, os.path.join(SCRIPTS, "bouw_indeling.py"), "--alleen-wijzigingen"],
+        cwd=REPO_LOADER, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    staart = (r.stdout or "").strip().splitlines()[-3:]
+    for regel in staart:
+        log(f"  {regel}")
+    if r.returncode != 0:
+        log(f"  bouw_indeling gaf exitcode {r.returncode}: {(r.stderr or '')[:400]}")
+    rep("## Fase 6c — indeling ontwerp-tekst\n" + "\n".join(f"- {s}" for s in staart) + "\n")
+
+
 def main():
     open(LOG, "w").close()
     log("=== ONTWERP overnight (Fase 6b) gestart ===")
@@ -152,6 +182,11 @@ def main():
     except Exception as e:
         log(f"EMBED FAALDE: {e}\n{traceback.format_exc()}")
         report.append(f"## ⚠️ Embed faalde\n```\n{e}\n```\n")
+    try:
+        fase6c_categorie()
+    except Exception as e:
+        log(f"CATEGORIE-TOEWIJZING FAALDE: {e}\n{traceback.format_exc()}")
+        report.append(f"## ⚠️ Categorie-toewijzing faalde\n```\n{e}\n```\n")
     try:
         report_out()
     except Exception as e:
