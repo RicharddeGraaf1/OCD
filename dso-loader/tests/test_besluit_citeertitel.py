@@ -36,6 +36,10 @@ def test_valt_terug_op_regeling_zonder_besluitmetadata():
 
     Terugvallen op de regeling-citeertitel houdt de kolom gevuld — beter een
     generieke naam dan NULL, want de viewer toont dit veld als bron-label.
+
+    Voor besluitversies is die terugval voorlopig; de Kadaster-BFF heeft voor
+    93% van hen wél een besluitnaam. Zie de docstring van
+    `_besluit_citeertitel`.
     """
     item = {k: v for k, v in PUTTEN.items() if k != "besluitMetadata"}
     assert _besluit_citeertitel(item) == "Omgevingsplan gemeente Putten"

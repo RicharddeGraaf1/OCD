@@ -54,9 +54,18 @@ def _besluit_citeertitel(item: dict) -> str | None:
     boven een wijzigingentour.
 
     Gemeten 2026-08-10: 805 van de 1028 ontwerpregelingen leveren
-    `besluitMetadata`. Op besluitversies bestaat het veld niet (0 van 2812) —
-    het staat alleen op het `Ontwerpregeling`-schema. Vandaar de terugval op
-    het regeling-niveau, zodat de kolom niet leegloopt.
+    `besluitMetadata`. Op besluitversies levert Presenteren het veld nooit —
+    niet in de listing (0 van 2812) en ook niet op de detail-endpoint. Vandaar
+    de terugval op het regeling-niveau, zodat de kolom niet leegloopt.
+
+    Let op: dat is een beperking van Presenteren, niet van de DSO. Het
+    Omgevingsloket toont voor besluitversies wél een besluitnaam
+    ("Elshagenweg 3 Wesepe" waar Presenteren "Omgevingsplan gemeente Raalte"
+    geeft) en haalt die uit zijn eigen BFF —
+    `document-viewer.dso.kadaster.nl/bff/ois/ontsluiten/v2/documenten/{technischId}`,
+    veld `omgevingsdocumentMetadata.besluitCiteertitel`, 93% dekking over onze
+    124 besluitversies. Nog niet aangesloten; zie docs/citeertitel-uit-
+    presenteren-api.md §Openstaand.
     """
     besluit = (item.get("besluitMetadata") or {}).get("citeerTitel")
     if besluit and besluit.strip():

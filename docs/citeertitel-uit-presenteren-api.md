@@ -130,9 +130,43 @@ renvooi-pills in de leestekst waren dus onderling niet te onderscheiden.
 Reikwijdte, gemeten 2026-08-10 op de productie-API:
 
 - **ontwerpregelingen**: 805 van de 1028 leveren `besluitMetadata`
-- **besluitversies**: 0 van de 2812 — het veld staat alleen op het
-  `Ontwerpregeling`-schema. Voor vastgestelde besluiten is er niets op te halen;
-  daar valt de loader terug op regeling-niveau.
+- **besluitversies**: 0 van de 2812 — het veld staat niet op het
+  `Besluitversie`-schema, en ook de detail-endpoint
+  `/besluitversies/{technischId}` levert het niet. Daar valt de loader terug op
+  regeling-niveau.
+
+### Correctie: besluitversies hébben wél een besluit-citeertitel
+
+Alleen niet in Presenteren. Het Omgevingsloket toont hem, en haalt hem uit zijn
+eigen backend-for-frontend:
+
+```
+GET https://document-viewer.dso.kadaster.nl/bff/ois/ontsluiten/v2/documenten/{technischId}
+    ?synchroniseerMetTileset=Actueel
+→ omgevingsdocumentMetadata.besluitCiteertitel
+```
+
+Zelfde `technischId` als in `p2pwijziging.besluit.technisch_id`, geen API-sleutel
+nodig. Gemeten over onze 124 besluitversies (2026-08-10, sequentieel — bij acht
+parallelle verbindingen faalt tweederde):
+
+| | met besluit-eigen naam | gelijk aan opschrift | leeg |
+|---|---|---|---|
+| besluitversies | **115 (93%)** | 9 | 0 |
+
+Voorbeelden: "Elshagenweg 3 Wesepe" (Raalte), "Vaststelling wijziging
+Omgevingsplan gemeente Oss - Postzegelplan Golfbad", "Wijziging omgevingsplan
+gebiedsontwikkeling 'Zwembad Wervershoof'" (Medemblik) — waar Presenteren voor
+alle drie alleen "Omgevingsplan gemeente X" geeft.
+
+De twee bronnen zijn complementair, niet overlappend: voor het Putten-ontwerp
+geeft de BFF juist de generieke `titel` en Presenteren de specifieke
+`besluitMetadata.citeerTitel`. De BFF heeft ze allebei —
+`omgevingsdocumentMetadata.besluitCiteertitel` klopt daar ook voor het ontwerp.
+
+**Nog niet aangesloten.** Het is de BFF van het Omgevingsloket, geen
+gepubliceerde API met een contract; een tweede bron in de sync is een
+afweging die apart gemaakt moet worden. Zie de openstaande vraag hieronder.
 
 ### Doorgevoerd
 
@@ -161,4 +195,11 @@ Reikwijdte, gemeten 2026-08-10 op de productie-API:
       `p2pwijziging.besluit`
 - [x] `/v1/viewer/regeling/…/wijzigingen` geeft ze alle drie verschillend terug
 - [x] Besluitversies houden hun regeling-citeertitel (geen NULL, geen lege string)
-- [x] 328 viewer-tests groen
+- [x] 328 viewer-tests groen, 65 loader-tests groen
+
+### Openstaand
+
+- [ ] Besluitversies aansluiten op `besluitCiteertitel` uit de Kadaster-BFF —
+      93% dekking, maar wel een tweede bron zonder gepubliceerd contract.
+      Ontwerp bij aansluiten: best-effort per besluit, faalt nooit de load, en
+      de volgorde blijft `besluitMetadata` → BFF → regeling-citeertitel.
