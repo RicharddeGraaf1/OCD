@@ -113,6 +113,37 @@ def _sql(laag: dict, niveau: int | None) -> str:
     """  # noqa: S608 — tabel/niveau komen uit LAGEN resp. _niveau_voor, niet uit de request
 
 
+# Tabellen waarvan we al weten dat ze bestaan. Alleen positieve uitkomsten
+# onthouden: staat een tabel er niet, dan blijven we kijken, zodat hij na het
+# bouwen meteen meedoet zonder herstart.
+_BESTAAT: set[str] = set()
+
+
+def _eis_generalisatie(conn, tabel: str) -> None:
+    """503 als de generalisatietabel ontbreekt.
+
+    Het endpoint kan gedeployed zijn zonder dat de tabellen op die database
+    gebouwd zijn — dat was op 2026-08-09 precies de situatie op productie. Dan
+    is z11+ gewoon goed (die leest de brontabel) maar loopt elke lagere zoom op
+    een 'relation does not exist'. Een 500 met een psycopg-stacktrace vertelt de
+    aanroeper niet wat er moet gebeuren; dit wel.
+    """
+    if tabel in _BESTAAT:
+        return
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s) IS NOT NULL AS bestaat", (tabel,))
+        rij = cur.fetchone()
+    if rij and rij["bestaat"]:
+        _BESTAAT.add(tabel)
+        return
+    raise HTTPException(
+        503,
+        f"Generalisatietabel {tabel} bestaat niet op deze database. Bouwen met "
+        f"dso-loader/scripts/vul_locatie_generalisatie.py (zie het DDL-script "
+        f"ernaast). Tot die tijd zijn alleen tegels vanaf z11 beschikbaar.",
+    )
+
+
 def _versie(conn) -> str:
     """Stempel dat verandert zodra er data is bijgeladen. Basis voor de ETag."""
     with conn.cursor() as cur:
@@ -155,6 +186,9 @@ def tegel(
         )
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers={"ETag": etag})
+
+        if niveau is not None:
+            _eis_generalisatie(conn, LAGEN[laag]["generalisatie"])
 
         with conn.cursor() as cur:
             cur.execute(

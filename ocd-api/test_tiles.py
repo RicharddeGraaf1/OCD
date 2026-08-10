@@ -132,6 +132,32 @@ def test_beide_lagen_zijn_los_van_elkaar():
     assert b"planobjecten" in wro and b"locaties" not in wro
 
 
+def test_ontbrekende_generalisatietabel_geeft_503_met_uitleg(monkeypatch):
+    """Het endpoint kan gedeployed zijn zonder dat de tabellen op die database
+    gebouwd zijn — dat was op 2026-08-09 de situatie op productie. Dan hoort de
+    aanroeper te horen wát er ontbreekt, niet een psycopg-stacktrace."""
+    monkeypatch.setitem(
+        mod.LAGEN["locaties"], "generalisatie", "p2p.bestaat_niet_generalisatie"
+    )
+    mod._BESTAAT.discard("p2p.bestaat_niet_generalisatie")
+
+    x, y = _tegel_van(UTR_X, UTR_Y, 8)
+    r = client.get(f"/v1/tiles/locaties/8/{x}/{y}.mvt")
+    assert r.status_code == 503
+    assert "p2p.bestaat_niet_generalisatie" in r.json()["detail"]
+    assert "vul_locatie_generalisatie.py" in r.json()["detail"]
+
+
+def test_zonder_generalisatietabel_werkt_z11_plus_wel(monkeypatch):
+    """z11+ leest de brontabel, dus die blijft bruikbaar op een database waar
+    de generalisatie nog niet gebouwd is."""
+    monkeypatch.setitem(
+        mod.LAGEN["locaties"], "generalisatie", "p2p.bestaat_niet_generalisatie"
+    )
+    x, y = _tegel_van(UTR_X, UTR_Y, 12)
+    assert client.get(f"/v1/tiles/locaties/12/{x}/{y}.mvt").status_code == 200
+
+
 def test_leeg_gebied_geeft_een_lege_tegel_geen_404():
     """Noordzee ver ten noordwesten van de kust. Voor een tegelbron is 'hier is
     niets' een geldig antwoord — een 404 zou OpenLayers als laadfout tonen.

@@ -111,6 +111,20 @@ huidige Ow-regime; Wro heeft zijn eigen schema.
 |---|---|---|
 | `locatie_subdiv` | tabel | Opgedeelde variant van `locatie.geometrie` (`ST_Subdivide`), voor querysnelheid op puntbevraging. |
 | `locatie_generalisatie` | tabel | Vereenvoudigde geometrie per zoomniveau voor de vector-tile-laag (niveau 6/8/10 = hoogste bediende zoom in de PDOK-RD-piramide) + `bron_hash` voor driftdetectie. Volledige herbouw met `scripts/vul_locatie_generalisatie.py` (~23 min). |
+| `wro.planobject_generalisatie` | tabel | Idem voor `wro.planobject`. Bevat ook lijnen (Figuur-objecten). Herbouw met `--bron wro` (~20 min). |
+
+> ⚠️ **Deploy-voorwaarde.** Beide generalisatietabellen bestaan **alleen op dev**
+> (stand 2026-08-10). Het endpoint `/v1/tiles/…` staat wél op productie: z11 en
+> hoger werkt daar (dat leest de brontabel), z10 en lager geeft een 503 met de
+> naam van de ontbrekende tabel. Zet je de viewer-vlag `vectorTilesEnabled` in
+> productie aan, **bouw dan eerst deze twee tabellen op de prod-database**.
+>
+> Wat dat kost: de prod-DB is 55 GB en dit komt er ruw 10 GB bij (dev: 12,2 GB
+> op bronnen van 12 en 16 GB; prod is met 10 en 14 GB iets kleiner). Reken op
+> 20–40 min zware IO tegen een PostGIS-instance met een harde geheugenkap van
+> 2 GB en een kleine `/dev/shm` — draai daar niet met tien parallelle
+> verbindingen op, en controleer eerst of het volume de groei aankan
+> (vergroten kan alleen via het Railway-dashboard).
 
 Beide zijn **wegwerpbaar**: afgeleid uit `p2p.locatie`, opnieuw op te bouwen
 zonder de bron aan te raken. Ze horen daarom bij de geometrie in `p2p` en niet
