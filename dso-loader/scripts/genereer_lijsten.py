@@ -21,7 +21,13 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-DB = os.environ.get("DSO_DB", "postgresql://postgres:postgres@localhost:5434/dso")
+# Doelwit-DB in dezelfde volgorde als de rest van de sync: `full_sync.py`
+# zet OCD_DB_URL wanneer je met --target prod rechtstreeks tegen productie
+# draait. Wie hier alleen DSO_DB leest, herbouwt bij zo'n run stilzwijgend de
+# LOKALE indeling en laat prod onaangeroerd.
+DB = (os.environ.get("OCD_DB_URL")
+      or os.environ.get("DSO_DB")
+      or "postgresql://postgres:postgres@localhost:5434/dso")
 UIT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                    "curatie", "lijsten.xlsx")
 

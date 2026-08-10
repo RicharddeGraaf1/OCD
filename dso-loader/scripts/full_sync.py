@@ -533,6 +533,43 @@ def fase_post(run_start: datetime.datetime, gewijzigd: set[str] | None = None):
         ok = subproc([py, "-m", "src.cli", "refresh-ponsenkaart-stats"], "refresh-ponsenkaart-stats") and ok
         run.set(n_fout=0 if ok else 1)
 
+    # Categorie/subcategorie/typeBepaling opnieuw bepalen. Hoort HIER en niet in
+    # fase_embed: het is een opzoeking op de opschriftketen, dus geen Ollama
+    # nodig — draait de embed-fase niet, dan is de indeling er tóch.
+    #
+    # Volledige herbouw en niet incrementeel. Twee redenen: het kost een minuut
+    # over 148k artikelen, en `artikel_indeling` heeft een FK met ON DELETE
+    # CASCADE op `p2p.tekst_element`. Een herladen regeling verliest daardoor
+    # stil zijn indeling, en een incrementele stap die alleen naar NIEUWE
+    # artikelen kijkt zou dat gat niet dichten. Precies het soort stille
+    # achteruitgang waar het onderwerp-filter niets van laat zien: wat het niet
+    # kent, toont het gewoon niet.
+    with load_run("indeling", scope="categorie + typeBepaling per artikel") as run:
+        ok_ind, meting_ind = gemeten_subproc(
+            [py, str(ROOT / "scripts" / "bouw_indeling.py")],
+            "artikel-indeling (categorie + typeBepaling)",
+            "SELECT count(*) n FROM v2a.artikel_indeling WHERE categorie IS NOT NULL",
+            "ingedeelde artikelen")
+        run.set(n_fout=0 if ok_ind else 1)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    gat = q1(cur, """
+        SELECT count(*) n FROM p2p.tekst_element te
+        JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+        LEFT JOIN v2a.artikel_indeling ai ON ai.tekst_element_id = te.id
+        WHERE te.element_type = 'Artikel' AND NOT coalesce(r.inactief, false)
+          AND ai.tekst_element_id IS NULL""")
+    conn.close()
+    rapporteer("Artikel-indeling", [
+        meting_ind,
+        f"- artikelen in vigerende regelingen zónder indelingsrij: {gat}",
+        "", "> Hoort 0 te zijn. Anders is de herbouw stukgelopen en toont het",
+        "> register die artikelen zonder categorie, zonder dat iets klaagt.",
+    ])
+    if gat:
+        fouten.append(f"artikel-indeling: {gat} artikelen zonder indelingsrij")
+
     with load_run("drieslag-mv", scope="naammatch/tekst-object/gio-consistentie MV's") as run:
         ok = subproc([py, str(ROOT / "scripts" / "refresh_drieslag.py")], "drieslag-MV-refresh",
                      timeout=3 * 3600)

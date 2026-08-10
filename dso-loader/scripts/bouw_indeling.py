@@ -31,7 +31,13 @@ from collections import Counter
 
 import psycopg
 
-DB = os.environ.get("DSO_DB", "postgresql://postgres:postgres@localhost:5434/dso")
+# Doelwit-DB in dezelfde volgorde als de rest van de sync: `full_sync.py`
+# zet OCD_DB_URL wanneer je met --target prod rechtstreeks tegen productie
+# draait. Wie hier alleen DSO_DB leest, herbouwt bij zo'n run stilzwijgend de
+# LOKALE indeling en laat prod onaangeroerd.
+DB = (os.environ.get("OCD_DB_URL")
+      or os.environ.get("DSO_DB")
+      or "postgresql://postgres:postgres@localhost:5434/dso")
 HIER = os.path.dirname(os.path.abspath(__file__))
 DDL_PAD = os.path.join(HIER, "2026-08-add-pad-categorie.sql")
 XLSX = os.path.join(HIER, "..", "curatie", "lijsten.xlsx")
