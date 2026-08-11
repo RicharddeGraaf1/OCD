@@ -53,6 +53,7 @@ data draait; prod achterlaten betekent dat de sites stale zijn.
 ```
 0. PREVIEW          read-only, beide DB's            ~1 min
 1. LOKAAL laden     p2p + i2a + vth + post           ~1–5 u
+1b. WIJZIGINGSSPOOR ontwerpen + besluitversies       ~20–60 min
 2. NABEWERKING      verdrongen versies markeren      ~1 min
 3. P2P → prod       rijen repliceren + herbouwen     ~20–40 min
 4. VTH → prod       delta-push                       ~10 min
@@ -66,7 +67,7 @@ data draait; prod achterlaten betekent dat de sites stale zijn.
                     code van de run committen op main ~15 min
 ```
 
-Stappen 0–4 en 7–9 horen bij elke sync. Stap 5 is een afweging. **Stap 6 draait
+Stappen 0–4 en 7–9 horen bij elke sync. Stap 1b en 5 zijn afwegingen. **Stap 6 draait
 standaard mee** — `full_sync.py` slaat hem alleen over met `--skip-embed`, of
 stil wanneer Ollama niet bereikbaar is. Stap 6b hangt aan 6: hij zoekt in de
 vectorindex, dus zonder embeddings meet hij tegen een index die de nieuwe
@@ -134,6 +135,59 @@ de lange pool.
 > geprefixte bronhoudercode en gaf altijd 0 terug). Na die fix werd het **5,6
 > uur**, want toen werden er voor het eerst ~50.000 DMN-bestanden opgehaald.
 > Met de delta hieronder is het ~40 min. Zie §i2a-delta.
+
+### Stap 1b — Wijzigingsspoor (ontwerpen + besluitversies)
+
+**Stond tot 2026-08-11 helemaal niet in dit runbook.** `full_sync.py` raakt
+`p2pwijziging` niet; het schema wordt gevuld door twee losse CLI-commando's die
+je apart moet draaien:
+
+```bash
+python -m src.cli wijziging ontwerpen
+python -m src.cli wijziging besluitversies
+```
+
+Ze laden alleen wat de relevantietoets haalt (`_is_relevant`), dus het meeste
+werk is skippen. Reken op tientallen minuten, gedomineerd door de
+documentstructuur- en annotatie-calls per nieuw besluit.
+
+**Twee API's, niet één.** De besluitnaam komt uit verschillende bronnen per
+soort, en dat is geen keuze maar een eigenschap van de DSO:
+
+| soort | bron van `citeertitel` | eigen besluitnaam | kolom gevuld |
+|---|---|---|---|
+| ontwerp | Presenteren, `besluitMetadata.citeerTitel` | 239 van 321 | 304 van 321 |
+| besluitversie | Ontsluiten v2, `omgevingsdocumentMetadata.besluitCiteertitel` | 115 van 124 | 124 van 124 |
+
+"Eigen besluitnaam" = wijkt af van het regeling-opschrift; de rest draagt de
+regelingsnaam, wat correct is als de bronhouder niets anders levert.
+
+Presenteren zet `besluitMetadata` niet op besluitversies; Ontsluiten voegt voor
+ontwerpen niets toe (gemeten 2026-08-11: van de 82 ontwerpen zonder eigen naam
+krijgt er **0** er alsnog een — beide API's bevraagd, 82 × HTTP 200). De
+loader doet dit vanzelf — `_ontsluiten_citeertitel` is best-effort en laat de
+load nooit vallen. Zie [citeertitel-uit-presenteren-api.md](citeertitel-uit-presenteren-api.md).
+
+**Prod krijgt hier niets van.** `repliceer_p2p_naar_prod.py` dekt alleen `p2p.*`;
+voor `p2pwijziging` bestaat geen replicatiestap. Wil je prod bijwerken, dan draai
+je de loader er rechtstreeks tegenaan:
+
+```bash
+OCD_DB_URL=$PROD_DB_URL python -m src.cli wijziging ontwerpen
+OCD_DB_URL=$PROD_DB_URL python -m src.cli wijziging besluitversies
+```
+
+Dat is de enige stap in dit runbook waar een loader tegen productie draait —
+elders geldt "prod krijgt gegevens, geen loaders". Bewust zo gelaten omdat een
+replicatiescript voor 445 besluit-rijen plus hun deltas meer machinerie is dan
+het probleem groot is; het staat als openstaand punt in §5.
+
+Alleen de citeertitels bijwerken zonder volledige herload kan met:
+
+```bash
+python scripts/backfill_besluit_citeertitel.py            # droogloop
+python scripts/backfill_besluit_citeertitel.py --uitvoeren --soort beide
+```
 
 ### Stap 2 — Verdrongen versies markeren
 
@@ -635,6 +689,19 @@ En verder:
   De verwachting komt uit de preview en wordt aan het begin van de run in
   `audit.sync_run.metrics->'verwacht'` gezet. Blijft die leeg (DSO onbereikbaar),
   dan valt de check terug op de historie.
+- **Wijzigingsspoor** (alleen als stap 1b draaide) — de besluitnaam moet gevuld
+  zijn, want de viewer toont hem als bron-label:
+
+  ```sql
+  SELECT soort, count(*) AS n,
+         count(*) FILTER (WHERE citeertitel IS NULL)                    AS geen_naam,
+         count(*) FILTER (WHERE trim(coalesce(citeertitel,'')) <> trim(opschrift)) AS eigen_naam
+  FROM   p2pwijziging.besluit GROUP BY soort;
+  ```
+
+  `geen_naam` hoort **0** te zijn voor besluitversies. Loopt hij op, dan is de
+  Ontsluiten-call stilgevallen — die is best-effort en meldt zich alleen als een
+  dim-regel in de loader-output, dus dit is de plek waar je het merkt.
 - `audit.sync_run` — `klaar_op` gevuld (anders toont het dashboard een
   spook-sync).
 - `core.load_run` — geen rij op `running` blijven staan.
@@ -848,6 +915,7 @@ Noodroute als prod onherstelbaar afwijkt: `restore-dev-naar-prod.ps1`
 | — | `repliceer_p2p_naar_prod.py` dekt p2p, maar de afgeleide herbouw (subdiv, MV's) is nog losse handmatige stappen | stap 3 is één script plus drie commando's; automatiseren kan zodra de volgorde zich bewezen heeft |
 | — | de replicatie **verwijdert** niets op prod | een rij die lokaal is opgeruimd blijft daar staan; net als G-91 een bewuste keuze, geen automatisme. **Let op sinds 09-08**: stap 10 heeft lokaal 947.860 rijen uit `p2pwijziging` gehaald die op prod nog staan — dat verschil is bedoeld, niet een gat |
 | — | *opgelost 2026-08-09* — de twee koppelingen van een tekstdeel werden nooit geschreven | `tekstdeel_hoofdlijn` stond landelijk op **0 rijen** en 40% van de gebiedsaanwijzingen hing nergens aan. De API levert `hoofdlijnRefs`/`gebiedsaanwijzingRefs`; `load_divisieannotaties` las ze niet. Na fix + backfill: 4.955 en 6.965 koppelingen; wezen van 410→7 (hoofdlijn) en 1.942→196 (gebiedsaanwijzing). Zie vault G-124 |
+| — | er is **geen replicatiestap voor `p2pwijziging`** | `repliceer_p2p_naar_prod.py` dekt alleen `p2p.*`. Prod bijwerken kan alleen door de loader er rechtstreeks tegenaan te draaien (stap 1b) — de enige plek in dit runbook waar dat gebeurt. Bewuste keuze: een replicatiescript voor 445 besluit-rijen plus deltas is meer machinerie dan het probleem groot is. Wordt het wél gebouwd, dan vervalt die uitzondering |
 | — | de relevantietoets van `ontwerp_loader` wordt alleen bij intake toegepast | rijen komen binnen onder een voorwaarde en vertrekken niet als die vervalt; stap 10 ruimt op, maar de loader blijft het opnieuw opbouwen. Structureel zou de toets bij elke run over de bestaande voorraad moeten (vault G-123) |
 | — | *opgelost 2026-08-09* — i2a-datum stond hardgecodeerd op `10-04-2026` | nu `_peildatum()` = vandaag. Gemeten effect over 19 bronhouders: 2 nieuw, 2 weg, 52 van 3.128 met nieuwere inhoud (~1,7%). De eerstvolgende run duurt nog ~5,6 u omdat `laatste_wijziging` nog vrijwel overal `NULL` is |
 | — | de preview stuurde de RTR een geprefixte code (`gm0344`) | *opgelost 2026-08-09* — dezelfde G-117-fout als in de loader, waardoor élke gemeente 0 activiteiten leek te hebben. Preview hergebruikt nu de loader-helpers in plaats van ze over te schrijven |
@@ -908,6 +976,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 |---|---|---|
 | Volledige sync (stap 0–4, 7–9) | wekelijks | dit runbook |
 | i2a (in de sync) | elke sync, ~40 min | kan sinds de delta van 2026-08-08 gewoon meedraaien; vóór die tijd was de keuze "3 min omdat hij niets deed" of "5,6 uur" |
+| Wijzigingsspoor (stap 1b) | elke sync die ontwerpen/besluiten moet tonen | `wijziging ontwerpen` + `wijziging besluitversies`, lokaal én — apart — tegen prod; zit **niet** in `full_sync.py` |
 | Embeddings + onderwerp-as (stap 6) | elke sync | draait standaard mee in `full_sync.py` |
 | Onderwerp-as naar prod | na elke stap 6 die lokaal draaide | `2026-08-06-categorie-naar-productie.py --ja` (2 s) |
 | Doorwerkingsmeting (stap 6b) | na elke sync die omgevingsplannen of instructieregels raakte | lokaal, ná stap 6; `match/stand.py` zegt of het moet |
