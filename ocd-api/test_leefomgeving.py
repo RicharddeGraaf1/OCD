@@ -324,6 +324,60 @@ def test_natuur_adapter_echte_db():
     assert ro["status"] in ("warn", "stop")
 
 
+def _mock_cultuur(monkeypatch, row):
+    monkeypatch.setattr(mod, "get_conn", lambda: _FakeConn(row))
+    monkeypatch.setattr(mod, "_BRONNEN", {"cultuur"})
+
+
+def test_cultuur_op_terrein_stop(monkeypatch):
+    _reset()
+    _mock_cultuur(monkeypatch, {"registernr": "10013", "soort": "vlak", "dist": 0})
+    r = client.get("/v1/leefomgeving/readout", params={"x": 121300, "y": 487400, "lagen": "cultuur"})
+    ro = r.json()["readouts"]["cultuur"]
+    assert ro["value"] == "In gebied"
+    assert ro["status"] == "stop"
+    assert "10013" in ro["ctx"]
+
+
+def test_cultuur_nabij_warn(monkeypatch):
+    _reset()
+    _mock_cultuur(monkeypatch, {"registernr": "10001", "soort": "punt", "dist": 30})
+    r = client.get("/v1/leefomgeving/readout", params={"x": 121300, "y": 487400, "lagen": "cultuur"})
+    ro = r.json()["readouts"]["cultuur"]
+    assert ro["status"] == "warn"
+    assert "30 m" in ro["ctx"]
+
+
+def test_cultuur_ver_ok(monkeypatch):
+    _reset()
+    _mock_cultuur(monkeypatch, {"registernr": "10001", "soort": "punt", "dist": 300})  # >warn, binnen straal
+    r = client.get("/v1/leefomgeving/readout", params={"x": 120000, "y": 486000, "lagen": "cultuur"})
+    ro = r.json()["readouts"]["cultuur"]
+    assert ro["status"] == "ok"
+    assert "300 m" in ro["ctx"]
+
+
+def test_cultuur_geen_binnen_straal_ok(monkeypatch):
+    _reset()
+    _mock_cultuur(monkeypatch, None)
+    r = client.get("/v1/leefomgeving/readout", params={"x": 150000, "y": 500000, "lagen": "cultuur"})
+    ro = r.json()["readouts"]["cultuur"]
+    assert ro["value"] == "Nee"
+    assert ro["status"] == "ok"
+    assert "Geen rijksmonument" in ro["ctx"]
+
+
+def test_cultuur_adapter_echte_db():
+    """Smoke: de echte adapter tegen lev.rijksmonument op de Amsterdamse Herengracht
+    (vol rijksmonumenten) → nabij/op-terrein (warn/stop)."""
+    _reset()
+    r = client.get("/v1/leefomgeving/readout", params={"x": 121300, "y": 487400, "lagen": "cultuur"})
+    assert r.status_code == 200
+    ro = r.json()["readouts"]["cultuur"]
+    assert ro is not None
+    assert ro["status"] in ("warn", "stop")
+
+
 def test_extern_adapter_echte_db():
     """Smoke: de echte adapter tegen lev.rev_risicobron in de Rotterdamse haven
     geeft een risicobron nabij (warn/stop), niet 'Nee'."""

@@ -45,11 +45,11 @@ router = APIRouter(prefix="/v1/leefomgeving", tags=["leefomgeving"])
 ALLE_THEMAS = ["geluid", "lucht", "extern", "klimaat", "bodem", "natuur", "cultuur"]
 
 _ENABLED = os.getenv("OCD_LEEFOMGEVING_ENABLED", "true").lower() in ("1", "true", "yes")
-# Default live: 'extern'/'natuur' (PostGIS-ingest) + 'lucht'/'geluid'/'klimaat'
+# Default live: 'extern'/'natuur'/'cultuur' (PostGIS-ingest) + 'lucht'/'geluid'/'klimaat'
 # (RIVM-grids, live+gecached).
 _BRONNEN = {
     t.strip()
-    for t in os.getenv("OCD_LEEFOMGEVING_BRONNEN", "extern,lucht,geluid,klimaat,natuur").split(",")
+    for t in os.getenv("OCD_LEEFOMGEVING_BRONNEN", "extern,lucht,geluid,klimaat,natuur,cultuur").split(",")
     if t.strip()
 }
 _CACHE_TTL = int(os.getenv("OCD_LEEFOMGEVING_CACHE_TTL", "86400"))   # 24 u (default)
@@ -119,6 +119,13 @@ _OVERSTROMING_KLASSEN: dict[int, tuple[str, str]] = {
 # Depositiewaarden (AERIUS) volgen later; nu een nabijheidsindicatie.
 _NATUUR_RADIUS = int(os.getenv("OCD_NATUUR_RADIUS", "3000"))  # zoekstraal (m)
 _NATUUR_WARN = int(os.getenv("OCD_NATUUR_WARN", "1000"))      # afstand ≤ → warn
+
+# Cultuur = nabijheid dichtstbijzijnde rijksmonument (lokaal PostGIS-ingest,
+# lev.rijksmonument, geladen via dso-loader/scripts/2026-08-load-rijksmonumenten.py).
+# Kortere schaal dan natuur: monument-relevantie (welstand/omgevingsvergunning) speelt
+# op straatniveau. Archeologische verwachting = latere verrijking op dit thema.
+_CULTUUR_RADIUS = int(os.getenv("OCD_CULTUUR_RADIUS", "500"))  # zoekstraal (m)
+_CULTUUR_WARN = int(os.getenv("OCD_CULTUUR_WARN", "50"))       # afstand ≤ → warn
 
 
 # ── Modellen ──────────────────────────────────────────────────────────
@@ -210,6 +217,40 @@ def _adapter_natuur(x: float, y: float) -> Readout | None:
                        ctx=f"Natura 2000-gebied {naam} op {d} m", status="warn")
     return Readout(value="Nee", unit="Natura 2000 nabij",
                    ctx=f"Natura 2000-gebied {naam} op {d} m", status="ok")
+
+
+def _adapter_cultuur(x: float, y: float) -> Readout | None:
+    """Cultuur: nabijheid van het dichtstbijzijnde rijksmonument, lokaal uit PostGIS
+    (`lev.rijksmonument`, punt + monumentterrein-vlak). Op een monumentterrein = stop;
+    binnen `_CULTUUR_WARN` = warn; verder = ok. Zelfde nearest-distance-patroon als
+    `extern`/`natuur`. Archeologische verwachting volgt later als aparte laag."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT registernr, soort,
+                   round(ST_Distance(geom, ST_SetSRID(ST_MakePoint(%s, %s), 28992))::numeric, 0) AS dist
+            FROM lev.rijksmonument
+            WHERE ST_DWithin(geom, ST_SetSRID(ST_MakePoint(%s, %s), 28992), %s)
+            ORDER BY dist
+            LIMIT 1
+            """,
+            (x, y, x, y, _CULTUUR_RADIUS),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return Readout(value="Nee", unit="rijksmonument nabij",
+                       ctx=f"Geen rijksmonument binnen {_CULTUUR_RADIUS} m", status="ok")
+    ref = f" {row['registernr']}" if row["registernr"] else ""
+    d = int(row["dist"])
+    if d == 0 and row["soort"] == "vlak":
+        return Readout(value="In gebied", unit="rijksmonument",
+                       ctx=f"Locatie ligt op rijksmonumentterrein{ref}", status="stop")
+    if d <= _CULTUUR_WARN:
+        return Readout(value="Nabij", unit="rijksmonument nabij",
+                       ctx=f"Rijksmonument{ref} op {d} m", status="warn")
+    return Readout(value="Nee", unit="rijksmonument nabij",
+                   ctx=f"Rijksmonument{ref} op {d} m", status="ok")
 
 
 def _gridwaarde(val) -> float | None:
@@ -327,6 +368,7 @@ ADAPTERS: dict[str, Callable[[float, float], Readout | None]] = {
     "geluid": _adapter_geluid,
     "klimaat": _adapter_klimaat,
     "natuur": _adapter_natuur,
+    "cultuur": _adapter_cultuur,
 }
 
 
