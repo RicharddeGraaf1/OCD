@@ -378,6 +378,46 @@ def test_cultuur_adapter_echte_db():
     assert ro["status"] in ("warn", "stop")
 
 
+def _mock_bodem(monkeypatch, props):
+    monkeypatch.setattr(mod, "_wms_gfi_props", lambda base, layer, x, y: props)
+    monkeypatch.setattr(mod, "_BRONNEN", {"bodem"})
+
+
+def test_grondsoort_classificatie():
+    assert mod._grondsoort("Kalkloze poldervaaggronden; zware klei, profielverloop 4") == "Klei"
+    assert mod._grondsoort("Duinvaaggronden; leemarm en zwak lemig fijn zand") == "Zand"
+    assert mod._grondsoort("Weideveengronden; op veenmosveen") == "Veen"
+    assert mod._grondsoort("Kalkhoudende ooivaaggronden; zware zavel en lichte klei") == "Klei"
+    assert mod._grondsoort("Ooivaaggronden; siltige leem (löss)") == "Leem/löss"
+
+
+def test_bodem_klei_ok(monkeypatch):
+    _reset()
+    _mock_bodem(monkeypatch, {"first_soilname": "Kalkloze poldervaaggronden; zware klei, profielverloop 4"})
+    r = client.get("/v1/leefomgeving/readout", params={"x": 150000, "y": 430000, "lagen": "bodem"})
+    ro = r.json()["readouts"]["bodem"]
+    assert ro["value"] == "Klei"
+    assert ro["status"] == "ok"
+    assert "poldervaaggronden" in ro["ctx"]
+
+
+def test_bodem_veen_warn(monkeypatch):
+    _reset()
+    _mock_bodem(monkeypatch, {"first_soilname": "Weideveengronden; op veenmosveen"})
+    r = client.get("/v1/leefomgeving/readout", params={"x": 110000, "y": 460000, "lagen": "bodem"})
+    ro = r.json()["readouts"]["bodem"]
+    assert ro["value"] == "Veen"
+    assert ro["status"] == "warn"
+    assert "bodemdaling" in ro["ctx"].lower()
+
+
+def test_bodem_geen_feature_null(monkeypatch):
+    _reset()
+    _mock_bodem(monkeypatch, None)  # bebouwd/water → geen bodemvlak
+    r = client.get("/v1/leefomgeving/readout", params={"x": 121000, "y": 487000, "lagen": "bodem"})
+    assert r.json()["readouts"]["bodem"] is None
+
+
 def test_extern_adapter_echte_db():
     """Smoke: de echte adapter tegen lev.rev_risicobron in de Rotterdamse haven
     geeft een risicobron nabij (warn/stop), niet 'Nee'."""

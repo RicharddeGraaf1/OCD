@@ -45,11 +45,11 @@ router = APIRouter(prefix="/v1/leefomgeving", tags=["leefomgeving"])
 ALLE_THEMAS = ["geluid", "lucht", "extern", "klimaat", "bodem", "natuur", "cultuur"]
 
 _ENABLED = os.getenv("OCD_LEEFOMGEVING_ENABLED", "true").lower() in ("1", "true", "yes")
-# Default live: 'extern'/'natuur'/'cultuur' (PostGIS-ingest) + 'lucht'/'geluid'/'klimaat'
-# (RIVM-grids, live+gecached).
+# Default live: 'extern'/'natuur'/'cultuur' (PostGIS-ingest) + 'lucht'/'geluid'/'klimaat'/
+# 'bodem' (RIVM/BRO-WMS, live+gecached).
 _BRONNEN = {
     t.strip()
-    for t in os.getenv("OCD_LEEFOMGEVING_BRONNEN", "extern,lucht,geluid,klimaat,natuur,cultuur").split(",")
+    for t in os.getenv("OCD_LEEFOMGEVING_BRONNEN", "extern,lucht,geluid,klimaat,natuur,cultuur,bodem").split(",")
     if t.strip()
 }
 _CACHE_TTL = int(os.getenv("OCD_LEEFOMGEVING_CACHE_TTL", "86400"))   # 24 u (default)
@@ -62,6 +62,7 @@ _THEMA_TTL = {
     "lucht": int(os.getenv("OCD_LEEFOMGEVING_LUCHT_TTL", str(7 * 86400))),      # 7 dagen
     "geluid": int(os.getenv("OCD_LEEFOMGEVING_GELUID_TTL", str(7 * 86400))),    # 7 dagen
     "klimaat": int(os.getenv("OCD_LEEFOMGEVING_KLIMAAT_TTL", str(30 * 86400))),  # 30 dagen (statische kaart)
+    "bodem": int(os.getenv("OCD_LEEFOMGEVING_BODEM_TTL", str(30 * 86400))),      # 30 dagen (statische kaart)
 }
 
 # Live HTTP (WMS) — timeout + globale outbound-limiet (nette buur bij PDOK/RIVM).
@@ -126,6 +127,13 @@ _NATUUR_WARN = int(os.getenv("OCD_NATUUR_WARN", "1000"))      # afstand ≤ → 
 # op straatniveau. Archeologische verwachting = latere verrijking op dit thema.
 _CULTUUR_RADIUS = int(os.getenv("OCD_CULTUUR_RADIUS", "500"))  # zoekstraal (m)
 _CULTUUR_WARN = int(os.getenv("OCD_CULTUUR_WARN", "50"))       # afstand ≤ → warn
+
+# Bodem = hoofdgrondsoort uit de BRO Bodemkaart (SGM). Informatief: GetFeatureInfo op de
+# bodemvlakken geeft de bodemnaam; de hoofdgrondsoort leiden we af uit de materiaalwoorden
+# in die naam. Louter beschrijvend (geen kwaliteitsoordeel); veen = zettings-/
+# bodemdalingsgevoelig → één terechte attentie.
+_BODEM_WMS = os.getenv("OCD_BODEM_WMS", "https://service.pdok.nl/bzk/bro-bodemkaart/wms/v1_0")
+_BODEM_LAAG = os.getenv("OCD_BODEM_LAAG", "soilarea")
 
 
 # ── Modellen ──────────────────────────────────────────────────────────
@@ -284,6 +292,22 @@ def _wms_gfi(base: str, layer: str, x: float, y: float, prop: str | None = None)
     return _gridwaarde((feats[0].get("properties") or {}).get(prop or layer))
 
 
+def _wms_gfi_props(base: str, layer: str, x: float, y: float) -> dict | None:
+    """Als `_wms_gfi`, maar geeft de volledige property-dict van de eerste feature
+    terug (voor vector-WMS-lagen met tekstattributen, bv. de BRO-bodemkaart)."""
+    with _OUTBOUND:
+        r = httpx.get(base, params={
+            "service": "WMS", "version": "1.3.0", "request": "GetFeatureInfo",
+            "layers": layer, "query_layers": layer, "crs": "EPSG:28992",
+            "bbox": f"{x - 50},{y - 50},{x + 50},{y + 50}",
+            "width": 101, "height": 101, "i": 50, "j": 50,
+            "info_format": "application/json",
+        }, timeout=_HTTP_TIMEOUT)
+    r.raise_for_status()
+    feats = r.json().get("features", [])
+    return (feats[0].get("properties") or {}) if feats else None
+
+
 def _lucht_band(stof: str, waarde: float) -> str:
     """ok ≤ WHO-advieswaarde < warn ≤ EU-grenswaarde < stop."""
     n = _LUCHT_NORMEN[stof]
@@ -362,6 +386,38 @@ def _adapter_klimaat(x: float, y: float) -> Readout | None:
     return Readout(value=label, unit="overstromingskans", ctx=ctx, status=status)
 
 
+def _grondsoort(naam: str) -> str:
+    """Leid de hoofdgrondsoort af uit de BRO-bodemnaam. Kopwoord-prioriteit: veen →
+    klei/zavel → zand (vóór leem, want 'lemig zand' is zand) → leem/löss/silt."""
+    n = naam.lower()
+    if "veen" in n or "moerig" in n:
+        return "Veen"
+    if "klei" in n or "zavel" in n:
+        return "Klei"
+    if "zand" in n:
+        return "Zand"
+    if "leem" in n or "löss" in n or "loss" in n or "silt" in n:
+        return "Leem/löss"
+    return "Overig"
+
+
+def _adapter_bodem(x: float, y: float) -> Readout | None:
+    """Bodem: hoofdgrondsoort uit de BRO Bodemkaart (SGM), informatief. Buiten het
+    karteringsgebied (bebouwd/water) → geen feature → None. Veen krijgt een attentie
+    (zettings-/bodemdalingsgevoelig); overige grondsoorten zijn neutraal (ok)."""
+    props = _wms_gfi_props(_BODEM_WMS, _BODEM_LAAG, x, y)
+    if not props:
+        return None
+    naam = (props.get("first_soilname") or props.get("normal_soilprofile_name") or "").strip()
+    if not naam:
+        return None
+    grondsoort = _grondsoort(naam)
+    if grondsoort == "Veen":
+        return Readout(value="Veen", unit="grondsoort",
+                       ctx=f"{naam} · zettings-/bodemdalingsgevoelig", status="warn")
+    return Readout(value=grondsoort, unit="grondsoort", ctx=naam, status="ok")
+
+
 ADAPTERS: dict[str, Callable[[float, float], Readout | None]] = {
     "extern": _adapter_extern,
     "lucht": _adapter_lucht,
@@ -369,6 +425,7 @@ ADAPTERS: dict[str, Callable[[float, float], Readout | None]] = {
     "klimaat": _adapter_klimaat,
     "natuur": _adapter_natuur,
     "cultuur": _adapter_cultuur,
+    "bodem": _adapter_bodem,
 }
 
 
