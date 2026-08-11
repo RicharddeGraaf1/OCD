@@ -45,10 +45,11 @@ router = APIRouter(prefix="/v1/leefomgeving", tags=["leefomgeving"])
 ALLE_THEMAS = ["geluid", "lucht", "extern", "klimaat", "bodem", "natuur", "cultuur"]
 
 _ENABLED = os.getenv("OCD_LEEFOMGEVING_ENABLED", "true").lower() in ("1", "true", "yes")
-# Default live: 'extern' (ingest) + 'lucht'/'geluid'/'klimaat' (RIVM-grids, live+gecached).
+# Default live: 'extern'/'natuur' (PostGIS-ingest) + 'lucht'/'geluid'/'klimaat'
+# (RIVM-grids, live+gecached).
 _BRONNEN = {
     t.strip()
-    for t in os.getenv("OCD_LEEFOMGEVING_BRONNEN", "extern,lucht,geluid,klimaat").split(",")
+    for t in os.getenv("OCD_LEEFOMGEVING_BRONNEN", "extern,lucht,geluid,klimaat,natuur").split(",")
     if t.strip()
 }
 _CACHE_TTL = int(os.getenv("OCD_LEEFOMGEVING_CACHE_TTL", "86400"))   # 24 u (default)
@@ -112,6 +113,13 @@ _OVERSTROMING_KLASSEN: dict[int, tuple[str, str]] = {
     6: ("Oppervlaktewater", "ok"),
 }
 
+# Natuur = nabijheid dichtstbijzijnde Natura 2000-gebied (lokaal PostGIS-ingest,
+# lev.natura2000, geladen via dso-loader/scripts/2026-08-load-natura2000.py). Zoekstraal
+# + warn-drempel zijn indicatief: nabijheid → juridische relevantie/stikstofgevoeligheid.
+# Depositiewaarden (AERIUS) volgen later; nu een nabijheidsindicatie.
+_NATUUR_RADIUS = int(os.getenv("OCD_NATUUR_RADIUS", "3000"))  # zoekstraal (m)
+_NATUUR_WARN = int(os.getenv("OCD_NATUUR_WARN", "1000"))      # afstand ≤ → warn
+
 
 # ── Modellen ──────────────────────────────────────────────────────────
 
@@ -168,6 +176,40 @@ def _adapter_extern(x: float, y: float) -> Readout | None:
                        ctx=f"Geregistreerde risicobron op {d} m", status="stop")
     return Readout(value="Nabij", unit="risicobron nabij",
                    ctx=f"Geregistreerde risicobron op {d} m", status="warn")
+
+
+def _adapter_natuur(x: float, y: float) -> Readout | None:
+    """Natuur: nabijheid van het dichtstbijzijnde Natura 2000-gebied, lokaal uit
+    PostGIS (`lev.natura2000`). In-gebied = sterkste signaal (juridische beperkingen,
+    stikstofgevoeligheid); binnen `_NATUUR_WARN` = warn; verder = ok. Zelfde
+    nearest-distance-patroon als `extern`."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT naam,
+                   round(ST_Distance(geom, ST_SetSRID(ST_MakePoint(%s, %s), 28992))::numeric, 0) AS dist
+            FROM lev.natura2000
+            WHERE ST_DWithin(geom, ST_SetSRID(ST_MakePoint(%s, %s), 28992), %s)
+            ORDER BY dist
+            LIMIT 1
+            """,
+            (x, y, x, y, _NATUUR_RADIUS),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return Readout(value="Nee", unit="Natura 2000 nabij",
+                       ctx=f"Geen Natura 2000-gebied binnen {_NATUUR_RADIUS // 1000} km", status="ok")
+    naam = row["naam"]
+    d = int(row["dist"])
+    if d == 0:
+        return Readout(value="In gebied", unit="Natura 2000",
+                       ctx=f"Locatie ligt in Natura 2000-gebied {naam}", status="stop")
+    if d <= _NATUUR_WARN:
+        return Readout(value="Nabij", unit="Natura 2000 nabij",
+                       ctx=f"Natura 2000-gebied {naam} op {d} m", status="warn")
+    return Readout(value="Nee", unit="Natura 2000 nabij",
+                   ctx=f"Natura 2000-gebied {naam} op {d} m", status="ok")
 
 
 def _gridwaarde(val) -> float | None:
@@ -284,6 +326,7 @@ ADAPTERS: dict[str, Callable[[float, float], Readout | None]] = {
     "lucht": _adapter_lucht,
     "geluid": _adapter_geluid,
     "klimaat": _adapter_klimaat,
+    "natuur": _adapter_natuur,
 }
 
 

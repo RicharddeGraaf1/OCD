@@ -237,6 +237,93 @@ def test_klimaat_buiten_modelgebied_null(monkeypatch):
     assert r.json()["readouts"]["klimaat"] is None
 
 
+class _FakeCur:
+    def __init__(self, row):
+        self._row = row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, *a, **k):
+        pass
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeConn:
+    def __init__(self, row):
+        self._row = row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def cursor(self):
+        return _FakeCur(self._row)
+
+
+def _mock_natuur(monkeypatch, row):
+    """Vervang get_conn zodat de nearest-query een vaste rij (of None) teruggeeft."""
+    monkeypatch.setattr(mod, "get_conn", lambda: _FakeConn(row))
+    monkeypatch.setattr(mod, "_BRONNEN", {"natuur"})
+
+
+def test_natuur_in_gebied_stop(monkeypatch):
+    _reset()
+    _mock_natuur(monkeypatch, {"naam": "Veluwe", "dist": 0})
+    r = client.get("/v1/leefomgeving/readout", params={"x": 185000, "y": 455000, "lagen": "natuur"})
+    ro = r.json()["readouts"]["natuur"]
+    assert ro["value"] == "In gebied"
+    assert ro["status"] == "stop"
+    assert "Veluwe" in ro["ctx"]
+
+
+def test_natuur_nabij_warn(monkeypatch):
+    _reset()
+    _mock_natuur(monkeypatch, {"naam": "Coepelduynen", "dist": 500})
+    r = client.get("/v1/leefomgeving/readout", params={"x": 90000, "y": 470000, "lagen": "natuur"})
+    ro = r.json()["readouts"]["natuur"]
+    assert ro["status"] == "warn"
+    assert "500 m" in ro["ctx"]
+
+
+def test_natuur_ver_ok(monkeypatch):
+    _reset()
+    _mock_natuur(monkeypatch, {"naam": "Veluwe", "dist": 2000})  # >1 km binnen zoekstraal
+    r = client.get("/v1/leefomgeving/readout", params={"x": 180000, "y": 455000, "lagen": "natuur"})
+    ro = r.json()["readouts"]["natuur"]
+    assert ro["status"] == "ok"
+    assert "2000 m" in ro["ctx"]
+
+
+def test_natuur_geen_binnen_straal_ok(monkeypatch):
+    _reset()
+    _mock_natuur(monkeypatch, None)  # niets binnen de zoekstraal
+    r = client.get("/v1/leefomgeving/readout", params={"x": 121000, "y": 487000, "lagen": "natuur"})
+    ro = r.json()["readouts"]["natuur"]
+    assert ro["value"] == "Nee"
+    assert ro["status"] == "ok"
+    assert "Geen Natura 2000" in ro["ctx"]
+
+
+def test_natuur_adapter_echte_db():
+    """Smoke: de echte adapter tegen lev.natura2000. Een punt midden op de Veluwe
+    ligt ín een Natura 2000-gebied (afstand 0 → stop)."""
+    _reset()
+    r = client.get("/v1/leefomgeving/readout", params={"x": 185000, "y": 455000, "lagen": "natuur"})
+    assert r.status_code == 200
+    ro = r.json()["readouts"]["natuur"]
+    assert ro is not None
+    assert "Natura 2000" in ro["ctx"]
+    assert ro["status"] in ("warn", "stop")
+
+
 def test_extern_adapter_echte_db():
     """Smoke: de echte adapter tegen lev.rev_risicobron in de Rotterdamse haven
     geeft een risicobron nabij (warn/stop), niet 'Nee'."""
