@@ -45,10 +45,10 @@ router = APIRouter(prefix="/v1/leefomgeving", tags=["leefomgeving"])
 ALLE_THEMAS = ["geluid", "lucht", "extern", "klimaat", "bodem", "natuur", "cultuur"]
 
 _ENABLED = os.getenv("OCD_LEEFOMGEVING_ENABLED", "true").lower() in ("1", "true", "yes")
-# Default live: 'extern' (ingest) + 'lucht'/'geluid' (RIVM-grids, live+gecached).
+# Default live: 'extern' (ingest) + 'lucht'/'geluid'/'klimaat' (RIVM-grids, live+gecached).
 _BRONNEN = {
     t.strip()
-    for t in os.getenv("OCD_LEEFOMGEVING_BRONNEN", "extern,lucht,geluid").split(",")
+    for t in os.getenv("OCD_LEEFOMGEVING_BRONNEN", "extern,lucht,geluid,klimaat").split(",")
     if t.strip()
 }
 _CACHE_TTL = int(os.getenv("OCD_LEEFOMGEVING_CACHE_TTL", "86400"))   # 24 u (default)
@@ -58,8 +58,9 @@ _GRID = 100  # cache-grid in meters (naburige klikken delen een cel)
 # Per-thema TTL-override. Lucht (GCN-jaargemiddelde) + geluid (RIVM EU-END-kaart, ~5-jaarlijks)
 # veranderen zelden → lange TTL.
 _THEMA_TTL = {
-    "lucht": int(os.getenv("OCD_LEEFOMGEVING_LUCHT_TTL", str(7 * 86400))),    # 7 dagen
-    "geluid": int(os.getenv("OCD_LEEFOMGEVING_GELUID_TTL", str(7 * 86400))),  # 7 dagen
+    "lucht": int(os.getenv("OCD_LEEFOMGEVING_LUCHT_TTL", str(7 * 86400))),      # 7 dagen
+    "geluid": int(os.getenv("OCD_LEEFOMGEVING_GELUID_TTL", str(7 * 86400))),    # 7 dagen
+    "klimaat": int(os.getenv("OCD_LEEFOMGEVING_KLIMAAT_TTL", str(30 * 86400))),  # 30 dagen (statische kaart)
 }
 
 # Live HTTP (WMS) — timeout + globale outbound-limiet (nette buur bij PDOK/RIVM).
@@ -95,6 +96,21 @@ _LUCHT_NORMEN = {
 # blootstelling. Herkomst: vault-concept 'Geluidsnormen leefomgeving'.
 _GELUID_WARN = float(os.getenv("OCD_GELUID_WARN_DB", "55"))
 _GELUID_STOP = float(os.getenv("OCD_GELUID_STOP_DB", "65"))
+
+# Klimaat = kans op overstroming uit de nationale RIVM-overstromingskaart (Atlas
+# Leefomgeving). De GFI geeft een klasse-index (GRAY_INDEX 1–6); labels + volgorde
+# zijn geverifieerd tegen de WMS-legenda (GetLegendGraphic) en met sanity-punten
+# (IJsselmeer=6/water, Waal-uiterwaard=4/1×100 jr). De ok/warn/stop-banding is een
+# indicatieve leefomgevings-duiding (geen juridische norm), net als bij geluid.
+_KLIMAAT_LAAG = os.getenv("OCD_KLIMAAT_OVERSTROMING_LAAG", "20231201_kans_overstroming")
+_OVERSTROMING_KLASSEN: dict[int, tuple[str, str]] = {
+    1: ("Overstroomt niet", "ok"),
+    2: ("1× per 100.000 jaar", "ok"),
+    3: ("1× per 1.000 jaar", "warn"),
+    4: ("1× per 100 jaar", "stop"),
+    5: ("1× per 10 jaar", "stop"),
+    6: ("Oppervlaktewater", "ok"),
+}
 
 
 # ── Modellen ──────────────────────────────────────────────────────────
@@ -246,10 +262,28 @@ def _adapter_geluid(x: float, y: float) -> Readout | None:
     return Readout(value=f"{totaal:.0f}", unit="dB Lden", ctx=ctx, status=status)
 
 
+def _adapter_klimaat(x: float, y: float) -> Readout | None:
+    """Klimaat: kans op overstroming uit de nationale RIVM-overstromingskaart.
+    De GFI geeft een klasse-index (GRAY_INDEX); label + status uit
+    `_OVERSTROMING_KLASSEN`. Buiten het modelgebied → geen feature → None.
+    Subthema's hitte/droogte volgen later als aparte lagen."""
+    idx = _wms_gfi(_ALO_WMS, _KLIMAAT_LAAG, x, y, "GRAY_INDEX")
+    if idx is None:
+        return None
+    klasse = _OVERSTROMING_KLASSEN.get(int(round(idx)))
+    if klasse is None:
+        return None
+    label, status = klasse
+    ctx = ("Locatie ligt in oppervlaktewater" if int(round(idx)) == 6
+           else "Nationale overstromingskaart (Atlas Leefomgeving)")
+    return Readout(value=label, unit="overstromingskans", ctx=ctx, status=status)
+
+
 ADAPTERS: dict[str, Callable[[float, float], Readout | None]] = {
     "extern": _adapter_extern,
     "lucht": _adapter_lucht,
     "geluid": _adapter_geluid,
+    "klimaat": _adapter_klimaat,
 }
 
 

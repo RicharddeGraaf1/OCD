@@ -194,6 +194,49 @@ def test_geluid_zee_geeft_null(monkeypatch):
     assert r.json()["readouts"]["geluid"] is None
 
 
+def _mock_klimaat(monkeypatch, gray_index):
+    monkeypatch.setattr(
+        mod, "_wms_gfi",
+        lambda base, layer, x, y, prop=None: (None if gray_index is None else float(gray_index)),
+    )
+    monkeypatch.setattr(mod, "_BRONNEN", {"klimaat"})
+
+
+def test_klimaat_overstroomt_niet_ok(monkeypatch):
+    _reset()
+    _mock_klimaat(monkeypatch, 1)  # hoge zandgrond → overstroomt niet
+    r = client.get("/v1/leefomgeving/readout", params={"x": 148463, "y": 466786, "lagen": "klimaat"})
+    ro = r.json()["readouts"]["klimaat"]
+    assert ro["value"] == "Overstroomt niet"
+    assert ro["status"] == "ok"
+
+
+def test_klimaat_uiterwaard_stop(monkeypatch):
+    _reset()
+    _mock_klimaat(monkeypatch, 4)  # 1x per 100 jaar (uiterwaard) → stop
+    r = client.get("/v1/leefomgeving/readout", params={"x": 187500, "y": 432000, "lagen": "klimaat"})
+    ro = r.json()["readouts"]["klimaat"]
+    assert "100 jaar" in ro["value"]
+    assert ro["status"] == "stop"
+
+
+def test_klimaat_oppervlaktewater(monkeypatch):
+    _reset()
+    _mock_klimaat(monkeypatch, 6)  # open water
+    r = client.get("/v1/leefomgeving/readout", params={"x": 155000, "y": 520000, "lagen": "klimaat"})
+    ro = r.json()["readouts"]["klimaat"]
+    assert ro["value"] == "Oppervlaktewater"
+    assert "oppervlaktewater" in ro["ctx"].lower()
+    assert ro["status"] == "ok"
+
+
+def test_klimaat_buiten_modelgebied_null(monkeypatch):
+    _reset()
+    _mock_klimaat(monkeypatch, None)  # geen feature (zee/buitenland)
+    r = client.get("/v1/leefomgeving/readout", params={"x": 10000, "y": 600000, "lagen": "klimaat"})
+    assert r.json()["readouts"]["klimaat"] is None
+
+
 def test_extern_adapter_echte_db():
     """Smoke: de echte adapter tegen lev.rev_risicobron in de Rotterdamse haven
     geeft een risicobron nabij (warn/stop), niet 'Nee'."""

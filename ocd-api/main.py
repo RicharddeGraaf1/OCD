@@ -28,6 +28,7 @@ from tiles import router as tiles_router
 from vergunningen import _tsquery_arg
 from vergunningen import router as vergunningen_router
 from mer import router as mer_router
+from leefomgeving import router as leefomgeving_router
 
 load_dotenv()
 
@@ -210,6 +211,7 @@ app.include_router(ponsenkaart_router, dependencies=[Depends(verify_key)])
 app.include_router(expand_router, dependencies=[Depends(verify_key)])
 app.include_router(kennis_router, dependencies=[Depends(verify_key)])
 app.include_router(tiles_router, dependencies=[Depends(verify_key)])
+app.include_router(leefomgeving_router, dependencies=[Depends(verify_key)])
 
 
 @app.get("/health")
