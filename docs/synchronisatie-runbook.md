@@ -64,6 +64,7 @@ data draait; prod achterlaten betekent dat de sites stale zijn.
 5. I2A → prod       push zodra er iets te pushen is  —
 6. EMBEDDINGS       + onderwerp-as, draait standaard uren
 6b. DOORWERKING     instructieregels.nl-meting       uren, lokale GPU
+6bis. HERTALING     begrijpelijke varianten (Sonnet)  ~1 u per 2.600 teksten
 6c. ONDERWERP-AS    toewijzingen lokaal → prod       ~1 min
 7. VERIFICATIE      beide DB's + API                 ~5 min
 8. DOWNSTREAM       gebakken sites herbouwen         ~15 min
@@ -722,6 +723,42 @@ een *nieuw omgevingsplan-artikel* inmiddels in de top-K van een bestaande regel
 zou vallen: de screening is een landelijke top-K per regel, en of die verschoven
 is weet je pas door hem opnieuw te draaien. Vuistregel: **laadde stap 1 nieuwe
 of gewijzigde omgevingsplannen, draai dan 1a–1d ongeacht wat `stand.py` zegt.**
+
+### Stap 6bis — Begrijpelijke varianten (hertaling)
+
+*Toegevoegd 2026-08-13. Stond niet in dit runbook en liep daardoor achter: de
+cache was op 22 juli voor het laatst bijgewerkt.*
+
+Nieuw geladen tekst heeft geen begrijpelijke variant tot iemand de hertaling
+draait. De cache is **content-adresseerbaar** (hash over de genormaliseerde
+tekst), dus de bruidsschat betaalt zich terug: van de 3.707 unieke teksten in de
+acht regelingen van 12-08 had **45% al een hertaling** uit een andere gemeente.
+
+```bash
+cd c:/GIT/OCD/dso-loader
+python scripts/begrijpelijk-hertaling.py --scope sync --provider anthropic --model claude-sonnet-5
+```
+
+**Draai dit met Sonnet, niet met het lokale model** *(gebruikerskeuze
+2026-08-13)*. `ocd-api` leest de hertalingen met een voorkeursvolgorde die met
+`claude-sonnet-5` begint; een lokaal gedraaide qwen-hertaling wordt alleen
+gebruikt als er niets beters is. Op 13-08 is de hele set eerst lokaal gedraaid
+(2.605 teksten, 72 min, gratis) en bleek achteraf dat de API er niets van
+toonde — de terugval is daarna ingebouwd, maar de route blijft Sonnet.
+
+`--scope sync` neemt de expressies uit `p2p.regeling_load` sinds de start van de
+laatste geslaagde sync. Zonder die scope is de keuze `broekhem33` (drie
+regelingen) of `all` (~85.000 openstaande teksten, dagen werk).
+
+Daarna naar productie — het rekenwerk is al gedaan, dit duwt alleen de cache van
+~6 MB en herbouwt de koppel-MV server-side:
+
+```powershell
+powershell -File scripts/sync-hertaling-to-prod.ps1 -All -ProdUrl "<PROD_DB_URL>"
+```
+
+Gemeten 13-08: 18.398 rijen over de lijn, MV 479.391 element-hashes, 656.356
+koppelingen.
 
 ### Stap 6c — Onderwerp-as naar productie
 
