@@ -8,6 +8,10 @@ Dit is het **draaiboek**. De werking, timings en achtergrond staan in
 die blijft de referentie, dit is de operatie. Bij tegenspraak wint de
 beschrijving voor *hoe het werkt* en dit runbook voor *hoe we het doen*.
 
+Een visuele samenvatting — datastromen, fasenketen, timings, faalpaden — staat in
+[synchronisatie-overzicht.md](synchronisatie-overzicht.md). Dat document is
+afgeleid: spreekt het dit runbook tegen, dan is het overzicht verouderd.
+
 ---
 
 ## 1. Principes
@@ -144,12 +148,23 @@ je apart moet draaien:
 
 ```bash
 python -m src.cli wijziging ontwerpen
-python -m src.cli wijziging besluitversies
+python -m src.cli wijziging besluiten     # NIET `besluitversies` — zie hieronder
 ```
+
+> **De tweede heet `besluiten`.** Hier stond tot 2026-08-13 op vier plekken
+> `wijziging besluitversies`, en dat commando bestaat niet: click antwoordt
+> `No such command 'besluitversies'. Did you mean 'besluiten'?`. Ontdekt tijdens
+> de sync van 12-08. De pagina-naam (besluitversie) en de commando-naam
+> (besluiten) lopen dus uiteen; `src.cli` is de waarheid.
 
 Ze laden alleen wat de relevantietoets haalt (`_is_relevant`), dus het meeste
 werk is skippen. Reken op tientallen minuten, gedomineerd door de
 documentstructuur- en annotatie-calls per nieuw besluit.
+
+Gemeten 2026-08-13 (ontwerpen): 1.033 bekeken, 167 relevant, 866 historisch,
+0 fouten — de lijstfase eerst, daarna pas de renvooi- en annotatie-calls per
+besluit. De regels `+ ontwerp <naam>` horen bij die eerste fase en betekenen
+"geselecteerd", niet "geladen"; de besluit-telling beweegt pas daarna.
 
 **Twee API's, niet één.** De besluitnaam komt uit verschillende bronnen per
 soort, en dat is geen keuze maar een eigenschap van de DSO:
@@ -168,19 +183,40 @@ krijgt er **0** er alsnog een — beide API's bevraagd, 82 × HTTP 200). De
 loader doet dit vanzelf — `_ontsluiten_citeertitel` is best-effort en laat de
 load nooit vallen. Zie [citeertitel-uit-presenteren-api.md](citeertitel-uit-presenteren-api.md).
 
-**Prod krijgt hier niets van.** `repliceer_p2p_naar_prod.py` dekt alleen `p2p.*`;
-voor `p2pwijziging` bestaat geen replicatiestap. Wil je prod bijwerken, dan draai
-je de loader er rechtstreeks tegenaan:
+**Prod krijgt dit gerepliceerd, niet geladen** *(sinds 2026-08-13)*. Tot die
+datum stond hier de enige uitzondering op "prod krijgt gegevens, geen loaders":
+`repliceer_p2p_naar_prod.py` dekt alleen `p2p.*`, dus voor `p2pwijziging` draaide
+je de loader rechtstreeks tegen productie. Die uitzondering is vervallen:
 
 ```bash
-OCD_DB_URL=$PROD_DB_URL python -m src.cli wijziging ontwerpen
-OCD_DB_URL=$PROD_DB_URL python -m src.cli wijziging besluitversies
+python scripts/repliceer_p2pwijziging_naar_prod.py          # droogloop
+python scripts/repliceer_p2pwijziging_naar_prod.py --ja     # spiegelen
 ```
 
-Dat is de enige stap in dit runbook waar een loader tegen productie draait —
-elders geldt "prod krijgt gegevens, geen loaders". Bewust zo gelaten omdat een
-replicatiescript voor 445 besluit-rijen plus hun deltas meer machinerie is dan
-het probleem groot is; het staat als openstaand punt in §5.
+**Dit script spiegelt, en dat is een wezenlijk verschil met zijn p2p-broer.**
+Die voegt toe en werkt bij, maar verwijdert nooit. Dat kan hier niet, want stap
+10 haalt lokaal rijen wég; een script dat alleen aanvult zou dat verschil nooit
+dichten. Gemeten op 2026-08-12 vóór de eerste spiegeling: lokaal 340.100
+`tekst_element` tegen 725.428 op prod.
+
+De eenheid van spiegelen is het besluit. Elke tabel hangt via
+`ontwerpbesluit_id` aan `p2pwijziging.besluit` met `ON DELETE CASCADE`, dus een
+besluit dat afwijkt wordt in zijn geheel vervangen: rij weg (het gevolg
+cascadeert mee), rij terug vanuit lokaal. Dat is ook het enige wat klopt bij een
+herladen ontwerp — dan krijgen de kindrijen nieuwe identity-id's terwijl het
+besluit hetzelfde blijft. Elk besluit gaat in zijn eigen transactie, dus een
+afgebroken run laat geen half besluit achter.
+
+Verschillen worden bepaald met een vingerafdruk per besluit: md5 over de
+besluitrij plus per kindtabel `(count(*), sum(hashtext(pk)))`. Die som vangt het
+geval dat een herlading evenveel rijen met andere sleutels oplevert — een
+telling alleen zou dat missen.
+
+Gemeten 2026-08-12/13: vingerafdrukken bepalen ~2 min (445 besluiten aan beide
+kanten), eerste spiegeling 264 besluiten in 8,4 min. Het invoegpad is apart
+getoetst met `--besluit <id>` op een besluit van 39.797 rijen: identieke
+tellingen én identieke sleutel-sommen (identity-id's blijven dus behouden) en
+nul wezen in de `parent_id`-keten.
 
 Alleen de citeertitels bijwerken zonder volledige herload kan met:
 
@@ -312,6 +348,13 @@ Gemeten duur op prod (2026-08-08): drieslag **21,6 min** in acht stappen
 `mv_bronhouder_health` 16 s, ponsenkaart-stats 1 s. De "5,5 min lokaal / 11 min
 prod" verderop in §5 slaat op de naam-match alleen, niet op de hele fase.
 
+Herhaald op 2026-08-13 en stabiel: drieslag **19,6 min** (niet-annoteerbaar 3,9 ·
+`mv_element_hash` 0,9 · `gio_locatie` 0,7 · `ala_punt` 0,1 · `naammatch_signaal`
+8,5 · intra 0,4 · tekst_object_consistentie 3,3 · gio_referentie_consistentie
+1,8), `mv_geo_health` **6,2 min**, `mv_bronhouder_health` 9,7 s,
+ponsenkaart-stats 0,9 s. Twee metingen een week uit elkaar die binnen 10%
+gelijk liggen: dit zijn bruikbare verwachtingswaarden, geen toevalstreffers.
+
 #### Verificatie
 
 Tel aan beide kanten per tabel, gefilterd op dezelfde expressie-set. Gemeten
@@ -378,6 +421,7 @@ gelijk, dan is de inhoud ongewijzigd en slaat de loader de XML over.
 | gemeten op gm1699 (148 regelbestanden) | ronde 1: **52,3 s** · ronde 2: **3,1 s** |
 | geëxtrapoleerd over 343 bronhouders, alles ongewijzigd | 5,6 uur → ~20 min |
 | **gemeten 09-08 ná de peildatum-fix**, 2 bronhouders | Amsterdam 9,2 s (160/166 overgeslagen) · Den Haag 4,5 s (145/148) → **~40 min** landelijk |
+| **werkelijk landelijk, 12-08** — de eerste volle run mét gevuld watermerk | **~25 min** voor 343/343 bronhouders, 0 fouten. Typisch beeld per bronhouder: `145 regelbestanden (144 ongewijzigd, DMN overgeslagen)` |
 
 **Drie eigenschappen om te kennen voordat je erop vertrouwt:**
 
@@ -664,6 +708,38 @@ omwisselen. De oude tabel blijft achter als `v2a.chunk_categorie_oud`, dus
 terugdraaien is twee renames. Gemeten 2026-08-06: 737.911 rijen in 2 s laden,
 swap in 1 s, foreign keys herstellen 2 min.
 
+#### En daarna: de indeling op prod herbouwen
+
+**Dit ontbrak tot 2026-08-13 en is geen detail.** Het script hierboven dekt
+`chunk_categorie` en `chunk_annotatie`, maar níet `v2a.artikel_indeling` en
+`v2a.wijziging_indeling` — en juist die twee leest het register rechtstreeks.
+De indeling-stap in `full_sync.py` draait bovendien alleen lokaal.
+
+Gemeten 2026-08-13, ná een sync waarin acht regelingen waren vervangen: prod
+stond op **125.808** ingedeelde artikelen, lokaal op **125.747**. Precies de 61
+die de sync-meting die nacht als `+-61` rapporteerde. Prod toonde dus de
+onderwerpen van de vórige planversies, zonder enig signaal.
+
+```bash
+OCD_DB_URL="$PROD_DB_URL" python scripts/bouw_indeling.py
+```
+
+Herbouwen, niet kopiëren — de indeling is een opzoeking op tekst en dus
+goedkoop (~1,5 min lokaal, vergelijkbaar op prod). Controleer daarna beide
+kanten:
+
+```sql
+SELECT count(*), count(categorie) FROM v2a.artikel_indeling;
+SELECT count(*), count(categorie) FROM v2a.wijziging_indeling;
+```
+
+Na de run van 13-08: 148.514 / 125.747 en 12.514 / 8.442, aan beide kanten
+gelijk.
+
+> **Volgorde let op**: draai dit ná stap 1b. De wijzigingsindeling leest
+> `p2pwijziging`, en die wordt door stap 1b gevuld — draai je hem ervóór (zoals
+> `full_sync.py` doet), dan mist hij de ontwerpen van deze sync.
+
 ### Stap 7 — Verificatie
 
 ```bash
@@ -714,8 +790,36 @@ Gebakken sites moeten herbouwd:
 
 ```bash
 python scripts/publish.py                 # dry-run (default)
-python scripts/publish.py --execute       # instructieregels, ponsenkaart, RoM
+python scripts/publish.py --execute       # ponsenkaart · instructieregels · annotatieconformiteit
+python scripts/publish.py --execute --only instructieregels
 ```
+
+**De site-registry, zoals hij in de code staat** (`sites()` in `publish.py`) —
+dit corrigeert een eerdere regel hier die "instructieregels, ponsenkaart, RoM"
+noemde:
+
+| Site | Soort | Wat `publish.py` doet |
+|---|---|---|
+| ponsenkaart | live | **niets** — leest runtime `/v1/ponsenkaart/*` en `/v1/planvoorraad/*`, dus vers zodra prod vers is. `deploy.sh` alleen bij een code-wijziging |
+| instructieregels | baked | `build/build.sh` → `wrangler pages deploy web`, mét pre-flight (zie onder) |
+| annotatieconformiteit | baked | `collect --structuur --rtr` → `score` → `export -f json` → `npm run deploy` |
+
+**RoM staat er niet in** — buiten scope sinds 2026-07-24. Het staat nog wél in de
+docstring van `publish.py` en in de `--only`-hulptekst; die zijn achterhaald, de
+registry is de waarheid.
+
+`annotatieconformiteit` was hier lang "repo nog te lokaliseren"; hij staat op
+`C:/GIT/annotatieconformiteit.nl` (ex-`odkwaliteit`) en leest de OCD-Postgres via
+`ODK_OCD_DB_URL`.
+
+> ⚠️ **`publish.py` ververst prod niet.** `--prod-mode` staat default op `none`;
+> `delta` is een TODO-stub die alleen een regel print en terugkeert, en `restore`
+> roept de zware destructieve `restore-dev-naar-prod.ps1 -All` aan. Prod hoort op
+> dit punt al vers te zijn uit **stap 3 en 4** — gebruik `--prod-mode` niet als
+> vangnet daarvoor.
+
+`--db-source` bepaalt waar de gebakken builds hun data lezen: `local` (default,
+vers direct na de sync) of `prod`.
 
 De poort van `publish.py` laat alleen door als de laatste sync-run "0 fouten"
 meldde. Zie de kanttekening in §5: die poort meet exceptions, geen
@@ -915,7 +1019,7 @@ Noodroute als prod onherstelbaar afwijkt: `restore-dev-naar-prod.ps1`
 | — | `repliceer_p2p_naar_prod.py` dekt p2p, maar de afgeleide herbouw (subdiv, MV's) is nog losse handmatige stappen | stap 3 is één script plus drie commando's; automatiseren kan zodra de volgorde zich bewezen heeft |
 | — | de replicatie **verwijdert** niets op prod | een rij die lokaal is opgeruimd blijft daar staan; net als G-91 een bewuste keuze, geen automatisme. **Let op sinds 09-08**: stap 10 heeft lokaal 947.860 rijen uit `p2pwijziging` gehaald die op prod nog staan — dat verschil is bedoeld, niet een gat |
 | — | *opgelost 2026-08-09* — de twee koppelingen van een tekstdeel werden nooit geschreven | `tekstdeel_hoofdlijn` stond landelijk op **0 rijen** en 40% van de gebiedsaanwijzingen hing nergens aan. De API levert `hoofdlijnRefs`/`gebiedsaanwijzingRefs`; `load_divisieannotaties` las ze niet. Na fix + backfill: 4.955 en 6.965 koppelingen; wezen van 410→7 (hoofdlijn) en 1.942→196 (gebiedsaanwijzing). Zie vault G-124 |
-| — | er is **geen replicatiestap voor `p2pwijziging`** | `repliceer_p2p_naar_prod.py` dekt alleen `p2p.*`. Prod bijwerken kan alleen door de loader er rechtstreeks tegenaan te draaien (stap 1b) — de enige plek in dit runbook waar dat gebeurt. Bewuste keuze: een replicatiescript voor 445 besluit-rijen plus deltas is meer machinerie dan het probleem groot is. Wordt het wél gebouwd, dan vervalt die uitzondering |
+| — | *opgelost 2026-08-13* — er was geen replicatiestap voor `p2pwijziging` | `repliceer_p2pwijziging_naar_prod.py` spiegelt het schema per besluit. Daarmee draait er nergens in dit runbook nog een loader tegen productie. Eerste spiegeling: 264 besluiten, 1,8 mln rijen van prod af (het gevolg van stap 10), 0 toevoegingen |
 | — | de relevantietoets van `ontwerp_loader` wordt alleen bij intake toegepast | rijen komen binnen onder een voorwaarde en vertrekken niet als die vervalt; stap 10 ruimt op, maar de loader blijft het opnieuw opbouwen. Structureel zou de toets bij elke run over de bestaande voorraad moeten (vault G-123) |
 | — | *opgelost 2026-08-09* — i2a-datum stond hardgecodeerd op `10-04-2026` | nu `_peildatum()` = vandaag. Gemeten effect over 19 bronhouders: 2 nieuw, 2 weg, 52 van 3.128 met nieuwere inhoud (~1,7%). De eerstvolgende run duurt nog ~5,6 u omdat `laatste_wijziging` nog vrijwel overal `NULL` is |
 | — | de preview stuurde de RTR een geprefixte code (`gm0344`) | *opgelost 2026-08-09* — dezelfde G-117-fout als in de loader, waardoor élke gemeente 0 activiteiten leek te hebben. Preview hergebruikt nu de loader-helpers in plaats van ze over te schrijven |
@@ -976,7 +1080,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 |---|---|---|
 | Volledige sync (stap 0–4, 7–9) | wekelijks | dit runbook |
 | i2a (in de sync) | elke sync, ~40 min | kan sinds de delta van 2026-08-08 gewoon meedraaien; vóór die tijd was de keuze "3 min omdat hij niets deed" of "5,6 uur" |
-| Wijzigingsspoor (stap 1b) | elke sync die ontwerpen/besluiten moet tonen | `wijziging ontwerpen` + `wijziging besluitversies`, lokaal én — apart — tegen prod; zit **niet** in `full_sync.py` |
+| Wijzigingsspoor (stap 1b) | elke sync die ontwerpen/besluiten moet tonen | `wijziging ontwerpen` + `wijziging besluiten` lokaal, daarna `repliceer_p2pwijziging_naar_prod.py --ja`; zit **niet** in `full_sync.py` |
 | Embeddings + onderwerp-as (stap 6) | elke sync | draait standaard mee in `full_sync.py` |
 | Onderwerp-as naar prod | na elke stap 6 die lokaal draaide | `2026-08-06-categorie-naar-productie.py --ja` (2 s) |
 | Doorwerkingsmeting (stap 6b) | na elke sync die omgevingsplannen of instructieregels raakte | lokaal, ná stap 6; `match/stand.py` zegt of het moet |
