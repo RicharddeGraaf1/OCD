@@ -1038,6 +1038,32 @@ SELECT pg_terminate_backend(<pid>);
 Let op de `pid <> pg_backend_pid()`: zoek je op de querytekst, dan matcht je
 eigen query zichzelf en beëindig je je eigen sessie (gebeurd op 2026-08-01).
 
+**Een hard afgesloten Ollama laat zijn modelrunner draaien — en die houdt je
+GPU vast.** Dezelfde soort val als de spook-backend hierboven, één laag lager.
+`taskkill /IM ollama.exe` beëindigt alleen de server, niet de
+`llama-server`-kindprocessen. Die blijven het VRAM bezet houden, waarna een
+nieuwe Ollama zijn model in de rest probeert te laden en op Windows uitwijkt
+naar systeemgeheugen. Het beeld dat je dan krijgt is misleidend: **GPU op 100%,
+model netjes "in VRAM" volgens `/api/ps`, en geen enkele voltooide generatie.**
+
+Gemeten 2026-08-13 tijdens de hertaling-stap: met Ollama volledig afgesloten was
+nog 11.568 van 12.282 MiB VRAM bezet door twee verweesde runners. Na opruimen
+1.627 MiB, en de run liep meteen op ~19 teksten/min — daarvóór 3 teksten in
+9 minuten.
+
+```powershell
+# vóór je concludeert dat een LLM-stap "hangt":
+nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader
+Get-Process -Name "llama-server" -ErrorAction SilentlyContinue   # horen er niet te zijn zonder ollama
+Get-Process -Name "llama-server" | Stop-Process -Force
+```
+
+Onderscheid het van een echte hang: een trage generatie schrijft *wel* door
+(de teller in `v2a.hertaling` beweegt, zij het per `COMMIT_EVERY`=25), een
+VRAM-verdringing schrijft niets terwijl de GPU vol staat. En let op de
+commit-batch bij het beoordelen van stilstand — twee gelijke tellingen kunnen
+gewoon 24 nog-niet-gecommitte rijen zijn.
+
 **Hervat in de volgorde van het runbook, niet vanaf het punt van de fout.**
 Een mislukte rekenstap gaat achteraan: eerst de resterende harvest- en
 verplaatsstappen (4, 5), dan verificatie (7), en pas daarna het dure rekenwerk
