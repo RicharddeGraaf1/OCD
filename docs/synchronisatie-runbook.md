@@ -594,6 +594,46 @@ definitie is: staat wél in `p2p.regeling`, maar op `inactief`.
 `run_overnight.py` blijft bestaan voor een volledige herbouw, maar hoort niet
 meer in een gewone sync.
 
+#### Maar dan wél de twee chunk-lagen erbij — anders is de sync half
+
+**Ontdekt 2026-08-13, en het is de keerzijde van bovenstaand advies.**
+`refresh-v2a` embedt en ruimt op; hij raakt `chunk_annotatie` en
+`chunk_categorie` niet aan. Die twee worden uitsluitend door `run_overnight.py`
+herbouwd — en die is nu juist uit de gewone sync gehaald. Gevolg: de nieuwe
+chunks krijgen **geen onderwerp en geen annotatie**, en stap 6c kopieert die
+leegte vervolgens netjes naar productie. Gemeten na de sync van 12-08: van de
+7.302 nieuwe chunks hadden er **0** een categorie en **0** een annotatie.
+
+De herbouw is goedkoop — de uren in `run_overnight` zitten in fase 4a, niet
+hier. Draai daarom na `refresh-v2a` alleen deze twee fasen:
+
+```bash
+python - <<'PY'
+import importlib.util, sys
+sys.path.insert(0, '.')
+spec = importlib.util.spec_from_file_location('ro', 'scripts/run_overnight.py')
+ro = importlib.util.module_from_spec(spec); spec.loader.exec_module(ro)
+ro.rebuild_annotatie()     # gemeten 13-08: 2,4 min · 744.274 rijen
+ro.extend_categorie()      # gemeten 13-08: 5,7 min · 739.600 toewijzingen
+PY
+```
+
+Controle achteraf — beide horen ruim boven nul te staan voor de nieuw geladen
+expressies:
+
+```sql
+WITH nieuw AS (SELECT frbr_expression FROM p2p.regeling_load
+                WHERE geladen_op >= '<start van de run>'),
+     ch AS (SELECT e.id FROM v2a.tekst_embedding e JOIN nieuw n USING (regeling_expression))
+SELECT (SELECT count(*) FROM ch) AS chunks,
+       (SELECT count(DISTINCT chunk_id) FROM v2a.chunk_categorie WHERE chunk_id IN (SELECT id FROM ch)) AS met_categorie,
+       (SELECT count(DISTINCT chunk_id) FROM v2a.chunk_annotatie WHERE chunk_id IN (SELECT id FROM ch)) AS met_annotatie;
+```
+
+Na de herbouw van 13-08: 7.302 chunks, 5.810 met categorie (80%), 6.733 met
+annotatie (92%). **Draai stap 6c pas hierná** — anders zet je de onvolledige
+toewijzingen over en moet je hem twee keer doen (zoals op 13-08 gebeurd is).
+
 #### Overslaan mag, maar weet wat je overslaat
 
 ```bash
