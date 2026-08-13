@@ -65,7 +65,8 @@ def user_prompt(inhoud_plain: str) -> str:
     )
 
 
-def todo_texts(conn, scope: str, model: str, limit: int | None) -> list[dict]:
+def todo_texts(conn, scope: str, model: str, limit: int | None,
+               sinds: str | None = None) -> list[dict]:
     """Unieke teksten (per genormaliseerde hash) die nog geen hertaling hebben."""
     if scope == "broekhem33":
         scope_cte = """
@@ -76,6 +77,24 @@ def todo_texts(conn, scope: str, model: str, limit: int | None) -> list[dict]:
                 WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s,%(y)s),28992))
                   AND NOT r.inactief
                   AND r.documenttype IN ('Omgevingsplan','Omgevingsverordening','Waterschapsverordening')
+            ),
+            elems AS (
+                SELECT te.inhoud_plain, v2a.norm_hash(te.inhoud_plain) AS bh
+                FROM scope s JOIN p2p.tekst_element te ON te.regeling_expression = s.expr
+                WHERE te.element_type = ANY(%(types)s)
+                  AND te.inhoud_plain IS NOT NULL AND length(te.inhoud_plain) > %(minlen)s
+            )
+        """
+    elif scope == "sync":
+        # De regelingen die een sync zojuist heeft geladen. Toegevoegd 2026-08-13:
+        # na een sync wil je de nieuwe tekst hertalen, niet het hele land. Van de
+        # acht regelingen van 12-08 waren 3.707 teksten uniek en had 45% al een
+        # hertaling (content-adressering: de bruidsschat staat landelijk gekopieerd),
+        # dus 2.021 te doen tegen ~85.000 bij `--scope all`.
+        scope_cte = """
+            WITH scope AS (
+                SELECT frbr_expression AS expr FROM p2p.regeling_load
+                 WHERE geladen_op >= %(sinds)s
             ),
             elems AS (
                 SELECT te.inhoud_plain, v2a.norm_hash(te.inhoud_plain) AS bh
@@ -105,7 +124,7 @@ def todo_texts(conn, scope: str, model: str, limit: int | None) -> list[dict]:
         ORDER BY e.bh, length(e.inhoud_plain)
     """
     params = {"x": X, "y": Y, "types": list(ELEMENT_TYPES), "minlen": MIN_LEN,
-              "model": model, "pv": PROMPT_VERSIE}
+              "model": model, "pv": PROMPT_VERSIE, "sinds": sinds}
     with conn.cursor() as cur:
         cur.execute("SET max_parallel_workers_per_gather = 0")
         cur.execute(sql, params)
@@ -136,7 +155,10 @@ def chat_anthropic(client, model: str, system: str, user: str) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scope", choices=["broekhem33", "all"], default="broekhem33")
+    ap.add_argument("--scope", choices=["broekhem33", "sync", "all"], default="broekhem33")
+    ap.add_argument("--sinds", default=None,
+                    help="alleen bij --scope sync: ISO-tijdstip; default = start van "
+                         "de laatste geslaagde sync-run")
     ap.add_argument("--provider", choices=["ollama", "anthropic"], default="ollama")
     ap.add_argument("--model", default=None)
     ap.add_argument("--limit", type=int, default=None)
@@ -152,7 +174,15 @@ def main() -> None:
 
     t0 = time.monotonic()
     with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
-        todo = todo_texts(conn, args.scope, model, args.limit)
+        sinds = args.sinds
+        if args.scope == "sync" and not sinds:
+            with conn.cursor() as cur:
+                cur.execute("SELECT max(gestart_op) AS t FROM audit.sync_run "
+                            "WHERE klaar_op IS NOT NULL "
+                            "  AND coalesce(opmerking,'') NOT ILIKE '%%afgebroken%%'")
+                sinds = cur.fetchone()["t"]
+            print(f"Scope sync: regelingen geladen sinds {sinds}")
+        todo = todo_texts(conn, args.scope, model, args.limit, sinds)
         print(f"Unieke teksten te hertalen: {len(todo)} "
               f"(scope={args.scope}, model={model}, prompt={PROMPT_VERSIE})\n")
         done = fails = 0
