@@ -133,8 +133,18 @@ def todo_texts(conn, scope: str, model: str, limit: int | None,
 
 
 def chat_ollama(model: str, system: str, user: str) -> str:
+    # num_predict is geen finetuning maar een noodrem. Zonder die grens genereert
+    # het model door tot de contextlimiet als een tekst hem op hol brengt, en de
+    # httpx-timeout hieronder helpt daar niet tegen: die verbreekt alleen de
+    # client, terwijl Ollama server-side doorrekent. Elk volgend verzoek komt dan
+    # in de wachtrij achter die generatie te staan en loopt óók in zijn timeout —
+    # de run staat stil terwijl de GPU op 96% blijft. Gebeurd op 2026-08-13 bij
+    # tekst 511 van 2.480: 7,5 minuten geen enkele wegschrijving.
+    # 400 tokens is ruim: de hertalingen zitten rond de 250 tekens. Het
+    # Anthropic-pad hieronder had zijn max_tokens=300 al vanaf het begin.
     r = httpx.post(f"{OLLAMA_URL}/api/chat", json={
-        "model": model, "stream": False, "options": {"temperature": 0.3},
+        "model": model, "stream": False,
+        "options": {"temperature": 0.3, "num_predict": 400},
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
     }, timeout=180)
