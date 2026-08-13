@@ -2490,6 +2490,24 @@ def serve_ocd_regeltekst_v1():
 HERTAAL_MODEL = "claude-sonnet-5"
 HERTAAL_PROMPT_VERSIE = "v1"
 
+# Terugval-volgorde (2026-08-13, gebruikerskeuze). Het contract blijft "Sonnet",
+# maar een gepind model betekende in de praktijk: geen hertaling zodra een
+# andere motor de tekst had gedaan. Na de sync van 12-08 had 1.586 van de 3.272
+# nieuwe teksten alleen een qwen-hertaling — die stonden in de cache en werden
+# door dit filter stilzwijgend genegeerd.
+#
+# De volgorde is aflopend in kwaliteit; array_position bepaalt de winnaar per
+# element. Het gekozen model gaat mee in de respons (`begrijpelijk_model`),
+# zodat de afnemer kan tonen waar de tekst vandaan komt in plaats van
+# kwaliteitsverschil te verbergen — een lokaal 14B-model haspelt af en toe
+# ("1 meter kubieke water" i.p.v. kubieke meter).
+HERTAAL_MODEL_VOORKEUR = [
+    HERTAAL_MODEL,          # het contract: hier hoort elke tekst te staan
+    "claude-opus-4-8",
+    "claude-haiku-4-5",
+    "qwen2.5:14b",
+]
+
 
 @app.get("/v1/viewer/tekst/{wid}", dependencies=[Depends(verify_key)])
 def viewer_tekst(wid: str):
@@ -2508,18 +2526,24 @@ def viewer_tekst(wid: str):
         # meldt i.p.v. stil de verdrongen versie te tonen.
         cur.execute(
             """
-            SELECT te.inhoud AS tekst, eh.begrijpelijk,
+            SELECT te.inhoud AS tekst, eh.begrijpelijk, eh.model AS begrijpelijk_model,
                    coalesce(r.inactief, false) AS inactief
             FROM p2p.tekst_element te
-            LEFT JOIN v2a.element_hertaling eh
-                   ON eh.tekst_element_id = te.id
-                  AND eh.model = %s AND eh.prompt_versie = %s
+            LEFT JOIN LATERAL (
+                SELECT h.begrijpelijk, h.model
+                  FROM v2a.element_hertaling h
+                 WHERE h.tekst_element_id = te.id
+                   AND h.prompt_versie = %s
+                   AND h.model = ANY(%s)
+                 ORDER BY array_position(%s::text[], h.model)
+                 LIMIT 1
+            ) eh ON TRUE
             LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE te.wid = %s
             ORDER BY r.inactief ASC NULLS FIRST
             LIMIT 1
             """,
-            (HERTAAL_MODEL, HERTAAL_PROMPT_VERSIE, wid),
+            (HERTAAL_PROMPT_VERSIE, HERTAAL_MODEL_VOORKEUR, HERTAAL_MODEL_VOORKEUR, wid),
         )
         row = cur.fetchone()
         if not row:
@@ -2529,6 +2553,7 @@ def viewer_tekst(wid: str):
         # krijgen, afhankelijk van welk pad de frontend toevallig koos.
         iorefs = _iorefs_bij_wids(cur, [wid])
     return {"wid": wid, "tekst": row["tekst"], "begrijpelijk": row["begrijpelijk"],
+            "begrijpelijk_model": row["begrijpelijk_model"],
             "inactief": bool(row["inactief"]), "iorefs": iorefs.get(wid, {})}
 
 
@@ -2560,21 +2585,29 @@ def viewer_teksten(req: TekstenRequest = Body(...)):
         cur.execute(
             """
             SELECT DISTINCT ON (te.wid) te.wid, te.inhoud AS tekst, eh.begrijpelijk,
+                   eh.model AS begrijpelijk_model,
                    coalesce(r.inactief, false) AS inactief
             FROM p2p.tekst_element te
-            LEFT JOIN v2a.element_hertaling eh
-                   ON eh.tekst_element_id = te.id
-                  AND eh.model = %s AND eh.prompt_versie = %s
+            LEFT JOIN LATERAL (
+                SELECT h.begrijpelijk, h.model
+                  FROM v2a.element_hertaling h
+                 WHERE h.tekst_element_id = te.id
+                   AND h.prompt_versie = %s
+                   AND h.model = ANY(%s)
+                 ORDER BY array_position(%s::text[], h.model)
+                 LIMIT 1
+            ) eh ON TRUE
             LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE te.wid = ANY(%s)
             ORDER BY te.wid, r.inactief ASC NULLS FIRST
             """,
-            (HERTAAL_MODEL, HERTAAL_PROMPT_VERSIE, wids),
+            (HERTAAL_PROMPT_VERSIE, HERTAAL_MODEL_VOORKEUR, HERTAAL_MODEL_VOORKEUR, wids),
         )
         rows = cur.fetchall()
         iorefs = _iorefs_bij_wids(cur, wids)
     return {"teksten": [
         {"wid": r["wid"], "tekst": r["tekst"], "begrijpelijk": r["begrijpelijk"],
+         "begrijpelijk_model": r["begrijpelijk_model"],
          "inactief": bool(r["inactief"]),
          "iorefs": iorefs.get(r["wid"], {})}
         for r in rows
@@ -2675,33 +2708,47 @@ def hertaling_lookup(req: HertalingLookupRequest = Body(...)):
             items = [t for t in req.teksten if t and t.strip()][:200]
             cur.execute(
                 """
-                SELECT t.ord, h.tekst AS begrijpelijk
+                SELECT t.ord, h.tekst AS begrijpelijk, h.model AS begrijpelijk_model
                 FROM unnest(%s::text[]) WITH ORDINALITY AS t(tekst, ord)
-                LEFT JOIN v2a.hertaling h
-                       ON h.bron_hash = v2a.norm_hash(t.tekst)
-                      AND h.model = %s AND h.prompt_versie = %s
+                LEFT JOIN LATERAL (
+                    SELECT x.tekst, x.model
+                      FROM v2a.hertaling x
+                     WHERE x.bron_hash = v2a.norm_hash(t.tekst)
+                       AND x.prompt_versie = %s
+                       AND x.model = ANY(%s)
+                     ORDER BY array_position(%s::text[], x.model)
+                     LIMIT 1
+                ) h ON TRUE
                 ORDER BY t.ord
                 """,
-                (items, HERTAAL_MODEL, HERTAAL_PROMPT_VERSIE),
+                (items, HERTAAL_PROMPT_VERSIE, HERTAAL_MODEL_VOORKEUR,
+                 HERTAAL_MODEL_VOORKEUR),
             )
-            found = {r["ord"]: r["begrijpelijk"] for r in cur.fetchall()}
+            found = {r["ord"]: (r["begrijpelijk"], r["begrijpelijk_model"])
+                     for r in cur.fetchall()}
             return {"hertalingen": [
-                {"key": items[i], "begrijpelijk": found.get(i + 1)}
+                {"key": items[i],
+                 "begrijpelijk": found.get(i + 1, (None, None))[0],
+                 "begrijpelijk_model": found.get(i + 1, (None, None))[1]}
                 for i in range(len(items))
             ]}
 
         wids = [w.strip() for w in req.wids if w and w.strip()][:200]
         cur.execute(
             """
-            SELECT DISTINCT ON (wid) wid, begrijpelijk
+            SELECT DISTINCT ON (wid) wid, begrijpelijk, model
             FROM v2a.element_hertaling
-            WHERE wid = ANY(%s) AND model = %s AND prompt_versie = %s
+            WHERE wid = ANY(%s) AND prompt_versie = %s AND model = ANY(%s)
+            ORDER BY wid, array_position(%s::text[], model)
             """,
-            (wids, HERTAAL_MODEL, HERTAAL_PROMPT_VERSIE),
+            (wids, HERTAAL_PROMPT_VERSIE, HERTAAL_MODEL_VOORKEUR, HERTAAL_MODEL_VOORKEUR),
         )
-        by_wid = {r["wid"]: r["begrijpelijk"] for r in cur.fetchall()}
+        by_wid = {r["wid"]: (r["begrijpelijk"], r["model"]) for r in cur.fetchall()}
         return {"hertalingen": [
-            {"key": w, "begrijpelijk": by_wid.get(w)} for w in wids
+            {"key": w,
+             "begrijpelijk": by_wid.get(w, (None, None))[0],
+             "begrijpelijk_model": by_wid.get(w, (None, None))[1]}
+            for w in wids
         ]}
 
 
