@@ -621,7 +621,12 @@ def refresh_v2a_cmd(ja, opruimen):
     conn = psycopg.connect(cfg.db_url, row_factory=dict_row)
     vuil = dirty_set(conn)
     wees = verweesde_scopes(conn) if opruimen else []
-    console.print(f"dirty: {len(vuil)} regelingen · verweesd: {len(wees)} expressies")
+    # Zonder --opruimen wordt de weestelling niet berekend. Die dan als "0"
+    # tonen leest als "er zijn er geen", terwijl het "niet gekeken" betekent —
+    # bij de sync van 2026-08-12 stonden er zeven verdrongen expressies met
+    # 7.026 chunks terwijl de droogloop 0 meldde. Zeg dus wat er staat.
+    wees_tekst = f"{len(wees)} expressies" if opruimen else "niet berekend (geen --opruimen)"
+    console.print(f"dirty: {len(vuil)} regelingen · verweesd: {wees_tekst}")
     if not ja:
         console.print("[yellow]droogloop — gebruik --ja[/yellow]")
         conn.close()

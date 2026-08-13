@@ -512,7 +512,14 @@ def fase_post(run_start: datetime.datetime, gewijzigd: set[str] | None = None):
             [py, str(backfill), "--apply"], "vth geometrie-backfill",
             "SELECT count(*) n FROM vth.vergunningkennisgeving "
             "WHERE geometrie_rd_pt IS NOT NULL",
-            "geometrieën")
+            # Deze stap vúlt niets aan maar hérkiest: hij vervangt een verkeerd
+            # gekozen gebiedsmarkering door de betrouwbaarste (G-87), en dat is
+            # een UPDATE — de telling blijft dus per definitie gelijk. Met
+            # "geometrieën" als eenheid las "+0" als een gat in de dekking,
+            # terwijl het juist betekent dat de live loader al goed koos.
+            # Gemeten 2026-08-13: +0 correcties bij 96% puntdekking op de
+            # nieuwe dagen, in lijn met de dagen ervoor.
+            "kennisgevingen met punt — deze stap corrigeert, +0 is goed nieuws")
         rapporteer("vth geometrie-backfill", [meting_bf])
 
     conn = get_conn()

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import httpx
 
-from utils import strip_xml
+from src.utils import strip_xml
 from lxml import etree
 from rich.console import Console
 

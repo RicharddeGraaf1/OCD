@@ -13,7 +13,18 @@ kandidaat voor een echte (her)load, niet voor markering.
 Read-mostly: enige mutatie is de inactief-markering via markeer_siblings_inactief.
 """
 import os
+import sys
+from pathlib import Path
+
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
+# `python scripts/markeer_verouderde_expressies.py` — het commando zoals het in
+# docs/synchronisatie-runbook.md §Stap 2 staat — zet alleen scripts/ op
+# sys.path, niet de repo-root, dus `src` was daar onvindbaar. full_sync.py doet
+# dit al (regel 54); hier ontbrak het, waardoor de gedocumenteerde aanroep
+# faalde op ModuleNotFoundError en je hem alleen met PYTHONPATH=. aan de praat
+# kreeg. Gevonden tijdens de sync van 2026-08-12.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rich.console import Console
 from rich.progress import track
