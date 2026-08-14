@@ -51,6 +51,40 @@ Vink af bij voltooiing. Items met "(door agent gefikst)" zitten in deze commit.
   [main.py:71-76](main.py#L71-L76). Check dat Cloudflare Pages exact die
   origin stuurt (`https://ponsenkaart.nl`, niet `www.` of `http`).
 
+## 1b. LLM-provider — expliciet zetten, anders 503
+
+De antwoord-endpoints (`/v1/antwoord-bij-vraag`, `/v1/antwoord-bij-selectie`)
+zijn de enige twee die een LLM aanroepen. Al het andere is DB-werk.
+
+**Gemeten 2026-08-13**: op de Railway-service `ocd-api` staat géén van de
+`OCD_LLM_*`-variabelen. Daarmee gelden de defaults uit [llm.py](llm.py):
+provider `ollama`, model `qwen2.5:14b`, URL `http://localhost:11434` — binnen
+de API-container, waar niets luistert. **Elke antwoord-call geeft daar dus 503.**
+De `OLLAMA_URL`-variabele die er wél staat helpt niet: die wordt alleen gelezen
+door [semantisch.py](semantisch.py) voor embeddings, niet door de
+antwoord-generator.
+
+Wil je dat de AI-samenvatting in de viewer werkt, zet dan in Railway:
+
+- [ ] `OCD_LLM_PROVIDER=groq`
+- [ ] `OCD_LLM_API_KEY=gsk_…` (Groq-sleutel; dezelfde soort als de omgevingsbot
+      gebruikt, maar zet een eigen sleutel zodat je per dienst kunt intrekken)
+- [ ] `OCD_LLM_MODEL=llama-3.3-70b-versatile` (mag leeg — dat is de default
+      voor groq)
+- [ ] `OCD_LLM_BASE_URL` **leeg laten** voor Groq. Zet je hem, dan geldt hij
+      ook voor de Ollama-kant.
+
+Verifiëren na de deploy — dit hoort 200 te geven met een `antwoord`-veld:
+
+```bash
+curl -X POST https://<app>.up.railway.app/v1/antwoord-bij-vraag \
+  -H "X-Api-Key: $OCD_API_KEY_PUBLIC" -H "Content-Type: application/json" \
+  -d '{"question":"mag ik een dakkapel bouwen?","x":121687,"y":487316}'
+```
+
+Bij een 503 staat de provider niet (goed) geconfigureerd; in de logs staat bij
+opstart `llm init provider=… model=… available=…`.
+
 ## 2. Deploy-config
 
 - [x] **`railway.toml` aangemaakt** (door agent gefikst).

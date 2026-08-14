@@ -7,11 +7,17 @@ OCD-viewer en omgevingsbot straks één antwoord-pipeline (zie
 
 Provider via env, **feature-flagged** zodat de rest van OCD zonder LLM blijft
 werken:
-    OCD_LLM_PROVIDER   ollama (default) | anthropic | none
+    OCD_LLM_PROVIDER   ollama (default) | anthropic | groq | none
     OCD_LLM_MODEL      modelnaam (default per provider)
-    OCD_LLM_BASE_URL   Ollama-URL (default: OCD_EXPAND_URL of localhost:11434)
-    OCD_LLM_API_KEY    sleutel voor anthropic
+    OCD_LLM_BASE_URL   basis-URL; per provider een andere default:
+                       ollama → OCD_EXPAND_URL of localhost:11434
+                       groq   → https://api.groq.com/openai/v1
+    OCD_LLM_API_KEY    sleutel voor anthropic én groq
     OCD_LLM_TIMEOUT    seconden (default 60)
+
+Groq praat OpenAI-compatibel; die kant is met `httpx` gedaan in plaats van met
+de `groq`-SDK, zodat er geen dependency bij komt. De omgevingsbot gebruikt wél
+de SDK (`backend/services/llm_service.py`) — functioneel dezelfde call.
 
 `provider=none` → `llm.available is False`; het antwoord-endpoint geeft dan 503
 en de viewer valt terug op zijn eigen samenvatting.
@@ -29,15 +35,21 @@ import httpx
 logger = logging.getLogger("ocd_api.llm")
 
 _PROVIDER = os.getenv("OCD_LLM_PROVIDER", "ollama").lower()
-_OLLAMA_URL = os.getenv(
-    "OCD_LLM_BASE_URL", os.getenv("OCD_EXPAND_URL", "http://localhost:11434")
-).rstrip("/")
+# Eén env-var voor de basis-URL, maar de fallback verschilt per provider: de
+# Ollama-ketting (OCD_EXPAND_URL → localhost) is zinloos voor Groq en zou daar
+# stilletjes naar een lokale poort wijzen.
+_BASE_URL = os.getenv("OCD_LLM_BASE_URL", "").rstrip("/")
+_OLLAMA_URL = (
+    _BASE_URL or os.getenv("OCD_EXPAND_URL", "http://localhost:11434").rstrip("/")
+)
+_GROQ_URL = _BASE_URL or "https://api.groq.com/openai/v1"
 _API_KEY = os.getenv("OCD_LLM_API_KEY", "")
 _TIMEOUT = float(os.getenv("OCD_LLM_TIMEOUT", "60"))
 
 _DEFAULT_MODELS = {
     "ollama": "qwen2.5:14b",
     "anthropic": "claude-sonnet-4-6",
+    "groq": "llama-3.3-70b-versatile",
 }
 _MODEL = os.getenv("OCD_LLM_MODEL") or _DEFAULT_MODELS.get(_PROVIDER, "qwen2.5:14b")
 
@@ -98,7 +110,11 @@ class LLMService:
     def __init__(self) -> None:
         self.provider = _PROVIDER
         self.model = _MODEL
-        self.available = self.provider in ("ollama", "anthropic")
+        self.available = self.provider in ("ollama", "anthropic", "groq")
+
+        if self.provider == "groq" and not _API_KEY:
+            logger.warning("OCD_LLM_PROVIDER=groq maar OCD_LLM_API_KEY is leeg.")
+            self.available = False
 
         if self.provider == "anthropic":
             try:
@@ -144,6 +160,8 @@ class LLMService:
             return self._chat_ollama(system, user, model)
         if self.provider == "anthropic":
             return self._chat_anthropic(system, user, model)
+        if self.provider == "groq":
+            return self._chat_groq(system, user, model)
         raise RuntimeError(f"Onbekende LLM-provider: {self.provider}")
 
     def _chat_ollama(self, system: str, user: str, model: str) -> str:
@@ -162,6 +180,29 @@ class LLMService:
         )
         resp.raise_for_status()
         return (resp.json().get("message") or {}).get("content", "").strip()
+
+    def _chat_groq(self, system: str, user: str, model: str) -> str:
+        """OpenAI-compatibele chat-completion op Groq. Bewust httpx en niet de
+        `groq`-SDK: scheelt een dependency in de API-image."""
+        resp = httpx.post(
+            f"{_GROQ_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {_API_KEY}"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.0,
+                "stream": False,
+            },
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        keuzes = resp.json().get("choices") or []
+        if not keuzes:
+            raise RuntimeError("Groq gaf een respons zonder choices terug.")
+        return ((keuzes[0].get("message") or {}).get("content") or "").strip()
 
     def _chat_anthropic(self, system: str, user: str, model: str) -> str:
         import anthropic
