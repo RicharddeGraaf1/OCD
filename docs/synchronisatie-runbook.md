@@ -734,11 +734,6 @@ draait. De cache is **content-adresseerbaar** (hash over de genormaliseerde
 tekst), dus de bruidsschat betaalt zich terug: van de 3.707 unieke teksten in de
 acht regelingen van 12-08 had **45% al een hertaling** uit een andere gemeente.
 
-```bash
-cd c:/GIT/OCD/dso-loader
-python scripts/begrijpelijk-hertaling.py --scope sync --provider anthropic --model claude-sonnet-5
-```
-
 **Draai dit met Sonnet, niet met het lokale model** *(gebruikerskeuze
 2026-08-13)*. `ocd-api` leest de hertalingen met een voorkeursvolgorde die met
 `claude-sonnet-5` begint; een lokaal gedraaide qwen-hertaling wordt alleen
@@ -746,9 +741,66 @@ gebruikt als er niets beters is. Op 13-08 is de hele set eerst lokaal gedraaid
 (2.605 teksten, 72 min, gratis) en bleek achteraf dat de API er niets van
 toonde — de terugval is daarna ingebouwd, maar de route blijft Sonnet.
 
-`--scope sync` neemt de expressies uit `p2p.regeling_load` sinds de start van de
-laatste geslaagde sync. Zonder die scope is de keuze `broekhem33` (drie
-regelingen) of `all` (~85.000 openstaande teksten, dagen werk).
+#### De route: subagent-fan-out, niet de SDK *(standaard sinds 2026-08-16)*
+
+`begrijpelijk-hertaling.py --provider anthropic` roept de Anthropic-API aan en
+heeft dus **API-tegoed** nodig. Dat tegoed is er niet, en het is er ook nooit
+geweest: de 15.455 Sonnet-hertalingen die al in de cache zitten zijn op 21/22
+juli 2026 geschreven door **subagents in Claude Code**, dus op het abonnement.
+Er is nooit een SDK-call geweest. Twee scripts maken die route herhaalbaar:
+
+```bash
+cd c:/GIT/OCD/dso-loader
+python scripts/hertaal_fanout_export.py            # batches + OPDRACHT.md in data/hertaal/
+#   → start één Sonnet-subagent per batch met de tekst uit OPDRACHT.md
+python scripts/hertaal_fanout_laad.py              # natellen (droogloop)
+python scripts/hertaal_fanout_laad.py --ja         # natellen + laden
+```
+
+De export bepaalt de scope zelf uit `p2p.regeling_load` sinds de start van de
+laatste geslaagde sync, en verdeelt met een stap (`rijen[i::n]`) in plaats van in
+blokken — de query sorteert op lengte, dus blokken zouden één agent alle korte en
+een ander alle lange teksten geven. Tien batches is een werkbare maat: op 16-08
+deed elke subagent ~123 teksten in ruim 9 minuten, tien tegelijk.
+
+**De prompt is context-vrij, en dat is geen slordigheid maar de voorwaarde voor
+de dedup.** Geen regelingnaam erin: met een titel zou dezelfde bruidsschat-tekst
+per gemeente een andere prompt en dus een andere uitkomst geven, en valt de
+3,87× dedup weg. `OPDRACHT.md` bevat de prompt woordelijk zoals
+`begrijpelijk-hertaling.py` hem stelt — wijk daar niet van af, anders staan er
+twee soorten hertalingen naast elkaar onder hetzelfde `prompt_versie`.
+
+**Tel na; het rapport van een subagent is geen bewijs.** Gemeten 16-08 over elf
+agents: één meldde zelf 118 van 122, maar een tweede meldde 122 regels
+"gevalideerd" terwijl één hash daarin in de invoer niet voorkwam — een verzonnen
+sleutel, dus een echte tekst zonder hertaling. `hertaal_fanout_laad.py` toetst
+daarom de sleutelset (elke `bron_hash` uit de invoer precies één niet-lege,
+geldige regel terug), schrijft bij een gat `batch-herstel.json` en eindigt met
+exitcode 1. Draai daar een extra subagent op en herhaal tot het dicht is.
+
+> **Draai de export niet opnieuw in een map waar al `out-*.jsonl` staat.** De
+> batches zijn óók de referentie voor de natelling; een tweede export schrijft ze
+> leeg en dan is er niets meer om de uitvoer tegen te houden. Het script weigert
+> dat sinds 16-08; wil je alleen controleren of er nog iets openstaat, gebruik
+> dan `--dir` met een lege map.
+
+Gemeten 16-08: 1.225 teksten, eerste ronde 1.221 bruikbaar (0 kapotte regels, 0
+lege), herstelronde 5, daarna 1.225/1.225. Cache 18.398 → 19.623. Dekking op de
+elf nieuw geladen regelingen: 6.908 van 6.908 elementen, 100%.
+
+#### Alternatief: het script tegen de API
+
+Is er wél tegoed, dan is dit één commando en klaar — reken op ~2,2 s per tekst:
+
+```bash
+python scripts/begrijpelijk-hertaling.py --scope sync --provider anthropic --model claude-sonnet-5
+```
+
+`--scope sync` neemt dezelfde expressies uit `p2p.regeling_load`. Zonder die
+scope is de keuze `broekhem33` (drie regelingen) of `all` (~85.000 openstaande
+teksten, dagen werk). Het script stopt sinds 16-08 bij de eerste fatale fout
+(401/403 of "credit balance is too low") in plaats van elke tekst apart te laten
+falen.
 
 Daarna naar productie — het rekenwerk is al gedaan, dit duwt alleen de cache van
 ~6 MB en herbouwt de koppel-MV server-side:
@@ -1185,6 +1237,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 | i2a (in de sync) | elke sync, ~40 min | kan sinds de delta van 2026-08-08 gewoon meedraaien; vóór die tijd was de keuze "3 min omdat hij niets deed" of "5,6 uur" |
 | Wijzigingsspoor (stap 1b) | elke sync die ontwerpen/besluiten moet tonen | `wijziging ontwerpen` + `wijziging besluiten` lokaal, daarna `repliceer_p2pwijziging_naar_prod.py --ja`; zit **niet** in `full_sync.py` |
 | Embeddings + onderwerp-as (stap 6) | elke sync | draait standaard mee in `full_sync.py` |
+| Hertaling (stap 6bis) | elke sync met nieuwe tekst | `hertaal_fanout_export.py` → subagents op Sonnet → `hertaal_fanout_laad.py --ja` → `sync-hertaling-to-prod.ps1`; geen API-tegoed nodig |
 | Onderwerp-as naar prod | na elke stap 6 die lokaal draaide | `2026-08-06-categorie-naar-productie.py --ja` (2 s) |
 | Doorwerkingsmeting (stap 6b) | na elke sync die omgevingsplannen of instructieregels raakte | lokaal, ná stap 6; `match/stand.py` zegt of het moet |
 | `diff_dso_bronhouder_coverage.py` | maandelijks | zwaardere coverage-diff naast de preview |
