@@ -10,6 +10,15 @@ dependencies = [
     "python-dotenv>=1.0",
     "click>=8.1",
     "rich>=13.0",
+    # De twee onderstaande zijn geen loader-afhankelijkheden maar sync-stappen:
+    # zonder deze regels hangt de sync af van welke interpreter je toevallig
+    # pakt, en dat brak op 2026-08-15 twee stappen ná elkaar.
+    # - openpyxl: bouw_indeling.py leest de handcuratie uit curatie/lijsten.xlsx
+    #   en stopt hard als hij ontbreekt (stap 1, fase_post).
+    # - numpy: run_overnight.extend_categorie() rekent de nearest-centroide uit
+    #   (stap 6a) — de stap die de nieuwe chunks hun onderwerp geeft.
+    "openpyxl>=3.1",
+    "numpy>=1.26",
 ]
 
 [project.scripts]

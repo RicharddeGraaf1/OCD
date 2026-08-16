@@ -163,6 +163,27 @@ def chat_anthropic(client, model: str, system: str, user: str) -> str:
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 
+def _is_fatale_fout(e: Exception) -> bool:
+    """Fouten waarbij de volgende tekst gegarandeerd net zo hard faalt.
+
+    Twee soorten, beide op 2026-08-15 achter elkaar tegengekomen en beide goed
+    voor 1.225 identieke regels in het log:
+
+    - **401/403** — de sleutel wordt geweigerd.
+    - **credit balance too low** — de sleutel klopt, het account is leeg. Dit is
+      een 400, en dus niet van een echte invoerfout te onderscheiden op status
+      alleen; vandaar dat deze op de melding getoetst wordt.
+
+    Een gewone 400 (te lange prompt, ongeldige parameter) hoort hier juist
+    níét bij: die geldt voor één tekst en niet voor de rest.
+    """
+    if getattr(e, "status_code", None) in (401, 403):
+        return True
+    tekst = str(e)
+    return any(s in tekst for s in ("authentication_error", "invalid_api_key",
+                                    "credit balance is too low"))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scope", choices=["broekhem33", "sync", "all"], default="broekhem33")
@@ -221,6 +242,18 @@ def main() -> None:
             except Exception as e:  # noqa: BLE001
                 fails += 1
                 print(f"  [{i}/{len(todo)}] {row['bh'][:8]} FOUT: {e}")
+                # Een sleutel- of tegoedfout is niet transiënt: elke volgende
+                # tekst faalt op precies dezelfde manier. Op 2026-08-15 leverde
+                # dat twee keer achter elkaar 1.225 identieke regels op (eerst
+                # 401, daarna 400 credit balance) — een foutenlijst die de
+                # oorzaak eerder verbergt dan toont. Stop bij de eerste; wat al
+                # gelukt is wordt hieronder gewoon gecommit.
+                if _is_fatale_fout(e):
+                    print(f"\nGestopt na de eerste fatale fout bij tekst {i} van "
+                          f"{len(todo)} — sleutel of tegoed, niet deze tekst.\n"
+                          "Controleer ANTHROPIC_API_KEY in dso-loader/.env en het "
+                          "tegoed op console.anthropic.com (Plans & Billing).")
+                    break
         conn.commit()
     dt = time.monotonic() - t0
     print(f"\nKlaar: {done} unieke hertalingen, {fails} fouten in {dt:.0f}s "
