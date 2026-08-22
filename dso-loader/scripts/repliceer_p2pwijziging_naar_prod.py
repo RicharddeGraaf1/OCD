@@ -82,6 +82,14 @@ BESLUIT = "p2pwijziging.besluit"
 SELF_FK = {"p2pwijziging.tekst_element"}
 
 
+# Voortgangsregels bevatten een pijl (U+2192); op een cp1252-console gooit dat een
+# UnicodeEncodeError na het zware werk. Zelfde val als in repliceer_p2p_naar_prod.py
+# (2026-08-22). 44 scripts in deze repo hebben hem nog - zie [[gaps#G-129]].
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def log(*a):
     print(*a, flush=True)
 
