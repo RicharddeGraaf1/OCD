@@ -55,6 +55,78 @@ DDL_WIJZ = os.path.join(HIER, "2026-08-add-wijziging-indeling.sql")
 XLSX = os.path.join(HIER, "..", "curatie", "lijsten.xlsx")
 CURATIE_VERSIE = "v2-2026-08"
 
+# --- incrementeel vs volledige herbouw ---------------------------------------
+# De indeling was tot 2026-08-22 elke run een TRUNCATE + herbouw over alle
+# ~148k artikelen. Incrementeel kan, maar niet naief: `v2a.artikel_indeling`
+# hangt met ON DELETE CASCADE aan `p2p.tekst_element`, dus een HERLADEN
+# regeling verliest stil zijn indeling. De dirty-set is daarom niet "nieuw
+# geladen expressies" maar "artikelen zonder indelingsrij" — dan valt de
+# cascade-schade er per definitie in.
+#
+# Dragende aanname: p2p-herlaad is UPSERT-DO-NOTHING, dus een bestaande
+# `tekst_element.id` verandert nooit van opschrift. Een gewijzigd artikel
+# krijgt een nieuwe id (de oude rij cascadeert weg) en komt zo vanzelf in de
+# dirty-set. Gaat dat ooit naar DO UPDATE, dan moet deze aanname mee.
+INCR_SEED_FILTER = """
+      AND NOT EXISTS (SELECT 1 FROM v2a.artikel_indeling ai
+                      WHERE ai.tekst_element_id = a.id)"""
+
+
+def vingerafdruk() -> str:
+    """Hash over alles wat de uitkomst van de classificatie bepaalt.
+
+    Verandert de regelset, de curatielijst of de code die ze toepast, dan is
+    elke bestaande rij verdacht en schakelt het script uit zichzelf terug naar
+    een volledige herbouw. Zonder die klep zou een regelwijziging alleen op
+    nieuwe artikelen landen en zou de tabel stil uiteenlopen.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    h.update(CURATIE_VERSIE.encode())
+    for pad in (os.path.abspath(__file__),
+                os.path.join(HIER, "..", "curatie", "subcategorie_regels.py"),
+                os.path.abspath(XLSX)):
+        try:
+            with open(pad, "rb") as f:
+                h.update(f.read())
+        except FileNotFoundError:
+            h.update(b"<ontbreekt>")
+    return h.hexdigest()[:16]
+
+
+def bepaal_modus(cur, geforceerd: bool):
+    """-> (volledig: bool, reden: str)"""
+    cur.execute("""CREATE TABLE IF NOT EXISTS v2a.indeling_state (
+                       id boolean PRIMARY KEY DEFAULT true CHECK (id),
+                       vingerafdruk text NOT NULL,
+                       bijgewerkt_op timestamptz NOT NULL DEFAULT now())""")
+    vf = vingerafdruk()
+    if geforceerd:
+        return True, "--volledig meegegeven"
+    cur.execute("SELECT to_regclass('v2a.artikel_indeling')")
+    if cur.fetchone()[0] is None:
+        return True, "tabel bestaat nog niet"
+    cur.execute("SELECT count(*) FROM v2a.artikel_indeling")
+    if cur.fetchone()[0] == 0:
+        return True, "tabel is leeg"
+    cur.execute("SELECT vingerafdruk FROM v2a.indeling_state")
+    r = cur.fetchone()
+    if r is None:
+        return True, "geen eerdere vingerafdruk vastgelegd"
+    if r[0] != vf:
+        return True, f"classificatie gewijzigd ({r[0]} -> {vf})"
+    return False, f"classificatie ongewijzigd ({vf})"
+
+
+def leg_vingerafdruk_vast(cur) -> None:
+    cur.execute("""INSERT INTO v2a.indeling_state (id, vingerafdruk, bijgewerkt_op)
+                   VALUES (true, %s, now())
+                   ON CONFLICT (id) DO UPDATE
+                     SET vingerafdruk = EXCLUDED.vingerafdruk,
+                         bijgewerkt_op = EXCLUDED.bijgewerkt_op""",
+                (vingerafdruk(),))
+
+
 # ── De gesloten typeBepaling-lijst ───────────────────────────────────────────
 # Volgorde telt: de eerste treffer wint, dus specifieke patronen boven
 # generieke. Afgeleid uit het lexicon van de fase-0-dekkingsmeting, dat op
@@ -263,7 +335,7 @@ PAD_SQL = """
 WITH RECURSIVE keten AS (
     SELECT a.id AS art, a.regeling_expression, a.parent_id, a.wid, a.opschrift AS art_op,
            ARRAY[]::text[] AS ops, 0 AS d
-    FROM p2p.tekst_element a WHERE a.element_type = 'Artikel'
+    FROM p2p.tekst_element a WHERE a.element_type = 'Artikel'{seed_filter}
   UNION ALL
     SELECT k.art, k.regeling_expression, p.parent_id, k.wid, k.art_op,
            coalesce(p.opschrift,'') || k.ops, k.d + 1
@@ -485,12 +557,19 @@ def bouw_wijzigingen(cur, curatie: dict) -> None:
         tel["met_type"] += bool(tb)
         tel[f"via_{bron_cat}"] += bool(cat)
 
-    cur.execute("TRUNCATE v2a.wijziging_indeling")
-    with cur.copy("""COPY v2a.wijziging_indeling
-        (regeling_work, artikel_wid, pad_sleutel, categorie, subcategorie,
-         type_bepaling, herkomst, curatie_versie) FROM STDIN""") as cp:
-        for r in rijen:
-            cp.write_row(r)
+    # Bewust WEL een volledige herbouw, anders dan de artikel-indeling: route 1
+    # is hier de vigerende indeling uit v2a.artikel_indeling, dus een (work,wid)
+    # dat er al staat kan van antwoord veranderen zodra het register bijwerkt.
+    # "Al aanwezig" is daarom geen veilige overslaan-conditie. Wel zonder
+    # TRUNCATE — in een transactie, zodat lezers niet blokkeren.
+    conn = cur.connection
+    with conn.transaction():
+        cur.execute("DELETE FROM v2a.wijziging_indeling")
+        with cur.copy("""COPY v2a.wijziging_indeling
+            (regeling_work, artikel_wid, pad_sleutel, categorie, subcategorie,
+             type_bepaling, herkomst, curatie_versie) FROM STDIN""") as cp:
+            for r in rijen:
+                cp.write_row(r)
 
     t = tel["totaal"] or 1
     print(f"  gewijzigde artikelen : {tel['totaal']}")
@@ -499,7 +578,8 @@ def bouw_wijzigingen(cur, curatie: dict) -> None:
     print(f"  met typeBepaling     : {tel['met_type']:7} ({100*tel['met_type']/t:5.1f}%)")
 
 
-def main(ddl: bool, alleen_type: bool, alleen_wijzigingen: bool) -> None:
+def main(ddl: bool, alleen_type: bool, alleen_wijzigingen: bool,
+         volledig_flag: bool = False) -> None:
     conn = psycopg.connect(DB, autocommit=True)
     cur = conn.cursor()
 
@@ -515,19 +595,16 @@ def main(ddl: bool, alleen_type: bool, alleen_wijzigingen: bool) -> None:
         conn.close()
         return
 
-    if curatie:
-        cur.execute("TRUNCATE v2a.pad_categorie CASCADE")
-        cur.executemany(
-            """INSERT INTO v2a.pad_categorie
-               (pad_sleutel, pad_voorbeeld, categorie, subcategorie,
-                n_artikelen, n_bronhouders, bron, curatie_versie)
-               VALUES (%s,%s,%s,%s,%s,%s,'curatie',%s)""",
-            [(k, v["voorbeeld"], v["categorie"], v["subcategorie"],
-              v["n_art"], v["n_bh"], CURATIE_VERSIE) for k, v in curatie.items()])
-        print(f"  v2a.pad_categorie gevuld: {len(curatie)} sleutels")
+    # NB: hier stond een eerste vulling van v2a.pad_categorie uit de xlsx
+    # (inclusief pad_voorbeeld en n_bronhouders). Die werd verderop in dezelfde
+    # run onvoorwaardelijk overschreven door de afleiding uit artikel_indeling,
+    # ook vóór 2026-08-22 al — het was dus dood werk plus een TRUNCATE. Gevolg
+    # dat er altijd al was: pad_voorbeeld en n_bronhouders blijven leeg.
 
+    volledig, reden = bepaal_modus(cur, volledig_flag)
+    print(f"modus: {'volledige herbouw' if volledig else 'incrementeel'} — {reden}")
     print("artikelen inlezen en indelen...", flush=True)
-    cur.execute(PAD_SQL)
+    cur.execute(PAD_SQL.format(seed_filter="" if volledig else INCR_SEED_FILTER))
     rijen, tel = [], Counter()
     for art, expr, wid, art_op, pad, _bron in cur.fetchall():
         sleutel = pad_sleutel(pad)
@@ -554,28 +631,51 @@ def main(ddl: bool, alleen_type: bool, alleen_wijzigingen: bool) -> None:
     # per uniek pad, met wat eruit kwam. Niet nodig voor de werking — de
     # indeling zit al in artikel_indeling — maar wel om in SQL te kunnen zien
     # WAAROM een artikel zijn categorie kreeg, zonder het script te draaien.
-    per_pad = {}
-    for art, expr, wid, sleutel, cat, sub, tb, herkomst, versie in rijen:
-        per_pad.setdefault(sleutel, [cat, sub, 0])
-        per_pad[sleutel][2] += 1
-    cur.execute("TRUNCATE v2a.pad_categorie CASCADE")
-    cur.executemany(
-        """INSERT INTO v2a.pad_categorie
-           (pad_sleutel, categorie, subcategorie, n_artikelen, bron, curatie_versie)
-           VALUES (%s,%s,%s,%s,%s,%s)""",
-        [(s, c, sub, n, "curatie" if s in curatie else "regels", CURATIE_VERSIE)
-         for s, (c, sub, n) in per_pad.items()])
-    print(f"  v2a.pad_categorie: {len(per_pad)} paden")
+    # Schrijven in een transactie in plaats van met TRUNCATE. Niet cosmetisch:
+    # onder autocommit zou een losse DELETE de tabel voor lezers even leeg
+    # maken, en TRUNCATE lost dat alleen op door ze te laten wachten op een
+    # ACCESS EXCLUSIVE-lock. Binnen een transactie zien lezers de oude stand
+    # tot de commit, zonder te blokkeren.
+    conn = cur.connection
+    with conn.transaction():
+        if volledig:
+            cur.execute("DELETE FROM v2a.artikel_indeling")
+        else:
+            # Verdrongen expressies vallen buiten PAD_SQL, maar hun
+            # tekst_element-rijen blijven bestaan en cascaderen dus niet weg.
+            # Zonder deze opruiming blijft de tabel oude planversies tonen.
+            cur.execute("""DELETE FROM v2a.artikel_indeling ai
+                           USING p2p.regeling r
+                           WHERE r.frbr_expression = ai.regeling_expression
+                             AND coalesce(r.inactief, false)""")
+        weg = cur.rowcount
+        with cur.copy("""COPY v2a.artikel_indeling
+            (tekst_element_id, regeling_expression, wid, pad_sleutel, categorie,
+             subcategorie, type_bepaling, herkomst, curatie_versie) FROM STDIN""") as cp:
+            for r in rijen:
+                cp.write_row(r)
+    print(f"  v2a.artikel_indeling: +{len(rijen)} geschreven, -{weg} verwijderd")
 
-    cur.execute("TRUNCATE v2a.artikel_indeling")
-    with cur.copy("""COPY v2a.artikel_indeling
-        (tekst_element_id, regeling_expression, wid, pad_sleutel, categorie,
-         subcategorie, type_bepaling, herkomst, curatie_versie) FROM STDIN""") as cp:
-        for r in rijen:
-            cp.write_row(r)
+    # pad_categorie is de gematerialiseerde uitkomst ("waarom kreeg dit artikel
+    # deze categorie"). Afleiden uit de tabel zelf en niet uit de rijen van deze
+    # run, anders toont hij incrementeel alleen het nieuwe stukje. pad_sleutel
+    # is primary key, dus groeperen op die ene kolom.
+    with conn.transaction():
+        cur.execute("DELETE FROM v2a.pad_categorie")
+        cur.execute("""INSERT INTO v2a.pad_categorie
+               (pad_sleutel, categorie, subcategorie, n_artikelen, bron, curatie_versie)
+             SELECT pad_sleutel, min(categorie), min(subcategorie), count(*),
+                    CASE WHEN pad_sleutel = ANY(%s) THEN 'curatie' ELSE 'regels' END,
+                    %s
+             FROM   v2a.artikel_indeling
+             GROUP  BY pad_sleutel""", (list(curatie.keys()), CURATIE_VERSIE))
+        paden = cur.rowcount
+    print(f"  v2a.pad_categorie: {paden} paden")
 
-    t = tel["totaal"]
-    print(f"\n  artikelen ingedeeld : {t}")
+    # `t` is alleen de deler; toon het echte aantal. Bij een incrementele run
+    # zonder vuile artikelen is dat 0, en "verwerkt: 1" las dan als een leugen.
+    t = tel["totaal"] or 1
+    print(f"\n  deze run verwerkt   : {tel['totaal']}")
     print(f"  met categorie       : {tel['met_categorie']:7} ({100*tel['met_categorie']/t:5.1f}%)")
     print(f"  met typeBepaling    : {tel['met_type']:7} ({100*tel['met_type']/t:5.1f}%)")
     print(f"  helemaal niets      : {tel['niets']:7} ({100*tel['niets']/t:5.1f}%)")
@@ -586,7 +686,12 @@ def main(ddl: bool, alleen_type: bool, alleen_wijzigingen: bool) -> None:
     for waarde, n in cur.fetchall():
         print(f"    {n:7}  {waarde}")
 
+    cur.execute("SELECT count(*), count(categorie) FROM v2a.artikel_indeling")
+    tot, met = cur.fetchone()
+    print(f"  tabel nu            : {tot} artikelen, {met} met categorie")
+
     bouw_wijzigingen(cur, curatie)
+    leg_vingerafdruk_vast(cur)
     conn.close()
 
 
@@ -596,5 +701,8 @@ if __name__ == "__main__":
     p.add_argument("--alleen-type", action="store_true", help="xlsx negeren")
     p.add_argument("--alleen-wijzigingen", action="store_true",
                    help="alleen v2a.wijziging_indeling herbouwen")
+    p.add_argument("--volledig", action="store_true",
+                   help="volledige herbouw afdwingen (default: incrementeel zolang "
+                        "de classificatie ongewijzigd is)")
     a = p.parse_args()
-    main(a.ddl, a.alleen_type, a.alleen_wijzigingen)
+    main(a.ddl, a.alleen_type, a.alleen_wijzigingen, a.volledig)
