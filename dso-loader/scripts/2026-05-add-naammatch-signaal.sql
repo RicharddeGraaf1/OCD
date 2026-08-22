@@ -16,10 +16,18 @@
 -- Achtergrond: stap 2 in
 --   vault_v1/analysis/Plan implementatie drieslag tekst-object.md
 --
--- VEREIST: 2026-05-add-trgm-index.sql moet eerst gedraaid zijn (pg_trgm
--- GIN-index op p2p.tekst_element.inhoud_plain). Zonder die index doet
--- Postgres een Cartesisch product en is de matview-CREATE niet
--- uitvoerbaar (zie [[gaps]] G-68).
+-- LET OP (2026-08-22): de trigram-index is hier GEEN versnelling meer.
+-- De regel hieronder gold voor v1, toen de join geen regeling-gelijkheid had:
+--   "VEREIST: 2026-05-add-trgm-index.sql moet eerst gedraaid zijn, anders doet
+--    Postgres een Cartesisch product en is de matview-CREATE niet uitvoerbaar
+--    (zie [[gaps]] G-68)."
+-- Sinds de intra-scoping beperkt te.regeling_expression = nk.regeling_expression
+-- het zoekgebied al tot ~373 teksten per regeling. Kiest de planner tóch de
+-- trigram-route, dan doet hij 115.367 landelijke probes van ~70 ms: ~136 min.
+-- Met enable_bitmapscan = off kiest hij een merge join op regeling_expression
+-- en duurt dezelfde refresh 3,77 min, met exact dezelfde 51.540 rijen.
+-- Dat staat afgedwongen in scripts/refresh_drieslag.py (PLANNER_PER_STAP);
+-- draai je deze view met de hand, zet die instelling dan zelf.
 --
 -- Idempotent: DROP IF EXISTS + CREATE. Re-run is OK; refresh elders.
 -- Run:  psql -h localhost -p 5434 -d dso -f scripts/2026-05-add-naammatch-signaal.sql
@@ -89,9 +97,10 @@ JOIN naam_kandidaten nk
   -- INTRA-regeling: alleen matches binnen dezelfde regeling
   ON te.regeling_expression = nk.regeling_expression
  AND te.inhoud_plain IS NOT NULL
- -- ILIKE prefilter — gebruikt de pg_trgm GIN-index op inhoud_plain;
- -- zonder deze pre-filter doet Postgres een Cartesisch product en
- -- timeoutet de CREATE.
+ -- ILIKE prefilter. Bedoeld om de pg_trgm GIN-index te kunnen gebruiken —
+ -- maar sinds de intra-scoping is die route juist de trage (zie de kop).
+ -- De prefilter blijft staan omdat hij ook zonder index werk scheelt: hij
+ -- zeeft goedkoop voordat de duurdere word-boundary-regex eraan komt.
  AND te.inhoud_plain ILIKE '%' || nk.naam || '%'
  -- Refinement: exact word-boundary match (\m...\M) voor exact-match-eis.
  AND te.inhoud_plain ~* (

@@ -22,7 +22,8 @@ Volgorde:
   1b. REFRESH v2a.mv_element_hash (element→content-hash voor hertalingen, ~10s)
   1c. REFRESH p2p.gio_locatie (GIO ↔ locatie-koppeling)
   1d. REFRESH p2p.ala_punt (activiteit-op-locatie voor de punt-endpoints, ~2s)
-  2. REFRESH p2p.naammatch_signaal (de duurste — 20-35 min lokaal)
+  2. REFRESH p2p.naammatch_signaal (~4 min; draait met enable_bitmapscan
+     uit — zie PLANNER_PER_STAP, zonder dat wordt het ruim twee uur)
   3. REFRESH p2p.naammatch_signaal_intra (~10s; hangt af van #2)
   4. REFRESH p2p.tekst_object_consistentie_mv (~30s; hangt af van #3)
   5. REFRESH p2p.gio_referentie_consistentie_mv (GIO-tak, ~3 min; onafhankelijk
@@ -76,6 +77,40 @@ STAPPEN = [
      "p2p.gio_referentie_consistentie_mv",
      "SELECT COUNT(*) AS n FROM p2p.gio_referentie_consistentie_mv"),
 ]
+
+# Planner-instellingen per stap. Voor bijna alles leeg; naammatch_signaal is de
+# uitzondering, en de reden is de moeite waard om vast te leggen.
+#
+# 2026-08-22 liep deze refresh 2u10m en werd afgekapt. Daarvoor: 11,0 min (08-15),
+# 10,5 (08-12), 23,4 (08-08), 12,3 (08-03), 81,5 (08-01). Dat is geen groeicurve
+# maar een queryplan dat heen en weer wipt. Gemeten op dezelfde data, in dezelfde
+# sessie, met in beide gevallen exact 51.540 rijen als uitkomst:
+#
+#     default (bitmap-scan op de trigram-index, nested loop) : ~136 min
+#     enable_bitmapscan = off (merge join op regeling_expr)  :   3,77 min
+#
+# De trigram-index is hier dus de vertraging, niet de versnelling. Het commentaar
+# in 2026-05-add-naammatch-signaal.sql waarschuwt voor een "Cartesisch product"
+# zonder die index; dat gold voor v1, toen de join nog geen regeling-gelijkheid
+# had. Sinds de intra-scoping van 01-08 beperkt te.regeling_expression =
+# nk.regeling_expression het zoekgebied al tot ~373 teksten per regeling. Landelijk
+# trigram-zoeken doet dan 115.367 probes van ~70 ms voor een antwoord dat maar van
+# 6.731 unieke namen afhangt — 17,7x hetzelfde werk.
+#
+# Waarom de planner ernaast grijpt: hij schat de trigram-probe op 1 rij terwijl
+# het er 5.590 zijn. Nested loop komt daardoor op 4,36M geschatte kosten en de
+# merge join op 9,58M, terwijl het in werkelijkheid 36x andersom ligt. Twee
+# plannen die op papier zo dicht bij elkaar liggen, slaan om op een doodgewone
+# ANALYZE. Daarom hard zetten en niet aan de statistieken overlaten.
+#
+# Terugvaloptie als dit ooit wringt: de query herstructureren zodat elke unieke
+# naam nog maar een keer wordt opgezocht (join daarna op naam + regeling). Levert
+# 7,01 min, dus twee keer trager dan de merge join, maar is ongevoelig voor
+# plan-omslag. Bewezen rij-identiek op de 25 grootste regelingen (10.620 rijen,
+# nul verschil in beide richtingen).
+PLANNER_PER_STAP = {
+    "p2p.naammatch_signaal": {"enable_bitmapscan": "off"},
+}
 
 
 def main():
@@ -141,12 +176,26 @@ def _draai(args):
         t0 = time.time()
 
         # Stap 1 is een SQL-bestand; de rest zijn matview-namen.
-        if sql_or_view.endswith(".sql"):
-            with open(sql_or_view, encoding="utf-8") as f:
-                cur.execute(f.read())
-        else:
-            cur.execute(f"REFRESH MATERIALIZED VIEW {modus}{sql_or_view}")
-        conn.commit()
+        instellingen = PLANNER_PER_STAP.get(sql_or_view, {})
+        for param, waarde in instellingen.items():
+            cur.execute(f"SET {param} = {waarde}")
+            print(f"  planner: {param} = {waarde}", flush=True)
+        try:
+            if sql_or_view.endswith(".sql"):
+                with open(sql_or_view, encoding="utf-8") as f:
+                    cur.execute(f.read())
+            else:
+                cur.execute(f"REFRESH MATERIALIZED VIEW {modus}{sql_or_view}")
+            conn.commit()
+        finally:
+            # Terugzetten ook als de stap knalt: de sessie draait door naar de
+            # volgende matview, en die heeft deze instelling niet nodig.
+            for param in instellingen:
+                try:
+                    cur.execute(f"RESET {param}")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
 
         elapsed = time.time() - t0
         cur.execute(count_query)

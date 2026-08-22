@@ -1222,6 +1222,46 @@ Daarmee is incrementeel verversen niet meer nodig: een volledige herbouw van
 5 minuten is prima, ook nachtelijks. Incrementeel maken bovenop een berekening
 die 147× te veel deed, zou het echte probleem juist hebben verstopt.
 
+#### Vervolg 2026-08-22 — de trigram-index is sindsdien de vertraging
+
+De intra-scoping hierboven heeft een tweede-orde-effect dat een half jaar
+onopgemerkt bleef en op 21/22-08 toesloeg: de refresh liep **2u10m** en werd
+afgekapt, terwijl dezelfde stap een week eerder 11,0 min deed op vrijwel
+identieke data.
+
+Het is geen groei maar een **omgeslagen queryplan**. Twee vormen, beide met
+exact dezelfde 51.540 rijen als uitkomst:
+
+| plan | duur |
+|---|---|
+| bitmap-scan op de trigram-index, nested loop (wat de planner nu kiest) | ~136 min |
+| merge join op `regeling_expression` (`enable_bitmapscan = off`) | **3,77 min** |
+
+Zolang de join géén regeling-gelijkheid had (v1) was de trigram-index onmisbaar —
+vandaar de waarschuwing voor een "Cartesisch product" in de definitie. Sinds de
+scoping beperkt `te.regeling_expression = nk.regeling_expression` het zoekgebied
+al tot ~373 teksten per regeling, en is landelijk trigram-zoeken juist verspilling:
+115.367 probes van ~70 ms voor een antwoord dat van **6.731 unieke namen** afhangt.
+
+De planner grijpt ernaast omdat hij de trigram-probe op **1 rij** schat terwijl het
+er 5.590 zijn: 4,36M geschatte kosten tegen 9,58M voor de merge join. Hij denkt
+2,2× goedkoper te kiezen en zit er 36× naast. Twee plannen die zó dicht bij elkaar
+liggen wippen om op een gewone `ANALYZE` — vandaar de grillige reeks 81,5 / 12,3 /
+23,4 / 10,5 / 11,0 / 144,7 min. **Daarom staat het plan nu hard gezet** in
+`PLANNER_PER_STAP` in `refresh_drieslag.py`, per stap en na afloop teruggezet.
+
+Uitgesloten met meting: IO (elke buffer `shared hit`), bloat (`VACUUM` ruimde
+101.626 dode tuples op → 1,04×), definitie-drift, opgestapelde expressies, Memoize,
+parallellisme, datagroei (alle totalen run 9 → run 10 binnen 1%).
+
+Twee dingen om te onthouden bij een handmatige run:
+- draai je deze view zelf, zet dan `enable_bitmapscan = off`, anders is het uren;
+- `VACUUM` op `p2p.tekst_element` heeft `PARALLEL 0` nodig — hij knalt anders op
+  de kleine `/dev/shm` van de Docker-PostGIS, net als een parallelle REFRESH.
+
+**Nog te doen op prod**: daar is op 15-08 320,6 min gemeten; dezelfde ingreep moet
+er nog heen.
+
 **De laatste is de belangrijkste openstaande verbetering.** Het rapport zou
 *verwacht* (preview) naast *daadwerkelijk geladen* moeten zetten en afwijkingen
 markeren. Dan was G-98 in juni opgevallen in plaats van in augustus, en dan
