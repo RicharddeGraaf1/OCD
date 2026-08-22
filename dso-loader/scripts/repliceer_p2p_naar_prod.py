@@ -60,6 +60,15 @@ LOKAAL = os.environ.get("OCD_DB_URL", "postgresql://postgres:postgres@localhost:
 PROD = os.environ["PROD_DB_URL"]
 
 
+# De voortgangsregels bevatten een → (U+2192). Op een cp1252-console gooit dat
+# een UnicodeEncodeError, en dan sterft het script ná de COPY maar vóór de merge:
+# twintig minuten kopieerwerk weg op een pijltje. Gebeurd 2026-08-22, stap 3 van
+# de sync. Zes zusterscripts in deze map deden dit al; dit script niet.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def log(*a):
     print(*a, flush=True)
 

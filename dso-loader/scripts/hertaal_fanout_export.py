@@ -22,10 +22,19 @@ import argparse
 import json
 import os
 import pathlib
+import sys
 
 import psycopg
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
+
+# Voortgangsregels bevatten een pijl (U+2192). Op een cp1252-console gooit dat een
+# UnicodeEncodeError - en als dat na de commit gebeurt, lijkt het laden mislukt
+# terwijl de data er gewoon staat. Gebeurd 2026-08-22 in dit script en in
+# repliceer_p2p_naar_prod.py, allebei op dezelfde dag.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 HIER = pathlib.Path(__file__).resolve().parent.parent
 load_dotenv(HIER / ".env")
