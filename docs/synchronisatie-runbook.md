@@ -674,8 +674,19 @@ andere tekst wijzen. Zonder `--ja` doet hij alleen die controle.
 De monitor op instructieregels.nl toont per instructieregel of hij is uitgewerkt
 in de documenten waarop hij zich richt. Die oordelen zitten **niet** in de
 loader: ze komen uit een aparte pijplijn in `c:/GIT/instructieregels.nl/match/`
-die lokaal draait op Ollama (embeddings + een entailment-judge) en schrijft naar
-het `irm`-schema. De site bakt die tabellen alleen maar uit.
+en schrijft naar het `irm`-schema. De site bakt die tabellen alleen maar uit.
+
+**Sinds 2026-08-22 is die pijplijn gesplitst** (gebruikerskeuze): de screening
+blijft lokaal op Ollama, het **oordeel gaat naar Sonnet**. De redenering:
+- Het oordeel is de enige stap in de hele sync waar modelkwaliteit het
+  *antwoord* bepaalt — "is deze instructieregel uitgewerkt?" is een
+  entailment-vraag, en die hing tot nu toe af van `qwen2.5:7b-instruct`.
+- De screening is een embedding-vergelijking. Daar bestáát geen Sonnet-variant
+  van: Anthropic levert geen embeddings-API. Wisselen van embeddingmodel is
+  bovendien geen knop maar een migratie, want het bevraagmodel moet exact het
+  indexmodel zijn.
+- Er is geen API-tegoed, dus het loopt via subagent-fan-out op het abonnement —
+  dezelfde route als de hertaling in stap 6bis.
 
 Gevolg als je deze stap overslaat: stap 8 herbouwt de site zonder fout, met
 oordelen van vóór de sync. Nieuwe instructieregels verschijnen wél in de
@@ -703,15 +714,47 @@ Draaien (volledige volgorde staat in `instructieregels.nl/PLAN.md`
 1a. tier1_screen.py        embeddings + landelijke top-K screening
 1b. match/cellen.sql       screening_hit -> screening_cel (bewijs-hash)
 1c. fase2_fill.py          indicatief oordeel per provincie
-1d. tier2_fill.py          judge per unieke bewijs-set   <- de lange stap
+1d. judge_fanout_export.py judge per unieke bewijs-set, op SONNET
+    -> N subagents            <- de lange stap; zie hieronder
+    judge_fanout_laad.py
 2a. doel_screen.py         relevantie + screening voor de tier-2-instrumenten
 2b. doel_judge.py          judge daarvoor
 3.  sync_prod.py           oordelen naar de prod-DB (incrementeel, --dry-run eerst)
 ```
 
-**Stap 3 hoort hier en niet bij stap 8.** De judge draait alleen lokaal; de
-CI-bouw van de site leest de Railway-DB. Zonder die sync deployt stap 8 de
-vorige oordelen.
+**Stap 3 hoort hier en niet bij stap 8.** De oordelen ontstaan tegen de lokale
+DB; de CI-bouw van de site leest de Railway-DB. Zonder die sync deployt stap 8
+de vorige oordelen.
+
+#### De judge via Sonnet (stap 1d en 2b)
+
+```bash
+python match/judge_fanout_export.py           # werkvoorraad -> data/judge/batch-NN.json
+#   start N subagents op Sonnet, een per batch, met data/judge/OPDRACHT.md
+python match/judge_fanout_laad.py             # natellen (droogloop)
+python match/judge_fanout_laad.py --ja        # laden in irm.judge_uniek
+```
+
+Drie dingen die er niet toevallig zo in zitten:
+
+1. **De prompt is woordelijk `JUDGE_SYS` uit `tier2_fill.py`**, en het
+   kandidaat-blok wordt identiek opgebouwd (instructie op 2500 tekens,
+   kandidaat op `CAND_LEN` 2000). Anders meet een vergelijking met de
+   qwen-oordelen het promptverschil in plaats van het modelverschil. Wijzigt
+   `JUDGE_SYS`, wijzig dan mee.
+2. **`irm.judge_uniek.model` legt de herkomst vast** — `claude-sonnet-5` naast de
+   bestaande `qwen2.5:7b-instruct`. Het laden gebruikt `ON CONFLICT DO NOTHING`,
+   dus bestaande qwen-oordelen blijven staan; die door Sonnet laten overdoen is
+   een aparte, zichtbare handeling (eerst verwijderen).
+3. **Het eindrapport van een subagent is geen bewijs.** Het laadscript telt na op
+   de sleutelset en weigert bij een gat — bij de hertaling meldde een agent 122
+   regels "gevalideerd" met een verzonnen sleutel ertussen. Hier weegt dat
+   zwaarder: een ontbrekende hertaling is een leeg veld, een ontbrekend oordeel
+   is een instructieregel die op de site als "Onbepaalbaar" verschijnt zonder
+   dat iets klaagt.
+
+`tier2_fill.py` blijft bestaan voor een lokale run zonder abonnement, en is de
+referentie voor de prompt.
 
 Duur: de eerste volledige cyclus (04/05-08) kostte 78 min screening + 107 min
 judge. Bij een gewone sync is het een fractie daarvan, omdat ongewijzigd bewijs
