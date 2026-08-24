@@ -19,7 +19,8 @@ TABLE_SCHEMA: dict[str, str] = {
     "publicatiebladtype": "core", "idealisatie": "core",
     "toestemmingstype": "core", "documenttype": "core",
     # p2p
-    "regeling": "p2p", "besluit": "p2p", "besluit_regeling": "p2p",
+    "regeling": "p2p", "regeling_voorkomen": "p2p",
+    "besluit": "p2p", "besluit_regeling": "p2p",
     "procedurestap": "p2p", "tekst_element": "p2p",
     "geo_informatieobject": "p2p", "juridische_borging": "p2p",
     "locatie": "p2p", "locatiegroep_lid": "p2p",

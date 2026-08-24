@@ -597,6 +597,16 @@ def load_api(types, gemeente, overheid):
                      bronhouder_code=cfg.POC_CBS_CODE, doc_types=doc_types)
 
 
+@cli.command("load-voorkomens")
+@click.option("--work", "-w", default=None,
+              help="Eén frbr_work (default: alle works uit p2p.regeling).")
+def load_voorkomens_cmd(work):
+    """Sync versie-historie (geldigheid) per regeling via /voorkomens."""
+    from src.loaders.voorkomens_loader import load_voorkomens
+
+    load_voorkomens([work] if work else None)
+
+
 @cli.command("refresh-v2a")
 @click.option("--ja", is_flag=True, help="echt uitvoeren (default: droogloop)")
 @click.option("--opruimen", is_flag=True,

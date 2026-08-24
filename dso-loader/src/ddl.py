@@ -190,6 +190,29 @@ CREATE INDEX IF NOT EXISTS idx_regeling_bronhouder ON p2p.regeling(bronhouder);
 CREATE INDEX IF NOT EXISTS idx_regeling_inactief
     ON p2p.regeling(inactief) WHERE inactief = TRUE;
 
+-- Versie-historie per regeling uit Presenteren v8 /voorkomens (kennis-van-nu).
+-- Geen FK naar p2p.regeling: historische expressions bestaan daar per ontwerp
+-- niet. Geldigheids- en inwerking-as zijn samengevoegd (empirisch altijd
+-- gelijk; de loader faalt hard zodra Ozon terugwerkende kracht levert).
+-- eind_geldigheid is expliciet — bij intrekking eindigt het laatste voorkomen
+-- zonder opvolger, dus afleiden uit de opvolger-begindatum kan niet.
+-- Zie scripts/2026-08-24-add-regeling-voorkomen.sql voor de onderbouwing.
+CREATE TABLE IF NOT EXISTS p2p.regeling_voorkomen (
+    frbr_expression      TEXT PRIMARY KEY,
+    frbr_work            TEXT NOT NULL,
+    versie               TEXT NULL,          -- niet-sequentieel, soms voorloopnul
+    begin_geldigheid     DATE NOT NULL,      -- == beginInwerking; loader-guard bewaakt
+    eind_geldigheid      DATE NULL,          -- NULL = (nog) onbeperkt; ook gevuld bij intrekking
+    tijdstip_registratie TIMESTAMPTZ NOT NULL,
+    eind_registratie     TIMESTAMPTZ NULL,
+    publicatie_id        TEXT NULL,
+    gesynct_op           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    geldig               DATERANGE GENERATED ALWAYS AS
+                         (daterange(begin_geldigheid, eind_geldigheid, '[)')) STORED
+);
+CREATE INDEX IF NOT EXISTS idx_voorkomen_work
+    ON p2p.regeling_voorkomen(frbr_work, begin_geldigheid);
+
 CREATE TABLE IF NOT EXISTS p2p.besluit (
     frbr_expression     TEXT PRIMARY KEY,
     frbr_work           TEXT NOT NULL,
@@ -1235,6 +1258,13 @@ CREATE INDEX IF NOT EXISTS idx_vk_subject_taxonomie
 CREATE INDEX IF NOT EXISTS idx_vk_datum_ontvangst
     ON vth.vergunningkennisgeving (datum_ontvangst)
     WHERE datum_ontvangst IS NOT NULL;
+-- Postcode-tak van het q-filter (_POSTCODE_PATROON in ocd-api/vergunningen.py).
+-- Partieel: 37,96% van de records heeft een postcode, de rest hoeft niet in de
+-- index. Zonder deze index valt de exacte postcode-lookup terug op een seq scan
+-- over 5,8 GB en loopt hij in de statement_timeout.
+CREATE INDEX IF NOT EXISTS idx_vk_postcode
+    ON vth.vergunningkennisgeving (postcode)
+    WHERE postcode IS NOT NULL;
 
 -- Run-tracking (analoog aan etl_run in SQLite-PoC)
 CREATE TABLE IF NOT EXISTS vth.etl_run (
