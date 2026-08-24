@@ -22,7 +22,10 @@ from kennis import router as kennis_router
 from keywords import router as keywords_router
 from planvoorraad import router as planvoorraad_router
 from ponsenkaart import router as ponsenkaart_router
-from regelteksten_bij_vraag import router as regelteksten_router
+from regelteksten_bij_vraag import (
+    VRIJETEKST_DOCUMENTTYPES,
+    router as regelteksten_router,
+)
 from semantisch import router as semantisch_router
 from tiles import router as tiles_router
 from vergunningen import _tsquery_arg
@@ -2158,7 +2161,26 @@ def gezagen():
 @app.get("/v1/viewer/regelingen", dependencies=[Depends(verify_key)])
 def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
     """Welke regelingen gelden op een RD-coördinaat? Retourneert een
-    documentenlijst voor de viewer, gegroepeerd op bestuurslaag."""
+    documentenlijst voor de viewer, gegroepeerd op bestuurslaag.
+
+    Twee manieren waarop een document op een punt kan gelden, allebei nodig
+    (`via` maakt in de respons zichtbaar welke het is):
+
+      via='regel'   een activiteit-locatieaanduiding raakt het punt — regels
+                    die hier gelden (omgevingsplan, verordening, AMvB).
+      via='gebied'  het regelingsgebied raakt het punt en het document is een
+                    vrijetekst-instrument (omgevingsvisie, programma, N2000,
+                    projectbesluit). Die hebben geen juridische regels en dus
+                    geen ALA — via het eerste pad zijn ze onvindbaar.
+
+    Het gebied-pad zat wél in de retrieval (pad B van `tekst_fallback_query`)
+    maar niet hier. Gevolg tot 2026-08-11: de vraag vond regelteksten in de
+    NOVI of een omgevingsvisie, terwijl dat document niet eens in de
+    documentenlijst van dezelfde locatie stond — de Documenten-tab kon het
+    daarom nooit als 'relevant' tonen ("3 van 32" naast een Regelmix van 8
+    documenten). Zelfde documenttype-lijst als de retrieval, zodat de twee
+    niet opnieuw uit elkaar lopen.
+    """
     with get_conn() as conn, conn.cursor() as cur:
         # Dedupliceer op opschrift: zelfde titel = zelfde regeling voor de
         # gebruiker, zelfs als er 340 expressions zijn (bv. Voorbeschermings-
@@ -2169,11 +2191,27 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
         # ~14k tussenrijen voor ~12 regelingen.
         cur.execute(
             """
-            WITH expr AS (
-                SELECT DISTINCT ap.regeling_expression
+            WITH via_regel AS (
+                SELECT DISTINCT ap.regeling_expression AS expression
                 FROM p2p.locatie_subdiv ls
                 JOIN p2p.ala_punt ap ON ap.locatie_id = ls.identificatie
-                WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%s, %s), 28992))
+                WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+            ),
+            via_gebied AS (
+                SELECT DISTINCT r.frbr_expression AS expression
+                FROM p2p.regeling r
+                JOIN p2p.locatie_subdiv ls ON ls.identificatie = r.regelingsgebied_id
+                WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+                  AND NOT r.inactief
+                  AND r.documenttype = ANY(%(vrijetekst)s)
+            ),
+            expr AS (
+                SELECT expression, 'regel'::text AS via FROM via_regel
+                UNION
+                -- Staat een document in beide paden, dan wint 'regel': het heeft
+                -- hier echte regels en is dus meer dan beleid.
+                SELECT expression, 'gebied'::text FROM via_gebied
+                WHERE expression NOT IN (SELECT expression FROM via_regel)
             )
             SELECT DISTINCT ON (r.opschrift)
                 r.frbr_expression   AS expression,
@@ -2181,18 +2219,25 @@ def viewer_regelingen(x: float = Query(...), y: float = Query(...)):
                 r.documenttype      AS type,
                 r.bronhouder,
                 b.naam              AS bronhouder_naam,
-                b.bestuurslaag
+                b.bestuurslaag,
+                expr.via
             FROM expr
-            JOIN p2p.regeling r    ON r.frbr_expression = expr.regeling_expression
+            JOIN p2p.regeling r    ON r.frbr_expression = expr.expression
             JOIN core.bronhouder b ON b.overheidscode = r.bronhouder
             WHERE NOT r.inactief
             ORDER BY r.opschrift, r.frbr_expression DESC
             """,
-            (x, y),
+            {"x": x, "y": y, "vrijetekst": VRIJETEKST_DOCUMENTTYPES},
         )
         regelingen = cur.fetchall()
         laag_order = {'gemeente': 0, 'provincie': 1, 'waterschap': 2, 'rijk': 3}
-        regelingen.sort(key=lambda r: (laag_order.get(r['bestuurslaag'] or '', 4), r['titel']))
+        # Regel-documenten eerst, beleid daarna: binnen één bestuurslaag is de
+        # verordening belangrijker dan het programma van dezelfde overheid.
+        regelingen.sort(key=lambda r: (
+            0 if r['via'] == 'regel' else 1,
+            laag_order.get(r['bestuurslaag'] or '', 4),
+            r['titel'],
+        ))
 
         # Wro-plannen op dezelfde locatie — als volledige objecten
         cur.execute(
@@ -3521,6 +3566,50 @@ def viewer_filter_options():
 _LAAG_ORDER = {'gemeente': 0, 'provincie': 1, 'waterschap': 2, 'rijk': 3}
 
 
+# Onderwerp x soort bepaling over álle regels op één punt, per document.
+# Voedt de filterstrook op de documentenlijst: die moet kunnen tellen vóórdat
+# een document is uitgeklapt, en de rijen zelf komen pas lui binnen.
+#
+# De walk klimt van elke regel naar zijn Artikel-voorouder — de indeling zit op
+# artikel-niveau, de regelmix hangt meestal op lid-niveau. Gemeten op RD
+# 111740,476359 (Aalsmeer): 11.764 regels over 12 documenten, 451 combinaties,
+# 0,6 s. Alleen het ALA-pad: vrijetekst-instrumenten (visies, programma's)
+# hebben geen artikelen en dus per definitie geen indeling.
+_REGELMIX_ONDERWERPEN_SQL = """
+    WITH RECURSIVE base AS (
+        SELECT DISTINCT te.id AS te_id, te.regeling_expression AS expr
+        FROM p2p.activiteit_locatieaanduiding ala
+        JOIN p2p.locatie_subdiv ls   ON ls.identificatie = ala.locatie_id
+        JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+        JOIN p2p.tekst_element te    ON te.wid = jr.regeltekst_wid
+             AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
+        JOIN p2p.regeling r          ON r.frbr_expression = te.regeling_expression
+        WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+          AND NOT r.inactief
+          AND te.inhoud IS NOT NULL AND length(te.inhoud) > 20
+    ),
+    walk AS (
+        SELECT b.te_id AS origin, t.parent_id, b.expr,
+               CASE WHEN t.element_type = 'Artikel' THEN t.wid END AS art_wid
+        FROM base b JOIN p2p.tekst_element t ON t.id = b.te_id
+        UNION ALL
+        SELECT w.origin, p.parent_id, w.expr,
+               COALESCE(w.art_wid, CASE WHEN p.element_type = 'Artikel' THEN p.wid END)
+        FROM walk w JOIN p2p.tekst_element p ON p.id = w.parent_id
+        WHERE w.art_wid IS NULL
+    ),
+    resolved AS (
+        SELECT origin, expr, max(art_wid) AS art_wid FROM walk GROUP BY origin, expr
+    )
+    SELECT rs.expr AS bron_id, ai.categorie, ai.subcategorie, ai.type_bepaling,
+           count(*) AS n_regels
+    FROM resolved rs
+    LEFT JOIN v2a.artikel_indeling ai
+           ON ai.regeling_expression = rs.expr AND ai.wid = rs.art_wid
+    GROUP BY 1, 2, 3, 4
+"""
+
+
 @app.get("/v1/viewer/regelmix", dependencies=[Depends(verify_key)])
 def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
     """Regelmix-overzicht: welke documenten gelden op een RD-punt, met per
@@ -3534,7 +3623,8 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
     with get_conn() as conn, conn.cursor() as cur:
         # OW: aantal distinct regels per regeling, dan dedupliceren op opschrift
         # (nieuwste expression) — net als viewer_regelingen, zodat de Documenten-
-        # en Regelmix-tab hetzelfde documentenoverzicht tonen.
+        # en Regelmix-tab hetzelfde documentenoverzicht tonen. Dat geldt ook voor
+        # het gebied-pad hieronder: vrijetekst-instrumenten staan in beide tabs.
         cur.execute(
             """
             WITH per_expr AS (
@@ -3554,13 +3644,45 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
             )
             SELECT DISTINCT ON (opschrift)
                 frbr_expression AS bron_id, opschrift AS regeling,
-                documenttype, bestuurslaag, aantal
+                documenttype, bestuurslaag, aantal, 'regel'::text AS via
             FROM per_expr
             ORDER BY opschrift, frbr_expression DESC
             """,
             {"x": x, "y": y},
         )
         ow_docs = [dict(d, bron_type='ow') for d in cur.fetchall()]
+        met_regels = {d["bron_id"] for d in ow_docs}
+
+        # Gebied-pad: vrijetekst-instrumenten (omgevingsvisie, programma, …)
+        # gelden hier via hun regelingsgebied en hebben geen ALA. `aantal` telt
+        # dus alle tekstdelen van het document, niet de regels op dit punt —
+        # het document geldt als geheel. De frontend telt ze daarom apart en
+        # noemt ze geen regels.
+        cur.execute(
+            """
+            WITH per_expr AS (
+                SELECT r.frbr_expression, r.opschrift, r.documenttype, b.bestuurslaag,
+                       count(DISTINCT te.wid) AS aantal
+                FROM p2p.regeling r
+                JOIN p2p.locatie_subdiv ls ON ls.identificatie = r.regelingsgebied_id
+                JOIN core.bronhouder b     ON b.overheidscode = r.bronhouder
+                JOIN p2p.tekst_element te  ON te.regeling_expression = r.frbr_expression
+                WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+                  AND NOT r.inactief
+                  AND r.documenttype = ANY(%(vrijetekst)s)
+                  AND te.inhoud IS NOT NULL AND length(te.inhoud) > 20
+                GROUP BY r.frbr_expression, r.opschrift, r.documenttype, b.bestuurslaag
+            )
+            SELECT DISTINCT ON (opschrift)
+                frbr_expression AS bron_id, opschrift AS regeling,
+                documenttype, bestuurslaag, aantal, 'gebied'::text AS via
+            FROM per_expr
+            ORDER BY opschrift, frbr_expression DESC
+            """,
+            {"x": x, "y": y, "vrijetekst": VRIJETEKST_DOCUMENTTYPES},
+        )
+        ow_docs += [dict(d, bron_type='ow') for d in cur.fetchall()
+                    if d["bron_id"] not in met_regels]
 
         # Wro: aantal tekst-objecten per actief plan, dedupliceren op naam
         # (nieuwste datum) — net als viewer_regelingen.
@@ -3579,7 +3701,7 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
             )
             SELECT DISTINCT ON (naam)
                 idn AS bron_id, naam AS regeling, type_plan AS documenttype,
-                bestuurslaag, aantal
+                bestuurslaag, aantal, 'regel'::text AS via
             FROM per_plan
             ORDER BY naam, datum DESC NULLS LAST
             """,
@@ -3587,9 +3709,135 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
         )
         wro_docs = [dict(d, bron_type='wro') for d in cur.fetchall()]
 
+        # Onderwerp x soort bepaling per document, voor de filterstrook.
+        cur.execute(_REGELMIX_ONDERWERPEN_SQL, {"x": x, "y": y})
+        onderwerpen = cur.fetchall()
+
     documenten = ow_docs + wro_docs
-    documenten.sort(key=lambda d: (_LAAG_ORDER.get(d['bestuurslaag'] or '', 4), d['regeling'] or ''))
-    return {"locatie": {"x": x, "y": y}, "documenten": documenten}
+    # Beleid onderaan: eerst wat hier regels stelt, dan wat hier beleid is.
+    documenten.sort(key=lambda d: (
+        0 if d['via'] == 'regel' else 1,
+        _LAAG_ORDER.get(d['bestuurslaag'] or '', 4),
+        d['regeling'] or '',
+    ))
+    # `onderwerpen` dekt alleen de documenten waar een indeling van bestaat.
+    # Wat er niet in staat — Wro-plannen, visies, programma's — valt buiten het
+    # filter, en de frontend hoort dat te tonen in plaats van weg te laten.
+    return {
+        "locatie": {"x": x, "y": y},
+        "documenten": documenten,
+        "onderwerpen": onderwerpen,
+    }
+
+
+# ── Regelmix-detail: twee manieren om aan de tekstdelen van één document te
+# komen, met een gedeelde staart die er artikel- en hoofdstuknummers bij zoekt.
+# Beide leveren dezelfde kolommen op, zodat de frontend geen verschil ziet.
+
+# Pad 1 — de regels die op dit punt gelden, via de activiteit-locatieaanduiding.
+_REGELMIX_BASE_VIA_REGEL = """
+                WITH RECURSIVE base AS (
+                    SELECT DISTINCT ON (te.wid)
+                        te.id AS te_id, te.wid AS wid, te.opschrift AS artikel,
+                        a.naam AS activiteit_naam, a.identificatie AS activiteit_id
+                    FROM p2p.activiteit_locatieaanduiding ala
+                    JOIN p2p.activiteit a        ON a.identificatie = ala.activiteit_id
+                    JOIN p2p.locatie_subdiv ls   ON ls.identificatie = ala.locatie_id
+                    JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
+                    JOIN p2p.tekst_element te     ON te.wid = jr.regeltekst_wid
+                    WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+                      AND te.regeling_expression = %(bron)s
+                      AND te.inhoud IS NOT NULL AND length(te.inhoud) > 20
+                    ORDER BY te.wid, a.naam
+                )"""
+
+# Pad 2 — alle tekstdelen van een vrijetekst-instrument dat hier via zijn
+# regelingsgebied geldt. Geen activiteit (die bestaat niet zonder ALA), en geen
+# selectie op punt binnen het document: zo'n document geldt als geheel.
+_REGELMIX_BASE_VIA_GEBIED = """
+                WITH RECURSIVE base AS (
+                    SELECT DISTINCT ON (te.wid)
+                        te.id AS te_id, te.wid AS wid, te.opschrift AS artikel,
+                        NULL::text AS activiteit_naam, NULL::text AS activiteit_id
+                    FROM p2p.regeling r
+                    JOIN p2p.locatie_subdiv ls ON ls.identificatie = r.regelingsgebied_id
+                    JOIN p2p.tekst_element te  ON te.regeling_expression = r.frbr_expression
+                    WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+                      AND r.frbr_expression = %(bron)s
+                      AND r.documenttype = ANY(%(vrijetekst)s)
+                      AND NOT r.inactief
+                      AND te.inhoud IS NOT NULL AND length(te.inhoud) > 20
+                    ORDER BY te.wid
+                )"""
+
+_REGELMIX_KOPPEN_TAIL = """,
+                walk AS (
+                    SELECT b.te_id AS origin, t.id, t.parent_id, 0 AS diepte,
+                        CASE WHEN t.element_type = 'Artikel'   THEN t.nummer   END AS art_nr,
+                        -- De wid van de Artikel-voorouder is de sleutel naar
+                        -- v2a.artikel_indeling: de indeling zit op artikel-niveau,
+                        -- de regelmix hangt meestal op lid-niveau. Leden erven,
+                        -- net als in de leestekst.
+                        CASE WHEN t.element_type = 'Artikel'   THEN t.wid      END AS art_wid,
+                        CASE WHEN t.element_type = 'Artikel'   THEN t.opschrift END AS art_op,
+                        CASE WHEN t.element_type = 'Hoofdstuk' THEN t.nummer   END AS hfd_nr,
+                        -- Lid-nummer staat in de bron als "1." — de punt eraf,
+                        -- de frontend zet er zelf "lid " voor.
+                        CASE WHEN t.element_type = 'Lid' THEN rtrim(t.nummer, '.') END AS lid_nr,
+                        NULLIF(t.opschrift, '')                                 AS anc_op
+                    FROM base b
+                    JOIN p2p.tekst_element t ON t.id = b.te_id
+                    UNION ALL
+                    SELECT w.origin, p.id, p.parent_id, w.diepte + 1,
+                        COALESCE(w.art_nr, CASE WHEN p.element_type = 'Artikel'   THEN p.nummer   END),
+                        COALESCE(w.art_wid, CASE WHEN p.element_type = 'Artikel'  THEN p.wid      END),
+                        COALESCE(w.art_op, CASE WHEN p.element_type = 'Artikel'   THEN p.opschrift END),
+                        COALESCE(w.hfd_nr, CASE WHEN p.element_type = 'Hoofdstuk' THEN p.nummer   END),
+                        COALESCE(w.lid_nr, CASE WHEN p.element_type = 'Lid'       THEN rtrim(p.nummer, '.') END),
+                        NULLIF(p.opschrift, '')
+                    FROM walk w
+                    JOIN p2p.tekst_element p ON p.id = w.parent_id
+                    WHERE w.art_nr IS NULL OR w.hfd_nr IS NULL
+                ),
+                resolved AS (
+                    SELECT origin,
+                           max(art_nr) AS artikel_nummer,
+                           max(art_wid) AS artikel_wid,
+                           max(art_op) AS artikel_opschrift,
+                           max(hfd_nr) AS hoofdstuk_nummer,
+                           max(lid_nr) AS lid_nummer,
+                           -- Dichtstbijzijnde voorouder mét opschrift. Vrijetekst-
+                           -- instrumenten hebben geen Artikel-nodes: hun tekstdelen
+                           -- staan onder geneste Divisies, en zonder deze klim heet
+                           -- elke rij in de Regelmix "Regel".
+                           (array_agg(anc_op ORDER BY diepte)
+                              FILTER (WHERE anc_op IS NOT NULL))[1] AS naaste_opschrift
+                    FROM walk GROUP BY origin
+                )
+                SELECT
+                    'ow'              AS bron_type,
+                    %(bron)s          AS bron_id,
+                    b.activiteit_naam, b.activiteit_id,
+                    -- De voorouder-titel alleen waar geen activiteit is (het
+                    -- gebied-pad); regel-rijen houden hun bestaande fallback.
+                    COALESCE(
+                        NULLIF(b.artikel, ''),
+                        CASE WHEN b.activiteit_naam IS NULL THEN rs.naaste_opschrift END
+                    )                 AS artikel,
+                    b.wid             AS wid,
+                    NULL              AS inhoud,
+                    rs.artikel_nummer, rs.artikel_opschrift, rs.hoofdstuk_nummer,
+                    rs.lid_nummer,
+                    -- Onderwerp x soort bepaling van het artikel waar deze regel
+                    -- onder hangt. NULL = niet ingedeeld, en dat is een uitkomst:
+                    -- de viewer toont het als eigen keuze in plaats van te raden.
+                    ai.categorie, ai.subcategorie, ai.type_bepaling
+                FROM base b
+                JOIN resolved rs ON rs.origin = b.te_id
+                LEFT JOIN v2a.artikel_indeling ai
+                       ON ai.regeling_expression = %(bron)s AND ai.wid = rs.artikel_wid
+                ORDER BY b.wid
+                """
 
 
 @app.get("/v1/viewer/regelmix/document", dependencies=[Depends(verify_key)])
@@ -3600,11 +3848,14 @@ def viewer_regelmix_document(
     bron_type: str = Query(..., pattern="^(ow|wro)$"),
 ):
     """Artikel-koppen van één regelmix-document. OW: koppen (wid, artikel-
-    nummer/opschrift, hoofdstuk, activiteit) zónder inhoud — nummer en hoofdstuk
+    nummer/opschrift, hoofdstuk, lid, activiteit) zónder inhoud — nummer en hoofdstuk
     worden uit de `wid` geparst (`__chp_<n>__art_<x.y>__`), het opschrift via de
     Artikel-node (één indexed self-join, geen recursieve walk → snel, ongecapt).
     De inhoud laadt de frontend daarna lui via POST /v1/viewer/teksten.
     Wro: teksten inline (klein, geen p2p-`wid`).
+
+    Levert de ALA-keten niets op, dan volgt het gebied-pad voor vrijetekst-
+    instrumenten (zie `_REGELMIX_BASE_VIA_GEBIED`).
     """
     with get_conn() as conn, conn.cursor() as cur:
         if bron_type == 'wro':
@@ -3620,7 +3871,15 @@ def viewer_regelmix_document(
                     REGEXP_REPLACE(COALESCE(wt.inhoud, ''), '<[^>]+>', '', 'g') AS inhoud,
                     wt.nummer         AS artikel_nummer,
                     COALESCE(wt.label, wt.naam) AS artikel_opschrift,
-                    NULL              AS hoofdstuk_nummer
+                    NULL              AS hoofdstuk_nummer,
+                    NULL              AS lid_nummer,
+                    -- Wro-plannen staan in het wro-schema en hebben deze indeling
+                    -- niet. Dezelfde kolommen, altijd leeg — zodat de frontend
+                    -- geen tweede vorm hoeft te kennen en zelf kan zien dat dit
+                    -- document buiten het filter valt.
+                    NULL              AS categorie,
+                    NULL              AS subcategorie,
+                    NULL              AS type_bepaling
                 FROM wro.ruimtelijk_instrument ri
                 JOIN wro.wro_tekst_object wt ON wt.instrument_idn = ri.idn
                 WHERE ri.idn = %(bron)s
@@ -3635,59 +3894,23 @@ def viewer_regelmix_document(
             # de dichtstbijzijnde), stop een tak zodra beide gevonden zijn. Werkt
             # universeel (ongeacht wid-encoding) — sneller en completer dan wid-parse.
             cur.execute(
-                """
-                WITH RECURSIVE base AS (
-                    SELECT DISTINCT ON (te.wid)
-                        te.id AS te_id, te.wid AS wid, te.opschrift AS artikel,
-                        a.naam AS activiteit_naam, a.identificatie AS activiteit_id
-                    FROM p2p.activiteit_locatieaanduiding ala
-                    JOIN p2p.activiteit a        ON a.identificatie = ala.activiteit_id
-                    JOIN p2p.locatie_subdiv ls   ON ls.identificatie = ala.locatie_id
-                    JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-                    JOIN p2p.tekst_element te     ON te.wid = jr.regeltekst_wid
-                    WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
-                      AND te.regeling_expression = %(bron)s
-                      AND te.inhoud IS NOT NULL AND length(te.inhoud) > 20
-                    ORDER BY te.wid, a.naam
-                ),
-                walk AS (
-                    SELECT b.te_id AS origin, t.id, t.parent_id,
-                        CASE WHEN t.element_type = 'Artikel'   THEN t.nummer   END AS art_nr,
-                        CASE WHEN t.element_type = 'Artikel'   THEN t.opschrift END AS art_op,
-                        CASE WHEN t.element_type = 'Hoofdstuk' THEN t.nummer   END AS hfd_nr
-                    FROM base b
-                    JOIN p2p.tekst_element t ON t.id = b.te_id
-                    UNION ALL
-                    SELECT w.origin, p.id, p.parent_id,
-                        COALESCE(w.art_nr, CASE WHEN p.element_type = 'Artikel'   THEN p.nummer   END),
-                        COALESCE(w.art_op, CASE WHEN p.element_type = 'Artikel'   THEN p.opschrift END),
-                        COALESCE(w.hfd_nr, CASE WHEN p.element_type = 'Hoofdstuk' THEN p.nummer   END)
-                    FROM walk w
-                    JOIN p2p.tekst_element p ON p.id = w.parent_id
-                    WHERE w.art_nr IS NULL OR w.hfd_nr IS NULL
-                ),
-                resolved AS (
-                    SELECT origin,
-                           max(art_nr) AS artikel_nummer,
-                           max(art_op) AS artikel_opschrift,
-                           max(hfd_nr) AS hoofdstuk_nummer
-                    FROM walk GROUP BY origin
-                )
-                SELECT
-                    'ow'              AS bron_type,
-                    %(bron)s          AS bron_id,
-                    b.activiteit_naam, b.activiteit_id,
-                    b.artikel,
-                    b.wid             AS wid,
-                    NULL              AS inhoud,
-                    rs.artikel_nummer, rs.artikel_opschrift, rs.hoofdstuk_nummer
-                FROM base b
-                JOIN resolved rs ON rs.origin = b.te_id
-                ORDER BY b.wid
-                """,
+                _REGELMIX_BASE_VIA_REGEL + _REGELMIX_KOPPEN_TAIL,
                 {"x": x, "y": y, "bron": bron},
             )
         rows = cur.fetchall()
+
+        # Leeg via de ALA-keten? Dan kan het een vrijetekst-instrument zijn
+        # (omgevingsvisie, programma): dat geldt hier via zijn regelingsgebied en
+        # heeft per definitie geen activiteit-locatieaanduidingen. Zonder deze
+        # tak klapt zo'n document in de Regelmix leeg open. De gebied-eis staat
+        # in de query zelf, zodat een document buiten zijn gebied leeg blijft.
+        if bron_type == 'ow' and not rows:
+            cur.execute(
+                _REGELMIX_BASE_VIA_GEBIED + _REGELMIX_KOPPEN_TAIL,
+                {"x": x, "y": y, "bron": bron,
+                 "vrijetekst": VRIJETEKST_DOCUMENTTYPES},
+            )
+            rows = cur.fetchall()
 
         # Soft-flag (hide-first-audit G4): markeer of de OW-bron een
         # verdrongen/ingetrokken versie is (Wro kent geen inactief). De frontend

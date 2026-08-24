@@ -339,6 +339,17 @@ _TSV_EXPR = (
 # de gebruiker op zo'n code, dan gaan we exact op de PK/btree-index af.
 _ID_PATROON = re.compile(r"^[A-Za-z]{2,5}-\d{4}-\d+$")
 
+# Nederlandse postcode, met of zonder spatie, hoofdletter-ongevoelig.
+#
+# Eigen tak omdat de kolom `postcode` niet in _TSV_EXPR zit en de generieke
+# full-text-tak hem juist stukmaakt: _tsquery_arg splitst op niet-alfanumeriek,
+# dus "1097 PR" wordt `1097:* & PR:*`, en dat prefix-paar matcht "Professor",
+# "procedure", "provincie". Gemeten 2026-08-22 op 899.540 records:
+#   "1097PR"  ->   2 treffers (alleen toevallige body-hits)
+#   "1097 PR" -> 635 treffers, waarvan er 173 werkelijk in 1097xx liggen
+# Eerste treffer was "Kennisgeving WET BODEMBESCHERMING".
+_POSTCODE_PATROON = re.compile(r"^(\d{4})\s*([A-Za-z]{2})$")
+
 
 def _tsquery_arg(q: str) -> str | None:
     """Zet vrije invoer om in een tsquery-string met prefix-match per woord.
@@ -394,6 +405,23 @@ def _q_filter(q: str | None) -> tuple[str, list[Any], bool] | None:
         # Full-text zou hier niets vinden: de 'dutch'-parser hakt
         # gmb-2026-173404 in 'gmb', '-2026', '-173404'.
         return ("(koop_id = %s OR zaaknummer_bg = %s)", [s, s], False)
+    m = _POSTCODE_PATROON.match(s)
+    if m:
+        # Twee armen, want de postcode staat op twee plaatsen en zelden op
+        # allebei: in de kolom (37,96% gevuld, index idx_vk_postcode) en
+        # aaneengeschreven in de body-tekst, waar de dutch-parser er één token
+        # van maakt ('Von Guerickestraat 99 1097RA Amsterdam' -> '1097ra').
+        # Vandaar de tsquery zónder :* — prefix-matching levert hier alleen
+        # ruis op en de glued vorm is al exact wat er in de index staat.
+        #
+        # is_tekstzoek=True: de tweede arm is een GIN-scan, dus de count moet
+        # afgetopt en de barrière-heuristiek moet gelden, net als bij tekst.
+        pc = f"{m.group(1)}{m.group(2).upper()}"
+        return (
+            f"(postcode = %s OR {_TSV_EXPR} @@ to_tsquery('dutch', %s))",
+            [pc, pc.lower()],
+            True,
+        )
     # Full-text via idx_vk_tsv. Was tot 2026-08 vijf maal ILIKE '%term%', wat
     # altijd een seq scan over 5,8 GB opleverde: elke zoekopdracht gaf 500 na
     # de statement_timeout van 20 s. Geen FTS-rank — pure filter, de sortering

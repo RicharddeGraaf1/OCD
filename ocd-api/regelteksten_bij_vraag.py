@@ -46,6 +46,21 @@ router = APIRouter(prefix="/v1", tags=["regelteksten-bij-vraag"])
 
 LOCATIESERVER = "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free"
 
+# Documenttypen die op een locatie gelden via hun *regelingsgebied* in plaats van
+# via een activiteit-locatieaanduiding: vrijetekst-instrumenten zonder juridische
+# regels. Ze zijn onbereikbaar via de ALA-keten en hebben daarom overal een eigen
+# pad nodig — zie pad B in `tekst_fallback_query` en het gebied-pad in
+# `/v1/viewer/regelingen`. Eén lijst, zodat retrieval en documentenlijst niet uit
+# elkaar kunnen lopen: een document dat de retrieval hier vindt, moet ook in het
+# documentenoverzicht van dezelfde locatie staan.
+VRIJETEKST_DOCUMENTTYPES = [
+    "Omgevingsvisie",
+    "Programma",
+    "Aanwijzingsbesluit N2000",
+    "Projectbesluit",
+    "Toegangsbeperkingsbesluit",
+]
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Pydantic-modellen
@@ -110,6 +125,12 @@ class RegeltekstHit(BaseModel):
     )
     hoofdstuk_nummer: str | None = Field(
         None, description="Nummer van de Hoofdstuk-voorouder, bv. '2'.",
+    )
+    lid_nummer: str | None = Field(
+        None,
+        description="Lid-nummer van de regeltekst zelf, bv. '2'. Gevuld wanneer de "
+                    "regel op lid-niveau hangt; None als hij het hele artikel is. "
+                    "Onderscheidt leden die anders dezelfde artikelkop dragen.",
     )
     join_pad: str = Field(
         ...,
@@ -292,14 +313,17 @@ def resolve_artikel_context(cur, te_ids: list[int]) -> dict[int, dict]:
             SELECT t.id AS origin, t.id, t.parent_id,
                 CASE WHEN t.element_type = 'Artikel'   THEN t.nummer   END AS art_nr,
                 CASE WHEN t.element_type = 'Artikel'   THEN t.opschrift END AS art_op,
-                CASE WHEN t.element_type = 'Hoofdstuk' THEN t.nummer   END AS hfd_nr
+                CASE WHEN t.element_type = 'Hoofdstuk' THEN t.nummer   END AS hfd_nr,
+                -- Lid-nummer staat in de bron als "1." — de punt eraf.
+                CASE WHEN t.element_type = 'Lid'       THEN rtrim(t.nummer, '.') END AS lid_nr
             FROM p2p.tekst_element t
             WHERE t.id = ANY(%(ids)s)
             UNION ALL
             SELECT w.origin, p.id, p.parent_id,
                 COALESCE(w.art_nr, CASE WHEN p.element_type = 'Artikel'   THEN p.nummer   END),
                 COALESCE(w.art_op, CASE WHEN p.element_type = 'Artikel'   THEN p.opschrift END),
-                COALESCE(w.hfd_nr, CASE WHEN p.element_type = 'Hoofdstuk' THEN p.nummer   END)
+                COALESCE(w.hfd_nr, CASE WHEN p.element_type = 'Hoofdstuk' THEN p.nummer   END),
+                COALESCE(w.lid_nr, CASE WHEN p.element_type = 'Lid'       THEN rtrim(p.nummer, '.') END)
             FROM walk w
             JOIN p2p.tekst_element p ON p.id = w.parent_id
             WHERE w.art_nr IS NULL OR w.hfd_nr IS NULL
@@ -307,7 +331,8 @@ def resolve_artikel_context(cur, te_ids: list[int]) -> dict[int, dict]:
         SELECT origin,
                max(art_nr) AS artikel_nummer,
                max(art_op) AS artikel_opschrift,
-               max(hfd_nr) AS hoofdstuk_nummer
+               max(hfd_nr) AS hoofdstuk_nummer,
+               max(lid_nr) AS lid_nummer
         FROM walk GROUP BY origin
         """,
         {"ids": te_ids},
@@ -316,9 +341,9 @@ def resolve_artikel_context(cur, te_ids: list[int]) -> dict[int, dict]:
 
 
 def verrijk_met_artikel(cur, rows: list[dict]) -> list[dict]:
-    """Voeg artikel_nummer/artikel_opschrift/hoofdstuk_nummer toe aan retrieval-
-    rijen (in-place) op basis van hun `te_id`. No-op als de rijen geen te_id
-    dragen of leeg zijn."""
+    """Voeg artikel_nummer/artikel_opschrift/hoofdstuk_nummer/lid_nummer toe aan
+    retrieval-rijen (in-place) op basis van hun `te_id`. No-op als de rijen geen
+    te_id dragen of leeg zijn."""
     te_ids = [r["te_id"] for r in rows if r.get("te_id") is not None]
     ctx = resolve_artikel_context(cur, te_ids)
     for r in rows:
@@ -326,6 +351,7 @@ def verrijk_met_artikel(cur, rows: list[dict]) -> list[dict]:
         r["artikel_nummer"] = c.get("artikel_nummer")
         r["artikel_opschrift"] = c.get("artikel_opschrift")
         r["hoofdstuk_nummer"] = c.get("hoofdstuk_nummer")
+        r["lid_nummer"] = c.get("lid_nummer")
     return rows
 
 
@@ -458,9 +484,7 @@ def tekst_fallback_query(cur, keywords: list[str], x: float, y: float,
             JOIN p2p.tekst_element te ON te.regeling_expression = r.frbr_expression
             WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
               AND NOT r.inactief
-              AND r.documenttype IN ('Omgevingsvisie','Programma',
-                                     'Aanwijzingsbesluit N2000','Projectbesluit',
-                                     'Toegangsbeperkingsbesluit')
+              AND r.documenttype = ANY(%(vrijetekst)s)
         )
         SELECT DISTINCT ON (te.wid)
             te.id           AS te_id,
@@ -484,7 +508,8 @@ def tekst_fallback_query(cur, keywords: list[str], x: float, y: float,
         ORDER BY te.wid
         LIMIT %(limit)s
         """,
-        {"x": x, "y": y, "rx": rx, "limit": limit},
+        {"x": x, "y": y, "rx": rx, "limit": limit,
+         "vrijetekst": VRIJETEKST_DOCUMENTTYPES},
     )
     return cur.fetchall()
 
@@ -779,6 +804,7 @@ def regelteksten_bij_vraag(req: RegeltekstenRequest):
             artikel_nummer=r.get("artikel_nummer"),
             artikel_opschrift=r.get("artikel_opschrift"),
             hoofdstuk_nummer=r.get("hoofdstuk_nummer"),
+            lid_nummer=r.get("lid_nummer"),
             join_pad=r["join_pad"],
             relevantie=r.get("relevantie"),
         )

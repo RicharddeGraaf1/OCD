@@ -130,6 +130,13 @@ CREATE INDEX IF NOT EXISTS idx_vk_subject_taxonomie
 CREATE INDEX IF NOT EXISTS idx_vk_datum_ontvangst
     ON vth.vergunningkennisgeving (datum_ontvangst)
     WHERE datum_ontvangst IS NOT NULL;
+-- Postcode-tak van het q-filter (_POSTCODE_PATROON in ocd-api/vergunningen.py).
+-- Partieel: 37,96% van de records heeft een postcode, de rest hoeft niet in de
+-- index. Zonder deze index valt de exacte postcode-lookup terug op een seq scan
+-- over 5,8 GB en loopt hij in de statement_timeout.
+CREATE INDEX IF NOT EXISTS idx_vk_postcode
+    ON vth.vergunningkennisgeving (postcode)
+    WHERE postcode IS NOT NULL;
 
 -- Run-tracking (analoog aan etl_run in SQLite-PoC)
 CREATE TABLE IF NOT EXISTS vth.etl_run (

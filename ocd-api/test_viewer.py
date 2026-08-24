@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from main import app
 from db import pool
+from regelteksten_bij_vraag import VRIJETEKST_DOCUMENTTYPES
 
 # Open de connection pool voor tests
 pool.open()
@@ -91,6 +92,40 @@ class TestRegelingen:
         valide = {"gemeente", "provincie", "waterschap", "rijk", None}
         for reg in r.json()["regelingen"]:
             assert reg["bestuurslaag"] in valide, f"Onverwachte bestuurslaag: {reg['bestuurslaag']}"
+
+    def test_via_is_regel_of_gebied(self):
+        r = client.get(f"/v1/viewer/regelingen?x={AMS_X}&y={AMS_Y}")
+        for reg in r.json()["regelingen"]:
+            assert reg["via"] in ("regel", "gebied"), f"Onverwachte via: {reg['via']}"
+
+    def test_vrijetekst_instrumenten_staan_in_de_lijst(self):
+        """Een omgevingsvisie/programma geldt via zijn regelingsgebied en heeft
+        geen ALA. Zonder het gebied-pad ontbreekt zo'n document volledig in de
+        documentenlijst, terwijl de retrieval er wél regelteksten in vindt."""
+        r = client.get(f"/v1/viewer/regelingen?x={AMS_X}&y={AMS_Y}")
+        gebied = [reg for reg in r.json()["regelingen"] if reg["via"] == "gebied"]
+        assert gebied, "Geen enkel vrijetekst-instrument op een locatie in Amsterdam"
+        assert all(reg["type"] in VRIJETEKST_DOCUMENTTYPES for reg in gebied)
+
+    def test_hits_van_de_vraag_zitten_in_de_documentenlijst(self):
+        """De regressie die dit alles startte: de Regelmix toonde 8 documenten
+        terwijl de Documenten-tab er 3 van 32 relevant noemde, omdat vijf
+        gevonden regelingen niet in de documentenlijst van diezelfde locatie
+        stonden. Elke regeling die de retrieval hier vindt, moet erin staan."""
+        docs = client.get(f"/v1/viewer/regelingen?x={AMS_X}&y={AMS_Y}").json()
+        expressions = {reg["expression"] for reg in docs["regelingen"]}
+
+        hits = client.post("/v1/regelteksten-bij-vraag", json={
+            "question": "wat zijn hier de regels over windenergie?",
+            "x": AMS_X, "y": AMS_Y, "max_concepts": 5, "max_regelteksten": 50,
+        }).json()["regelteksten"]
+        gevonden = {h["regeling_expression"] for h in hits if h["regeling_expression"]}
+
+        assert gevonden, "Geen hits — testvraag levert niets op, test zegt niets"
+        assert gevonden <= expressions, (
+            f"Retrieval vond regelingen die niet in de documentenlijst staan: "
+            f"{sorted(gevonden - expressions)}"
+        )
 
 
 # ══════════════════════════════════════════════════════════

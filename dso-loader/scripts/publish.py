@@ -17,9 +17,12 @@ TWEE SPOREN
            * ponsenkaart.nl  (/v1/ponsenkaart/*, /v1/planvoorraad/*)
            * prod-OCDviewer, omgevingsbot  (volgen prod automatisch)
   baked  : sites die BUILD-TIME data bakken → herbouwen + deployen.
-           * instructieregels.nl   (build/build.sh → web/data.js → Cloudflare)
-           * RoM-prototype          (tools/build_data.py → data/*.json)
-           * annotatieconformiteit  (repo nog te lokaliseren)
+           * instructieregels.nl    (build/build.sh → web/data.js → Cloudflare)
+           * annotatieconformiteit  (C:/GIT/annotatieconformiteit.nl, ex-odkwaliteit:
+                                     collect → score → export → npm run deploy)
+
+  RoM-prototype staat hier NIET bij: buiten scope sinds 2026-07-24.
+  De registry in sites() is de waarheid — niet deze docstring.
 
 VEILIGHEID
 ----------
@@ -33,8 +36,10 @@ VEILIGHEID
     aparte lokale pijplijn, dus "de tabellen zijn gevuld" zegt niets over
     actualiteit. Zie runbook stap 6b. Draait ook in dry-run (read-only).
 
-STATUS: voorbereiding/scaffold. Concreet ingevuld: instructieregels + ponsenkaart.
-Nog te bevestigen (met TODO gemarkeerd): RoM-deploy en annotatieconformiteit-repo.
+STATUS: alle drie de sites in sites() zijn concreet ingevuld. Wat nog scaffold is:
+refresh_prod() — --prod-mode staat default op 'none', 'delta' is een TODO-stub die
+alleen print, en 'restore' roept de zware destructieve restore aan. Prod hoort al
+vers te zijn uit runbook stap 3/4 vóór je hier komt.
 """
 
 from __future__ import annotations
@@ -326,7 +331,8 @@ def main() -> int:
     ap.add_argument("--execute", action="store_true",
                     help="daadwerkelijk draaien (default = dry-run)")
     ap.add_argument("--only", default=None,
-                    help="alleen deze site (ponsenkaart|instructieregels|RoM|…)")
+                    help="alleen deze site "
+                         "(ponsenkaart|instructieregels|annotatieconformiteit)")
     ap.add_argument("--db-source", choices=["local", "prod"], default="local",
                     help="databron voor de gebakken builds (default local = vers na sync)")
     ap.add_argument("--prod-mode", choices=["none", "delta", "restore"], default="none",

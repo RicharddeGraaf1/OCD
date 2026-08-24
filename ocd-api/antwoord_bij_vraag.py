@@ -170,6 +170,7 @@ def _hit_models(rows: list[dict]) -> list[RegeltekstHit]:
             artikel_nummer=r.get("artikel_nummer"),
             artikel_opschrift=r.get("artikel_opschrift"),
             hoofdstuk_nummer=r.get("hoofdstuk_nummer"),
+            lid_nummer=r.get("lid_nummer"),
             join_pad=r["join_pad"],
         )
         for r in rows
