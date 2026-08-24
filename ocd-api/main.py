@@ -4577,6 +4577,79 @@ def viewer_gio(expression: str):
     }
 
 
+@app.get("/v1/viewer/regeling/{expression:path}/voorkomens", dependencies=[Depends(verify_key)])
+def viewer_voorkomens(expression: str):
+    """Sinds wanneer de getoonde versie in werking is, plus de eerdere versies.
+
+    Bron is `p2p.regeling_voorkomen` (Presenteren v8 /voorkomens, kennis-van-
+    nu): per frbr_work alle versies met hun geldigheidsinterval. De work wordt
+    via `p2p.regeling` gevonden; valt terug op de voorkomens-tabel zelf voor
+    een expressie die daar wel in staat maar (nog) niet in p2p.regeling.
+
+    Geldigheid == inwerkingtreding — over de hele landelijke dataset gemeten
+    zonder uitzondering, en de loader faalt hard zodra dat verandert (zie
+    dso-loader/scripts/2026-08-24-add-regeling-voorkomen.sql). Vandaar dat
+    dit endpoint het veld `in_werking_sinds` noemt zoals de gebruiker het
+    leest, terwijl de kolom `begin_geldigheid` heet.
+
+    Status per versie, afgeleid op de peildatum van vandaag:
+      geldend      — nu van kracht
+      verlopen     — opgevolgd door een latere versie
+      aangekondigd — al geregistreerd, wordt pas later van kracht
+    Een regeling zonder geldende versie wier laatste versie al is
+    afgelopen is ingetrokken: `ingetrokken_per` draagt dan die datum.
+    """
+    from datetime import date
+
+    expr = expression if expression.startswith("/") else "/" + expression
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT frbr_expression, begin_geldigheid, eind_geldigheid
+            FROM p2p.regeling_voorkomen
+            WHERE frbr_work = COALESCE(
+                (SELECT frbr_work FROM p2p.regeling WHERE frbr_expression = %s),
+                (SELECT frbr_work FROM p2p.regeling_voorkomen WHERE frbr_expression = %s))
+            ORDER BY begin_geldigheid DESC
+            """,
+            (expr, expr),
+        )
+        rijen = cur.fetchall()
+
+    vandaag = date.today()
+    versies = []
+    for r in rijen:
+        begin, eind = r["begin_geldigheid"], r["eind_geldigheid"]
+        if begin > vandaag:
+            status = "aangekondigd"
+        elif eind is not None and eind <= vandaag:
+            status = "verlopen"
+        else:
+            status = "geldend"
+        versies.append({
+            "expression": r["frbr_expression"],
+            "begin": begin.isoformat(),
+            "eind": eind.isoformat() if eind else None,
+            "status": status,
+            "getoond": r["frbr_expression"] == expr,
+        })
+
+    geldend = next((v for v in versies if v["status"] == "geldend"), None)
+    ingetrokken_per = None
+    if versies and geldend is None:
+        laatste = versies[0]
+        if laatste["status"] == "verlopen":
+            ingetrokken_per = laatste["eind"]
+
+    return {
+        "frbr_expression": expr,
+        "in_werking_sinds": geldend["begin"] if geldend else None,
+        "ingetrokken_per": ingetrokken_per,
+        "versies": versies,
+    }
+
+
 @app.get("/v1/viewer/regeling/{expression:path}/onderwerpen", dependencies=[Depends(verify_key)])
 def viewer_onderwerpen(expression: str):
     """Waar gaat dit document over, en wat voor bepalingen staan erin.

@@ -871,3 +871,47 @@ class TestWijzigingCategorie:
         for key in ("regelingWork", "regelingOpschrift", "wijzigingen",
                     "verouderdVerborgen", "artikelTitels"):
             assert key in data, f"Bestaand veld {key} verdwenen"
+
+
+# ── Versiehistorie (/voorkomens) ──────────────────────────────────────────
+
+
+def _voorkomens_url(expr: str) -> str:
+    return f"/v1/viewer/regeling/{_q(expr, safe='')}/voorkomens"
+
+
+class TestVoorkomens:
+    """`p2p.regeling_voorkomen` is landelijk gevuld (3.305 voorkomens over
+    1.994 works, 2026-08-24); elke vigerende regeling heeft dus minstens
+    zichzelf als geldende versie."""
+
+    def test_vigerende_regeling_heeft_geldende_versie(self):
+        r = client.get(_voorkomens_url(GM0394_EXPR))
+        assert r.status_code == 200
+        data = r.json()
+        assert data["in_werking_sinds"], "geen geldende versie voor een vigerende regeling"
+        assert data["ingetrokken_per"] is None
+        geldend = [v for v in data["versies"] if v["status"] == "geldend"]
+        assert len(geldend) == 1
+        assert geldend[0]["begin"] == data["in_werking_sinds"]
+
+    def test_getoonde_expressie_is_gemarkeerd(self):
+        data = client.get(_voorkomens_url(GM0394_EXPR)).json()
+        getoond = [v for v in data["versies"] if v["getoond"]]
+        assert len(getoond) == 1
+        assert getoond[0]["expression"] == GM0394_EXPR
+
+    def test_versies_nieuwste_eerst_en_aaneensluitend(self):
+        vs = client.get(_voorkomens_url(GM0394_EXPR)).json()["versies"]
+        for v in vs:
+            assert v["status"] in ("geldend", "verlopen", "aangekondigd")
+        for nieuwer, ouder in zip(vs, vs[1:]):
+            assert nieuwer["begin"] > ouder["begin"]
+            # De einddatum van de oudere is de begindatum van de nieuwere:
+            # de voorkomens-tabel is landelijk zonder naden geladen.
+            assert ouder["eind"] == nieuwer["begin"]
+
+    def test_onbekende_expressie_geeft_lege_lijst(self):
+        data = client.get(_voorkomens_url("/akn/nl/act/gm0000/2020/bestaatniet/nld@1-0")).json()
+        assert data["versies"] == []
+        assert data["in_werking_sinds"] is None
