@@ -3741,7 +3741,16 @@ _REGELMIX_BASE_VIA_REGEL = """
                         te.id AS te_id, te.wid AS wid, te.opschrift AS artikel,
                         a.naam AS activiteit_naam, a.identificatie AS activiteit_id
                     FROM p2p.activiteit_locatieaanduiding ala
-                    JOIN p2p.activiteit a        ON a.identificatie = ala.activiteit_id
+                    -- LEFT, niet INNER: 45.905 van de 392.176 activiteit-
+                    -- locatieaanduidingen heeft geen activiteit, en dat hoort zo.
+                    -- Het zijn regels voor iedereen (40.905), instructieregels
+                    -- (4.772) en omgevingswaarderegels (228) - regeltypen die per
+                    -- definitie niet aan een activiteit hangen. Met een INNER JOIN
+                    -- vielen die uit het detail terwijl het overzicht ze wel telde:
+                    -- op het Amsterdamse omgevingsplan 1.346 tegen 1.395.
+                    -- (Geen procentteken in dit commentaar: psycopg leest dat als
+                    -- placeholder.)
+                    LEFT JOIN p2p.activiteit a   ON a.identificatie = ala.activiteit_id
                     JOIN p2p.locatie_subdiv ls   ON ls.identificatie = ala.locatie_id
                     JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
                     JOIN p2p.tekst_element te     ON te.wid = jr.regeltekst_wid
