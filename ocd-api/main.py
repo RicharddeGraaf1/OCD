@@ -3567,49 +3567,6 @@ _LAAG_ORDER = {'gemeente': 0, 'provincie': 1, 'waterschap': 2, 'rijk': 3}
 
 
 # Onderwerp x soort bepaling over álle regels op één punt, per document.
-# Voedt de filterstrook op de documentenlijst: die moet kunnen tellen vóórdat
-# een document is uitgeklapt, en de rijen zelf komen pas lui binnen.
-#
-# De walk klimt van elke regel naar zijn Artikel-voorouder — de indeling zit op
-# artikel-niveau, de regelmix hangt meestal op lid-niveau. Gemeten op RD
-# 111740,476359 (Aalsmeer): 11.764 regels over 12 documenten, 451 combinaties,
-# 0,6 s. Alleen het ALA-pad: vrijetekst-instrumenten (visies, programma's)
-# hebben geen artikelen en dus per definitie geen indeling.
-_REGELMIX_ONDERWERPEN_SQL = """
-    WITH RECURSIVE base AS (
-        SELECT DISTINCT te.id AS te_id, te.regeling_expression AS expr
-        FROM p2p.activiteit_locatieaanduiding ala
-        JOIN p2p.locatie_subdiv ls   ON ls.identificatie = ala.locatie_id
-        JOIN p2p.juridische_regel jr ON jr.identificatie = ala.juridische_regel_id
-        JOIN p2p.tekst_element te    ON te.wid = jr.regeltekst_wid
-             AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
-        JOIN p2p.regeling r          ON r.frbr_expression = te.regeling_expression
-        WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
-          AND NOT r.inactief
-          AND te.inhoud IS NOT NULL AND length(te.inhoud) > 20
-    ),
-    walk AS (
-        SELECT b.te_id AS origin, t.parent_id, b.expr,
-               CASE WHEN t.element_type = 'Artikel' THEN t.wid END AS art_wid
-        FROM base b JOIN p2p.tekst_element t ON t.id = b.te_id
-        UNION ALL
-        SELECT w.origin, p.parent_id, w.expr,
-               COALESCE(w.art_wid, CASE WHEN p.element_type = 'Artikel' THEN p.wid END)
-        FROM walk w JOIN p2p.tekst_element p ON p.id = w.parent_id
-        WHERE w.art_wid IS NULL
-    ),
-    resolved AS (
-        SELECT origin, expr, max(art_wid) AS art_wid FROM walk GROUP BY origin, expr
-    )
-    SELECT rs.expr AS bron_id, ai.categorie, ai.subcategorie, ai.type_bepaling,
-           count(*) AS n_regels
-    FROM resolved rs
-    LEFT JOIN v2a.artikel_indeling ai
-           ON ai.regeling_expression = rs.expr AND ai.wid = rs.art_wid
-    GROUP BY 1, 2, 3, 4
-"""
-
-
 @app.get("/v1/viewer/regelmix", dependencies=[Depends(verify_key)])
 def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
     """Regelmix-overzicht: welke documenten gelden op een RD-punt, met per
@@ -3709,10 +3666,6 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
         )
         wro_docs = [dict(d, bron_type='wro') for d in cur.fetchall()]
 
-        # Onderwerp x soort bepaling per document, voor de filterstrook.
-        cur.execute(_REGELMIX_ONDERWERPEN_SQL, {"x": x, "y": y})
-        onderwerpen = cur.fetchall()
-
     documenten = ow_docs + wro_docs
     # Beleid onderaan: eerst wat hier regels stelt, dan wat hier beleid is.
     documenten.sort(key=lambda d: (
@@ -3720,13 +3673,9 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
         _LAAG_ORDER.get(d['bestuurslaag'] or '', 4),
         d['regeling'] or '',
     ))
-    # `onderwerpen` dekt alleen de documenten waar een indeling van bestaat.
-    # Wat er niet in staat — Wro-plannen, visies, programma's — valt buiten het
-    # filter, en de frontend hoort dat te tonen in plaats van weg te laten.
     return {
         "locatie": {"x": x, "y": y},
         "documenten": documenten,
-        "onderwerpen": onderwerpen,
     }
 
 
@@ -3783,11 +3732,6 @@ _REGELMIX_KOPPEN_TAIL = """,
                 walk AS (
                     SELECT b.te_id AS origin, t.id, t.parent_id, 0 AS diepte,
                         CASE WHEN t.element_type = 'Artikel'   THEN t.nummer   END AS art_nr,
-                        -- De wid van de Artikel-voorouder is de sleutel naar
-                        -- v2a.artikel_indeling: de indeling zit op artikel-niveau,
-                        -- de regelmix hangt meestal op lid-niveau. Leden erven,
-                        -- net als in de leestekst.
-                        CASE WHEN t.element_type = 'Artikel'   THEN t.wid      END AS art_wid,
                         CASE WHEN t.element_type = 'Artikel'   THEN t.opschrift END AS art_op,
                         CASE WHEN t.element_type = 'Hoofdstuk' THEN t.nummer   END AS hfd_nr,
                         -- Lid-nummer staat in de bron als "1." — de punt eraf,
@@ -3799,7 +3743,6 @@ _REGELMIX_KOPPEN_TAIL = """,
                     UNION ALL
                     SELECT w.origin, p.id, p.parent_id, w.diepte + 1,
                         COALESCE(w.art_nr, CASE WHEN p.element_type = 'Artikel'   THEN p.nummer   END),
-                        COALESCE(w.art_wid, CASE WHEN p.element_type = 'Artikel'  THEN p.wid      END),
                         COALESCE(w.art_op, CASE WHEN p.element_type = 'Artikel'   THEN p.opschrift END),
                         COALESCE(w.hfd_nr, CASE WHEN p.element_type = 'Hoofdstuk' THEN p.nummer   END),
                         COALESCE(w.lid_nr, CASE WHEN p.element_type = 'Lid'       THEN rtrim(p.nummer, '.') END),
@@ -3811,7 +3754,6 @@ _REGELMIX_KOPPEN_TAIL = """,
                 resolved AS (
                     SELECT origin,
                            max(art_nr) AS artikel_nummer,
-                           max(art_wid) AS artikel_wid,
                            max(art_op) AS artikel_opschrift,
                            max(hfd_nr) AS hoofdstuk_nummer,
                            max(lid_nr) AS lid_nummer,
@@ -3836,15 +3778,9 @@ _REGELMIX_KOPPEN_TAIL = """,
                     b.wid             AS wid,
                     NULL              AS inhoud,
                     rs.artikel_nummer, rs.artikel_opschrift, rs.hoofdstuk_nummer,
-                    rs.lid_nummer,
-                    -- Onderwerp x soort bepaling van het artikel waar deze regel
-                    -- onder hangt. NULL = niet ingedeeld, en dat is een uitkomst:
-                    -- de viewer toont het als eigen keuze in plaats van te raden.
-                    ai.categorie, ai.subcategorie, ai.type_bepaling
+                    rs.lid_nummer
                 FROM base b
                 JOIN resolved rs ON rs.origin = b.te_id
-                LEFT JOIN v2a.artikel_indeling ai
-                       ON ai.regeling_expression = %(bron)s AND ai.wid = rs.artikel_wid
                 ORDER BY b.wid
                 """
 
@@ -3881,14 +3817,7 @@ def viewer_regelmix_document(
                     wt.nummer         AS artikel_nummer,
                     COALESCE(wt.label, wt.naam) AS artikel_opschrift,
                     NULL              AS hoofdstuk_nummer,
-                    NULL              AS lid_nummer,
-                    -- Wro-plannen staan in het wro-schema en hebben deze indeling
-                    -- niet. Dezelfde kolommen, altijd leeg — zodat de frontend
-                    -- geen tweede vorm hoeft te kennen en zelf kan zien dat dit
-                    -- document buiten het filter valt.
-                    NULL              AS categorie,
-                    NULL              AS subcategorie,
-                    NULL              AS type_bepaling
+                    NULL              AS lid_nummer
                 FROM wro.ruimtelijk_instrument ri
                 JOIN wro.wro_tekst_object wt ON wt.instrument_idn = ri.idn
                 WHERE ri.idn = %(bron)s
