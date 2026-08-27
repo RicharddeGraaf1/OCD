@@ -66,13 +66,14 @@ data draait; prod achterlaten betekent dat de sites stale zijn.
 6b. DOORWERKING     instructieregels.nl-meting       uren, lokale GPU
 6bis. HERTALING     begrijpelijke varianten (Sonnet)  ~1 u per 2.600 teksten
 6c. ONDERWERP-AS    toewijzingen lokaal → prod       ~1 min
+6d. MER-REGISTER    harvest + load lokaal én prod    ~5 min
 7. VERIFICATIE      beide DB's + API                 ~5 min
 8. DOWNSTREAM       gebakken sites herbouwen         ~15 min
 9. NAZORG           proxy dicht, VACUUM, loggen,
                     code van de run committen op main ~15 min
 ```
 
-Stappen 0–4 en 7–9 horen bij elke sync. Stap 1b en 5 zijn afwegingen. **Stap 6 draait
+Stappen 0–4, 6d en 7–9 horen bij elke sync. Stap 1b en 5 zijn afwegingen. **Stap 6 draait
 standaard mee** — `full_sync.py` slaat hem alleen over met `--skip-embed`, of
 stil wanneer Ollama niet bereikbaar is. Stap 6b hangt aan 6: hij zoekt in de
 vectorindex, dus zonder embeddings meet hij tegen een index die de nieuwe
@@ -912,6 +913,67 @@ gelijk.
 > `p2pwijziging`, en die wordt door stap 1b gevuld — draai je hem ervóór (zoals
 > `full_sync.py` doet), dan mist hij de ontwerpen van deze sync.
 
+### Stap 6d — MER-register
+
+De MER-data is de enige bron in dit runbook die **niet uit het DSO komt**: KOOP
+SRU (MER-events) en een scrape van commissiemer.nl (projecten + PDF's). Ze leeft
+in een aparte repo, `C:/GIT/MER-register.nl`, met een eigen SQLite-harvestlaag.
+
+Deze stap stond hier lang niet in, en de cadans-tabel noemde MER "los, seconden,
+aparte harvester-repo". Dat klopte alleen voor `load-mer` — het kopiëren van de
+SQLite naar Postgres. De **harvest** zelf en de **site** hingen aan niets. Gemeten
+op 27-08-2026: de nieuwste KOOP-publicatie in de store was van **2 juli**, de
+gebakken `web/mer-data.js` van **21 juli**, en mer-register.nl toonde vijf weken
+lang dezelfde 3.499 trajecten zonder dat er iets faalde.
+
+**De keten, en waarom de volgorde vastligt**
+
+```
+KOOP SRU ─┐
+          ├─► harvest/data/mer.db ─┬─► load-mer ──────────► lokale OCD (schema mer)
+Commissie ┘   (SQLite, gitignored) ├─► load_to_ocd.py ────► prod (schema mer) ─► /v1/mer/*
+                                   └─► export_mer_data.py ─► web/mer-data.js ──► Pages
+```
+
+`build_regeling_links.py` en de twee verrijkers lezen **prod**, niet de SQLite:
+de regeling-koppeling zit in `mer.project_regeling` en de canonieke bevoegd-gezag-
+naam in `core.bronhouder`. Daarom hoort deze stap **ná stap 3/4** (p2p en vth op
+prod) en **vóór stap 9** (die zet de TCP-proxy weer dicht).
+
+```bash
+cd C:/GIT/MER-register.nl
+python harvest/stand.py                     # loopt de harvest achter? (exit 1 = ja)
+
+python harvest/load_events.py               # kanaal A, KOOP SRU — ~46 requests, ~40 s
+python harvest/load_commissie.py            # kanaal B — resumable, slaat bekende projecten over
+python harvest/build_links.py               # A ↔ B → project_event_link
+
+cd C:/GIT/OCD/dso-loader
+python -m src.cli load-mer                  # SQLite → LOKALE OCD, schema mer (seconden)
+
+cd C:/GIT/MER-register.nl
+export MER_PROD_URL="$OCD_PROD_URL"         # Railway-TCP-proxy moet open staan
+python harvest/load_to_ocd.py               # SQLite → PROD, schema mer (idempotente upsert)
+python harvest/build_regeling_links.py      # → prod mer.project_regeling (zacht, met zekerheid)
+```
+
+> ⚠️ **`load-mer` schrijft lokaal, niet naar prod.** Er is geen replicatiescript
+> voor `mer.*` — `repliceer_p2p_naar_prod.py` doet alleen `p2p`. Prod wordt
+> gevuld door `load_to_ocd.py` rechtstreeks over de proxy. Sla je die regel over,
+> dan is de lokale DB vers en `/v1/mer/*` niet, zonder foutmelding.
+
+De harvest is **stdlib-only** en beleefd (429-adaptief: remt af en stopt netjes).
+`load_events.py` kent `--since YYYY-MM-DD`, maar een volledige run kost ~40 s en
+upsert op `koop_id`, dus een watermerk bijhouden levert hier niets op.
+
+**Let op de store.** `harvest/data/mer.db` is gitignored en bestaat alleen op deze
+machine. Raakt hij kwijt, dan scrapet `load_commissie.py` 3.617 projectpagina's
+opnieuw — reken op ~1 uur, niet op seconden.
+
+Het bakken en deployen van de site zit **niet** in deze stap maar in stap 8:
+`publish.py` doet de export, de twee verrijkers en `./deploy.sh`, met
+`harvest/stand.py` als poort ervoor.
+
 ### Stap 7 — Verificatie
 
 ```bash
@@ -975,6 +1037,7 @@ noemde:
 | ponsenkaart | live | **niets** — leest runtime `/v1/ponsenkaart/*` en `/v1/planvoorraad/*`, dus vers zodra prod vers is. `deploy.sh` alleen bij een code-wijziging |
 | instructieregels | baked | `build/build.sh` → `wrangler pages deploy web`, mét pre-flight (zie onder) |
 | annotatieconformiteit | baked | `collect --structuur --rtr` → `score` → `export -f json` → `npm run deploy` |
+| mer-register | baked | `export_mer_data.py` → `add_regeling_to_merdata.py` → `add_bg_uniform_to_merdata.py` → `./deploy.sh`, mét pre-flight `harvest/stand.py` |
 
 **RoM staat er niet in** — buiten scope sinds 2026-07-24. Het staat nog wél in de
 docstring van `publish.py` en in de `--only`-hulptekst; die zijn achterhaald, de
@@ -1001,6 +1064,18 @@ Vóór instructieregels bouwt draait `publish.py` een pre-flight op de
 doorwerkingsmeting (`match/stand.py`, stap 6b). Staat die op ACHTER, dan wordt
 de site **overgeslagen** in plaats van met verouderde oordelen gepubliceerd, en
 eindigt `publish.py` met exitcode 1.
+
+Mer-register heeft dezelfde constructie met een andere pijplijn eronder:
+`harvest/stand.py` weigert te publiceren als de harvest-store achterloopt op de
+bron (default: nieuwste KOOP-publicatie ouder dan 14 dagen) — draai dan eerst
+stap 6d. Dat de gebakken export ouder is dan de store meldt hij wél, maar dat
+blokkeert niet: de build-fase regenereert die export juist. De harvest kan
+`publish.py` niet doen — die haalt externe bronnen op en hoort in de data-fase.
+
+> **`mer-register` wordt een `live`-site zodra de Pages-Function-proxy er is.**
+> De frontend leest nu `mer-data.js`; met een same-origin `/api/*`-proxy naar
+> `/v1/mer/*` vervalt de hele build- en deploy-fase hier en volgt de site prod
+> vanzelf, net als ponsenkaart. Alleen stap 6d blijft dan nodig.
 
 Overrulen kan met `--force-preflight` — bewust een **andere** vlag dan
 `--force`. Als één vlag beide poorten dekte, zou iedereen die langs een rode
@@ -1325,7 +1400,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 | Doorwerkingsmeting (stap 6b) | na elke sync die omgevingsplannen of instructieregels raakte | lokaal, ná stap 6; `match/stand.py` zegt of het moet |
 | `diff_dso_bronhouder_coverage.py` | maandelijks | zwaardere coverage-diff naast de preview |
 | Wro/IMRO2006 (`load-wro-imro2006`) | los, ~24 min | landelijke PDOK-herparse, niet in de sync |
-| MER (`load-mer`) | los, seconden | aparte harvester-repo |
+| MER-register (stap 6d) | elke sync | harvest (~5 min incrementeel) + `load-mer` lokaal + `load_to_ocd.py` naar prod; site via `publish.py`. Stond hier als "los, seconden" — dat gold alleen voor `load-mer`, waardoor de harvest en de site vijf weken stilstonden |
 | `core.gemeentegrens` | 1×/jaar | gemeente-herindelingen |
 | Prune verouderde versies | op indicatie | dry-run eerst |
 | Wijzigingsspoor opruimen (stap 10) | maandelijks, of als `p2pwijziging` hard groeit | `ruim_wijzigingsspoor_op.py`; droogloop eerst, vangnet daarna opruimen |

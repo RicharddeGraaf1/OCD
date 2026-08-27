@@ -20,6 +20,8 @@ TWEE SPOREN
            * instructieregels.nl    (build/build.sh → web/data.js → Cloudflare)
            * annotatieconformiteit  (C:/GIT/annotatieconformiteit.nl, ex-odkwaliteit:
                                      collect → score → export → npm run deploy)
+           * mer-register.nl        (C:/GIT/MER-register.nl: export uit de harvest-
+                                     store + twee prod-verrijkers → ./deploy.sh)
 
   RoM-prototype staat hier NIET bij: buiten scope sinds 2026-07-24.
   De registry in sites() is de waarheid — niet deze docstring.
@@ -63,6 +65,7 @@ GIT_ROOT = Path(os.environ.get("GIT_ROOT", r"C:/GIT"))
 PONSENKAART = GIT_ROOT / "ponsenkaart.nl"
 INSTRUCTIEREGELS = GIT_ROOT / "instructieregels.nl"
 ANNOTATIECONFORMITEIT = GIT_ROOT / "annotatieconformiteit.nl"
+MER_REGISTER = GIT_ROOT / "MER-register.nl"
 
 # Prod-Postgres-connectstring (Railway TCP-proxy). Nooit hardcoden — via env.
 PROD_URL = os.environ.get("OCD_PROD_URL")  # bv. postgresql://postgres:PW@host:port/railway
@@ -86,6 +89,9 @@ class Site:
     notitie: str = ""
     actief: bool = True             # False = bekend maar nog niet ingevuld
     preflight: "Stap | None" = None  # moet exit 0 geven, anders wordt de site overgeslagen
+    # Wat er in het resultaat komt te staan als de pre-flight exit 1 geeft. Per
+    # site anders: elke poort bewaakt een andere pijplijn en een andere stap.
+    preflight_reden: str = "de bijbehorende pijplijn loopt achter op de data"
 
 
 def _git_bash() -> str:
@@ -128,6 +134,18 @@ def sites(db_source: str) -> list[Site]:
     if db_source == "prod" and PROD_URL:
         ak_env["ODK_OCD_DB_URL"] = PROD_URL
 
+    # mer-register: de twee verrijkers lezen ALTIJD prod, ook bij db_source=local.
+    # `mer.project_regeling` wordt in runbook stap 6d tegen prod gebouwd en
+    # `core.bronhouder` is daar geresolveerd; een lokale variant bestaat niet.
+    # Vereist een open Railway-TCP-proxy (runbook stap 9 zet hem weer dicht).
+    mer_env: dict[str, str] = {"PYTHONUTF8": "1"}
+    if PROD_URL:
+        mer_env["MER_PROD_URL"] = PROD_URL
+    else:
+        print("  ! mer-register: OCD_PROD_URL niet gezet — de verrijkers "
+              "(onderliggendeRegelingen, bevoegdGezagUniform) vallen om",
+              file=sys.stderr)
+
     return [
         Site(
             naam="ponsenkaart",
@@ -163,6 +181,7 @@ def sites(db_source: str) -> list[Site]:
                 env={"PYTHONUTF8": "1"},
                 beschrijving="doorwerkingsmeting bij de data? (exit 0 = ja)",
             ),
+            preflight_reden="doorwerkingsmeting loopt achter op de data (runbook stap 6b)",
             notitie="Vereist CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in de "
                     "omgeving. Alternatief: `gh workflow run deploy.yml` (bouwt "
                     "echter uit Railway-prod via secrets.PSQL_CONN).",
@@ -194,6 +213,55 @@ def sites(db_source: str) -> list[Site]:
             notitie="Leest OCD-Postgres via ODK_OCD_DB_URL (.env). Eigen SQLite + "
                     "scoring; deploy niet git-gekoppeld (alleen via npm run deploy). "
                     "`odkwaliteit` vereist `pip install -e .`; web `npm install`.",
+        ),
+        Site(
+            naam="mer-register",
+            soort="baked",
+            build=[
+                Stap(
+                    [sys.executable, "harvest/export_mer_data.py"],
+                    cwd=MER_REGISTER, env={"PYTHONUTF8": "1"},
+                    beschrijving="harvest-store (SQLite) → web/mer-data.js",
+                ),
+                # De twee verrijkers schrijven IN mer-data.js en lezen PROD, niet de
+                # SQLite: de regeling-koppeling zit in mer.project_regeling en de
+                # canonieke BG-naam in core.bronhouder. Volgorde is dwingend —
+                # export eerst, anders overschrijft hij hun velden weer.
+                Stap(
+                    [sys.executable, "harvest/add_regeling_to_merdata.py"],
+                    cwd=MER_REGISTER, env=mer_env,
+                    beschrijving="verrijk met onderliggendeRegelingen (uit prod "
+                                 "mer.project_regeling)",
+                ),
+                Stap(
+                    [sys.executable, "harvest/add_bg_uniform_to_merdata.py"],
+                    cwd=MER_REGISTER, env=mer_env,
+                    beschrijving="verrijk met bevoegdGezagUniform (uit prod "
+                                 "core.bronhouder)",
+                ),
+            ],
+            deploy=[Stap(
+                _bash("deploy.sh"),
+                cwd=MER_REGISTER,
+                beschrijving="./deploy.sh → schone staging-map → Cloudflare Pages "
+                             "(project mer-register)",
+            )],
+            # De harvest (KOOP SRU + 3.617 Commissie-pagina's) draait NIET hier maar
+            # in runbook stap 6d. Zonder deze poort bakt publish.py de site na een
+            # sync gewoon opnieuw uit een harvest-store van weken oud — zonder één
+            # foutmelding, want de store is gevuld, alleen niet meer actueel.
+            # Precies dat gebeurde tussen 21-07 en 27-08-2026.
+            preflight=Stap(
+                [sys.executable, "harvest/stand.py"],
+                cwd=MER_REGISTER, env={"PYTHONUTF8": "1"},
+                beschrijving="harvest-store bij de bron? (exit 0 = ja)",
+            ),
+            preflight_reden="harvest-store loopt achter op de bron (runbook stap 6d)",
+            notitie="Nog gebakken: de frontend leest mer-data.js, niet /v1/mer/*. "
+                    "Zodra de Pages-Function-proxy er is (deelplan E) wordt dit een "
+                    "'live'-site zoals ponsenkaart en vervallen build+deploy hier. "
+                    "deploy.sh haalt CLOUDFLARE_API_TOKEN zelf uit de .env van de repo; "
+                    "de verrijkers hebben MER_PROD_URL nodig (Railway-TCP-proxy open).",
         ),
     ]
 
@@ -246,7 +314,7 @@ def run_preflight(site: Site, force: bool) -> str | None:
     if r.returncode == 0:
         return None
     reden = ((r.stderr or "").strip().splitlines() or ["pre-flight faalde"])[-1] \
-        if r.returncode == 2 else "meting loopt achter op de data (runbook stap 6b)"
+        if r.returncode == 2 else site.preflight_reden
     if force:
         print(f"    ! {reden} — genegeerd (--force)")
         return None

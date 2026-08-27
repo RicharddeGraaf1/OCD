@@ -356,7 +356,10 @@ zit een reguliere incrementele sync ruim onder het uur, gedomineerd door vth.
 
 - **Wro / IMRO2006**: landelijke PDOK-herparse (16 GB `planobject`), eigen
   operatie (`load-wro-imro2006`, ~24 min voor 2141 plannen).
-- **MER-register**: aparte harvester-repo; inladen via `load-mer` (~seconden).
+- **MER-register**: zit sinds 27-08-2026 WEL in de sync, als stap 6d. Het stond
+  hier als buitenboord-taak omdat alleen `load-mer` (~seconden) in beeld was; de
+  harvest in de eigen repo en de gebakken site hingen daardoor aan niets en
+  stonden vijf weken stil. Zie runbook stap 6d.
 
 ---
 

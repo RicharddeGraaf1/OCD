@@ -206,8 +206,9 @@ flowchart TB
     U2["<b>verdrongen markeren</b> (stap 2)<br/>markeer_verouderde_expressies.py"]
     U3["<b>alles richting prod</b> (stap 3–5, 6c)<br/>replicatie · KOOP-push · categorieën"]
     U4["<b>doorwerkingsmeting</b> (stap 6b)<br/>instructieregels.nl · eigen repo · lokale GPU"]
+    U4b["<b>MER-register</b> (stap 6d)<br/>harvest eigen repo · load-mer lokaal · load_to_ocd.py prod"]
     U5["<b>gebakken sites</b> (stap 8)<br/>publish.py"]
-    U6["<b>Wro/IMRO2006</b> — load-wro-imow, ~24 min<br/><b>MER</b> — load-mer, seconden<br/><i>bewust buiten de sync</i>"]
+    U6["<b>Wro/IMRO2006</b> — load-wro-imow, ~24 min<br/><i>bewust buiten de sync</i>"]
   end
 
   IN -.->|"de sync eindigt hier — de rest is handwerk"| UIT
@@ -215,7 +216,7 @@ flowchart TB
   classDef in fill:#eef7ee,stroke:#5a8a5a,color:#1a2a1a
   classDef uit fill:#fdecea,stroke:#b04a3a,color:#3a1a1a
   class F0,F1,F2,F3,F4,F5,F6,F7 in
-  class U1,U2,U3,U4,U5,U6 uit
+  class U1,U2,U3,U4,U4b,U5,U6 uit
 ```
 
 **Vlaggen van `full_sync.py`:**
