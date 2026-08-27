@@ -915,3 +915,34 @@ class TestVoorkomens:
         data = client.get(_voorkomens_url("/akn/nl/act/gm0000/2020/bestaatniet/nld@1-0")).json()
         assert data["versies"] == []
         assert data["in_werking_sinds"] is None
+
+
+# ══════════════════════════════════════════════════════════
+# Sleutels op de norm-objecten van /v1/viewer/objecten
+#
+# Ankerpunt: Hoogland, Amersfoort (RD 154799, 466865) — maximale bouwhoogte
+# 14 m op dit perceel.
+# ══════════════════════════════════════════════════════════
+
+HLD_X, HLD_Y = 154799, 466865
+
+
+class TestObjectenNormSleutels:
+    def test_omgevingsnorm_draagt_zijn_identificatie(self):
+        # Zonder deze sleutel kan de viewer een normwaarde alleen op naam aan
+        # zijn norm koppelen, en dat plakt gelijknamige normen uit
+        # verschillende regelingen aan elkaar.
+        d = client.get(f"/v1/viewer/objecten?x={HLD_X}&y={HLD_Y}").json()
+
+        assert d["omgevingsnormen"]
+        for n in d["omgevingsnormen"]:
+            assert n["identificatie"].startswith("nl.imow-")
+
+    def test_normwaarde_verwijst_naar_zijn_norm(self):
+        d = client.get(f"/v1/viewer/objecten?x={HLD_X}&y={HLD_Y}").json()
+
+        assert d["normwaarden"]
+        norm_ids = {n["identificatie"] for n in d["omgevingsnormen"]}
+        for w in d["normwaarden"]:
+            assert w["norm_id"] in norm_ids
+            assert "waarde_in_regeltekst" in w

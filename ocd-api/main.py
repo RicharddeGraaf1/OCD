@@ -4013,7 +4013,8 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
         # Omgevingsnormen — uniek per norm met regelingen-array
         cur.execute(
             f"""
-            SELECT n.naam,
+            SELECT n.identificatie,
+                   n.naam,
                    n.type_norm,
                    n.eenheid,
                    n.groep,
@@ -4038,8 +4039,10 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
         # Normwaarden (concrete waarden, geen dedup omdat de waarde zelf relevant is)
         cur.execute(
             f"""
-            SELECT n.naam, n.type_norm, n.eenheid,
+            SELECT n.identificatie AS norm_id,
+                   n.naam, n.type_norm, n.eenheid,
                    nw.kwantitatieve_waarde, nw.kwalitatieve_waarde,
+                   nw.waarde_in_regeltekst,
                    r.opschrift AS regeling,
                    ARRAY_AGG(DISTINCT nw.locatie_id) AS locatie_ids
             FROM p2p.normwaarde nw
@@ -4052,8 +4055,9 @@ def viewer_objecten(x: float = Query(...), y: float = Query(...)):
             JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
             WHERE ST_Intersects(ls.geometrie, {point})
               AND NOT r.inactief
-            GROUP BY n.naam, n.type_norm, n.eenheid,
-                     nw.kwantitatieve_waarde, nw.kwalitatieve_waarde, r.opschrift
+            GROUP BY n.identificatie, n.naam, n.type_norm, n.eenheid,
+                     nw.kwantitatieve_waarde, nw.kwalitatieve_waarde,
+                     nw.waarde_in_regeltekst, r.opschrift
             ORDER BY n.naam
             """,
             (x, y),
