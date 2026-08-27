@@ -4257,6 +4257,238 @@ def viewer_geometrie_post(req: GeometrieRequest = Body(...)):
     return _viewer_geometrie(ids)
 
 
+# ═════════════════════════════════════════════════════════════════════
+# Normwaarden van een omgevingsnorm - de "omgevingsmodus" van de viewer
+#
+# De viewer beantwoordt van huis uit "wat geldt hier": een normwaarde op een
+# punt. De vraag waarvoor je zo'n kaart opent is "is veertien hier veel of
+# weinig", en die kun je alleen beantwoorden met de buren erbij. Dit endpoint
+# levert die buren, begrensd door het kaartbeeld.
+#
+# Drie dingen zijn hier niet vrijblijvend:
+#
+# 1. HET KAARTBEELD BEGRENST, MAAR NIET ALTIJD. Op gemeenteschaal valt een
+#    norm met 3.223 waarden volledig binnen de bbox. Daarom telt dit endpoint
+#    altijd hoeveel er echt in de bbox liggen (`aantal_in_bbox`) en zegt het
+#    of het die lijst heeft afgekapt. Stille truncatie leest als een volledige
+#    kaart en daar worden vergunningen op gebaseerd.
+#
+# 2. DE KLASSEN KOMEN OVER DE HELE NORM, NIET OVER DE BBOX. Klassen die uit
+#    het kaartbeeld komen laten dezelfde percelen van kleur verschieten zodra
+#    je pant. `klassen` en `domein` gaan dus over alle normwaarden van deze
+#    norm; `waarden` gaat over de bbox.
+#
+# 3. KWANTIELEN, GEEN EQUAL INTERVAL. Gemeten op maximale bouwhoogte in
+#    Amersfoort (15 waarden, 3-55 m) zou equal interval 12 van de 15 in de
+#    laagste klasse duwen: de schaal zou dan bijna niets onderscheiden.
+# ═════════════════════════════════════════════════════════════════════
+
+NORM_KLASSEN = 7
+NORM_WAARDEN_CAP = 400
+
+
+def _norm_klassen(verdeling: list[dict]) -> list[dict]:
+    """Kwantiel-klassen over de volledige waardeverdeling van een norm.
+
+    `verdeling` is oplopend gesorteerd en telt per distincte waarde hoe vaak
+    hij voorkomt, zodat we niet duizenden losse getallen hoeven te
+    materialiseren.
+
+    Elke distincte waarde wordt aan precies een klasse toegewezen, op basis
+    van de rang waarop hij begint. Dat is bewust anders dan grenzen berekenen
+    en er waarden bij zoeken: dan valt een waarde die op een grens ligt in twee
+    klassen tegelijk, en dan liegt de legenda (twee rijen tellen hem allebei)
+    en kleurt de kaart hem naar de eerste die toevallig matcht.
+
+    Minder distincte waarden dan `NORM_KLASSEN` levert minder klassen op -
+    zeven klassen over drie waarden is een legenda die onderscheid suggereert
+    dat er niet is.
+    """
+    if not verdeling:
+        return []
+    totaal = sum(int(rij["aantal"]) for rij in verdeling)
+    if totaal == 0:
+        return []
+    k_aantal = min(NORM_KLASSEN, len(verdeling))
+
+    # Rang waarop elke distincte waarde begint, en daaruit zijn klasse.
+    emmers: dict[int, list[dict]] = {}
+    rang = 0
+    for rij in verdeling:
+        k = min(k_aantal - 1, rang * k_aantal // totaal)
+        emmers.setdefault(k, []).append(rij)
+        rang += int(rij["aantal"])
+
+    klassen: list[dict] = []
+    for k in sorted(emmers):
+        rijen = emmers[k]
+        klassen.append({
+            "k": len(klassen) + 1,
+            "lo": float(rijen[0]["waarde"]),
+            "hi": float(rijen[-1]["waarde"]),
+            "aantal": sum(int(r["aantal"]) for r in rijen),
+        })
+    return klassen
+
+
+def _parse_bbox(bbox: str | None) -> tuple[float, float, float, float] | None:
+    """'x0,y0,x1,y1' (RD) naar een genormaliseerde envelope, of None."""
+    if not bbox:
+        return None
+    delen = [d.strip() for d in bbox.split(",")]
+    if len(delen) != 4:
+        raise HTTPException(status_code=400, detail="bbox verwacht 4 getallen: x0,y0,x1,y1 (RD)")
+    try:
+        x0, y0, x1, y1 = (float(d) for d in delen)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox verwacht 4 getallen: x0,y0,x1,y1 (RD)")
+    return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+
+@app.get("/v1/viewer/norm/{norm_id}/waarden", dependencies=[Depends(verify_key)])
+def viewer_norm_waarden(
+    norm_id: str,
+    bbox: str | None = Query(
+        None,
+        description="RD-extent 'x0,y0,x1,y1' (EPSG:28992). Weglaten = alle normwaarden van deze norm.",
+    ),
+    limit: int = Query(NORM_WAARDEN_CAP, le=2000, description="Max normwaarden in de respons"),
+):
+    """Alle normwaarden van een omgevingsnorm, optioneel begrensd tot een extent.
+
+    Geometrie zit er bewust niet in: de bestaande `POST /v1/viewer/geometrie`
+    haalt die op de `locatie_id`s op, precies zoals het objecten-paneel al doet.
+    Dat scheelt een tweede geometrie-pad en houdt de payload klein.
+    """
+    env = _parse_bbox(bbox)
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT identificatie, naam, type_norm, eenheid, groep
+            FROM   p2p.norm
+            WHERE  identificatie = %s
+            """,
+            (norm_id,),
+        )
+        norm = cur.fetchone()
+        if not norm:
+            raise HTTPException(status_code=404, detail=f"Onbekende omgevingsnorm: {norm_id}")
+
+        # Verdeling over de HELE norm - voedt zowel de klassen als de
+        # verdelingsstrip in de viewer. Distinct met telling in plaats van een
+        # lijst losse waarden: de grootste norm heeft 3.223 waarden maar veel
+        # minder distincte getallen.
+        cur.execute(
+            """
+            SELECT kwantitatieve_waarde AS waarde, COUNT(*) AS aantal
+            FROM   p2p.normwaarde
+            WHERE  norm_id = %s AND kwantitatieve_waarde IS NOT NULL
+            GROUP  BY kwantitatieve_waarde
+            ORDER  BY kwantitatieve_waarde
+            """,
+            (norm_id,),
+        )
+        verdeling = [
+            {"waarde": float(r["waarde"]), "aantal": int(r["aantal"])}
+            for r in cur.fetchall()
+        ]
+
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM p2p.normwaarde WHERE norm_id = %s",
+            (norm_id,),
+        )
+        totaal = int(cur.fetchone()["n"])
+
+        # Artikelen waarin deze norm gebruikt wordt. Meervoud: een norm kan aan
+        # meer dan een juridische regel hangen.
+        cur.execute(
+            """
+            SELECT DISTINCT ocd_artikel_label(te.opschrift, te.wid) AS artikel,
+                            te.wid                                  AS wid,
+                            r.opschrift                             AS regeling,
+                            r.frbr_expression
+            FROM   p2p.juridische_regel_norm jrn
+            JOIN   p2p.juridische_regel      jr ON jr.identificatie = jrn.juridische_regel_id
+            JOIN   p2p.tekst_element         te ON te.wid = jr.regeltekst_wid
+                        AND (te.regeling_expression = jr.regeling_expression
+                             OR jr.regeling_expression IS NULL)
+            JOIN   p2p.regeling              r  ON r.frbr_expression = te.regeling_expression
+            WHERE  jrn.norm_id = %s AND NOT r.inactief
+            ORDER  BY artikel
+            """,
+            (norm_id,),
+        )
+        artikelen = [dict(r) for r in cur.fetchall()]
+
+        # Waarden in de bbox (of allemaal). Eerst tellen, dan pas afkappen:
+        # `aantal_in_bbox` moet de werkelijkheid noemen, ook als de lijst
+        # korter is.
+        if env:
+            waar = """
+                AND EXISTS (
+                    SELECT 1 FROM p2p.locatie_subdiv ls
+                    WHERE ls.identificatie = nw.locatie_id
+                      AND ST_Intersects(ls.geometrie, ST_MakeEnvelope(%s, %s, %s, %s, 28992))
+                )
+            """
+            params: tuple = (norm_id, *env)
+        else:
+            waar = ""
+            params = (norm_id,)
+
+        cur.execute(
+            f"SELECT COUNT(*) AS n FROM p2p.normwaarde nw WHERE nw.norm_id = %s{waar}",
+            params,
+        )
+        aantal_in_bbox = int(cur.fetchone()["n"])
+
+        cur.execute(
+            f"""
+            SELECT nw.locatie_id,
+                   nw.kwantitatieve_waarde,
+                   nw.kwalitatieve_waarde,
+                   nw.waarde_in_regeltekst,
+                   l.noemer,
+                   l.locatie_type
+            FROM   p2p.normwaarde nw
+            LEFT   JOIN p2p.locatie l ON l.identificatie = nw.locatie_id
+            WHERE  nw.norm_id = %s{waar}
+            ORDER  BY nw.kwantitatieve_waarde DESC NULLS LAST, nw.locatie_id
+            LIMIT  %s
+            """,
+            (*params, limit),
+        )
+        waarden = [
+            {
+                "locatie_id": r["locatie_id"],
+                "waarde": (
+                    float(r["kwantitatieve_waarde"])
+                    if r["kwantitatieve_waarde"] is not None
+                    else r["kwalitatieve_waarde"]
+                ),
+                "kwantitatief": r["kwantitatieve_waarde"] is not None,
+                "waarde_in_regeltekst": bool(r["waarde_in_regeltekst"]),
+                "noemer": r["noemer"],
+                "locatie_type": r["locatie_type"],
+            }
+            for r in cur.fetchall()
+        ]
+
+    getallen = [rij["waarde"] for rij in verdeling]
+    return {
+        "norm": dict(norm),
+        "totaal": totaal,
+        "domein": [min(getallen), max(getallen)] if getallen else None,
+        "klassen": _norm_klassen(verdeling),
+        "verdeling": verdeling,
+        "artikelen": artikelen,
+        "waarden": waarden,
+        "aantal_in_bbox": aantal_in_bbox,
+        "afgekapt": aantal_in_bbox > len(waarden),
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # GIO-paneel — een informatieobject achter een IntIoRef ontsluiten
 #

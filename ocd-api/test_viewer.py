@@ -918,13 +918,98 @@ class TestVoorkomens:
 
 
 # ══════════════════════════════════════════════════════════
-# Sleutels op de norm-objecten van /v1/viewer/objecten
+# /v1/viewer/norm/{id}/waarden — de omgevingsmodus
 #
-# Ankerpunt: Hoogland, Amersfoort (RD 154799, 466865) — maximale bouwhoogte
-# 14 m op dit perceel.
+# Gemeten ankerpunt: Hoogland, Amersfoort (RD 154799, 466865). Op dat punt
+# geldt maximale bouwhoogte 14 m; dezelfde norm heeft in het hele omgevingsplan
+# 15 normwaarden van 3 tot 55 m. Zie OCD-viewer.nl/docs/plans/normen-op-de-kaart.md.
 # ══════════════════════════════════════════════════════════
 
 HLD_X, HLD_Y = 154799, 466865
+NORM_BOUWHOOGTE = "nl.imow-gm0307.omgevingsnorm.2489bc6a7a4548a296aff034448af659"
+
+
+class TestNormWaarden:
+    def test_norm_levert_zijn_hele_verdeling(self):
+        r = client.get(f"/v1/viewer/norm/{NORM_BOUWHOOGTE}/waarden")
+        assert r.status_code == 200
+        d = r.json()
+
+        assert d["norm"]["naam"] == "maximale bouwhoogte"
+        assert d["totaal"] == 15
+        assert d["domein"] == [3.0, 55.0]
+
+    def test_klassen_overlappen_niet(self):
+        # Een waarde die in twee klassen valt wordt in de legenda dubbel geteld
+        # en op de kaart geverfd naar de klasse die toevallig als eerste matcht.
+        d = client.get(f"/v1/viewer/norm/{NORM_BOUWHOOGTE}/waarden").json()
+        klassen = d["klassen"]
+
+        assert len(klassen) == 7
+        for vorige, volgende in zip(klassen, klassen[1:]):
+            assert volgende["lo"] > vorige["hi"]
+        assert sum(k["aantal"] for k in klassen) == d["totaal"]
+
+    def test_verdeling_telt_distincte_waarden(self):
+        # Distinct-met-telling in plaats van een lijst losse getallen: de
+        # zwaarste norm heeft 3.223 waarden maar veel minder distincte.
+        d = client.get(f"/v1/viewer/norm/{NORM_BOUWHOOGTE}/waarden").json()
+
+        waarden = [rij["waarde"] for rij in d["verdeling"]]
+        assert waarden == sorted(waarden)
+        assert len(set(waarden)) == len(waarden)
+
+    def test_bbox_begrenst_de_waarden(self):
+        ruim = client.get(f"/v1/viewer/norm/{NORM_BOUWHOOGTE}/waarden").json()
+        krap = client.get(
+            f"/v1/viewer/norm/{NORM_BOUWHOOGTE}/waarden",
+            params={"bbox": "154600,466700,155000,467050"},
+        ).json()
+
+        assert krap["aantal_in_bbox"] < ruim["aantal_in_bbox"]
+        assert len(krap["waarden"]) == krap["aantal_in_bbox"]
+
+    def test_klassen_verschieten_niet_met_de_bbox(self):
+        # Klassen uit het kaartbeeld laten dezelfde percelen van kleur
+        # verschieten zodra je pant. Ze horen dus over de hele norm te gaan.
+        ruim = client.get(f"/v1/viewer/norm/{NORM_BOUWHOOGTE}/waarden").json()
+        krap = client.get(
+            f"/v1/viewer/norm/{NORM_BOUWHOOGTE}/waarden",
+            params={"bbox": "154600,466700,155000,467050"},
+        ).json()
+
+        assert krap["klassen"] == ruim["klassen"]
+        assert krap["domein"] == ruim["domein"]
+        assert krap["totaal"] == ruim["totaal"]
+
+    def test_afkappen_noemt_het_echte_aantal(self):
+        # Stille truncatie leest als een volledige kaart, en daar worden
+        # vergunningen op gebaseerd.
+        d = client.get(
+            f"/v1/viewer/norm/{NORM_BOUWHOOGTE}/waarden", params={"limit": 5}
+        ).json()
+
+        assert len(d["waarden"]) == 5
+        assert d["aantal_in_bbox"] == 15
+        assert d["afgekapt"] is True
+
+    def test_norm_noemt_zijn_artikel(self):
+        d = client.get(f"/v1/viewer/norm/{NORM_BOUWHOOGTE}/waarden").json()
+
+        assert len(d["artikelen"]) >= 1
+        assert d["artikelen"][0]["wid"]
+
+    def test_onbekende_norm_geeft_404(self):
+        r = client.get("/v1/viewer/norm/bestaat-niet/waarden")
+        assert r.status_code == 404
+
+    @pytest.mark.parametrize("bbox", ["1,2,3", "a,b,c,d", ""])
+    def test_kapotte_bbox_geeft_400(self, bbox):
+        r = client.get(
+            f"/v1/viewer/norm/{NORM_BOUWHOOGTE}/waarden", params={"bbox": bbox}
+        )
+        # Lege bbox is 'geen bbox' en dus geldig; de rest is een fout.
+        assert r.status_code == (200 if bbox == "" else 400)
 
 
 class TestObjectenNormSleutels:
