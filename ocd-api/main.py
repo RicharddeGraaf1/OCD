@@ -631,11 +631,25 @@ def _wat_geldt_hier(x: float, y: float, zoektermen: list[str] | None = None):
 def adres(
     q: str = Query(..., description="Adres (bijv. 'Prinsengracht 263, Amsterdam')"),
     zoektermen: str = Query("", description="Komma-gescheiden zoektermen voor server-side filtering"),
+    alleen_locatie: bool = Query(
+        False,
+        description=(
+            "Alleen geocoderen: geef adres + RD terug en sla het ophalen van "
+            "alle regels over. Voor clients die daarna hun eigen, gerichte "
+            "calls doen."
+        ),
+    ),
 ):
     """Wat geldt op een adres? Cross-regime: Ow-regels + Wro-bestemmingen.
 
     Wanneer zoektermen meegegeven worden, filtert de API server-side op
     relevante regelteksten. Zonder zoektermen worden alle regels geretourneerd.
+
+    Met ``alleen_locatie=true`` blijft het bij de geocodering. Dat scheelt het
+    leeuwendeel van de respons: op Domplein 1 Utrecht gaat hij van ~19 MB en
+    1-19 s naar enkele honderden bytes. De viewer gebruikt van deze respons
+    alleen ``adres`` en ``rd`` en haalt de rest via ``/v1/viewer/*`` op, dus
+    daar was de zware tak puur overhead.
     """
     resp = httpx.get(
         LOCATIESERVER,
@@ -648,12 +662,11 @@ def adres(
     doc = docs[0]
     coords = doc["centroide_rd"].replace("POINT(", "").replace(")", "").split()
     x, y = float(coords[0]), float(coords[1])
+    basis = {"adres": doc.get("weergavenaam", q), "rd": {"x": x, "y": y}}
+    if alleen_locatie:
+        return basis
     kw_list = [kw.strip() for kw in zoektermen.split(",") if kw.strip()] if zoektermen else None
-    return {
-        "adres": doc.get("weergavenaam", q),
-        "rd": {"x": x, "y": y},
-        **_wat_geldt_hier(x, y, zoektermen=kw_list),
-    }
+    return {**basis, **_wat_geldt_hier(x, y, zoektermen=kw_list)}
 
 
 @app.get("/v1/locatie", dependencies=[Depends(verify_key)])
