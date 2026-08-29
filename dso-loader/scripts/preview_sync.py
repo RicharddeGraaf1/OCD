@@ -274,16 +274,32 @@ def preview_embed() -> dict:
     zonder = cur.fetchone()["n"]
     cur.execute("SELECT count(*) n FROM v2a.tekst_embedding")
     totaal = cur.fetchone()["n"]
+    # De dirty-set is wat de embed-stap werkelijk gaat doen; het getal hierboven
+    # is dat niet. Gemeten 2026-08-28: 251.410 "te embedden" tegenover 10 dirty
+    # regelingen. Het telt elk tekst_element zonder embedding, inclusief alles
+    # wat bewust nooit geembed wordt, en werd daarom in de praktijk genegeerd --
+    # een getal dat je moet negeren hoort niet in een preview. Zelfde ingang als
+    # `refresh-v2a`, dus de twee kunnen niet uiteenlopen.
+    try:
+        from src.loaders.v2a_refresh import dirty_set
+        dirty = len(dirty_set(conn))
+    except Exception:
+        dirty = None
     conn.close()
-    return {"embeddings": totaal, "tekst_element_zonder_embedding": zonder}
+    return {"embeddings": totaal, "tekst_element_zonder_embedding": zonder,
+            "dirty_regelingen": dirty}
 
 
 def print_embed(e: dict):
-    print(f"\n{'═' * 100}\nembed — vectorindex (v2a)\n{'═' * 100}")
-    print(f"  embeddings in de DB: {e['embeddings']}")
-    print(f"  TE EMBEDDEN: {e['tekst_element_zonder_embedding']} tekst_elementen zonder embedding")
-    print("  NB: de embed-fase herbouwt chunk_annotatie/chunk_categorie volledig (uren),")
-    print("      ook als er weinig nieuw is — zie gaps G-97.")
+    print(chr(10) + "=" * 100 + chr(10) + "embed - vectorindex (v2a)" + chr(10) + "=" * 100)
+    if e.get("dirty_regelingen") is None:
+        print("  TE EMBEDDEN: dirty-set niet te bepalen - val terug op refresh-v2a")
+    else:
+        print(f"  TE EMBEDDEN: {e['dirty_regelingen']} regelingen "
+              f"(dirty-set van refresh-v2a; dit is wat de stap gaat doen)")
+    print(f"  ter vergelijking: {e['tekst_element_zonder_embedding']} tekst_elementen "
+          f"zonder embedding -")
+    print( "      dat telt ook wat nooit geembed wordt en is structureel veel hoger.")
 
 
 # ── main ─────────────────────────────────────────────────────────────
