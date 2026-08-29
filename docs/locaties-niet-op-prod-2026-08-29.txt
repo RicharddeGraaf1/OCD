@@ -1,0 +1,127 @@
+47 locaties die lokaal bestaan en op prod ontbreken
+==============================================================================
+Gemeten   : 2026-08-29 11:13, na de sync van 2026-08-28 (run 11)
+Lokaal    : p2p.locatie 320.767   Prod: 320.720   Verschil: 47
+
+Waarom ze ontbreken: repliceer_p2p_naar_prod.py bouwt zijn scope vanaf de
+geladen regelingen omlaag (regeling -> juridische regel -> locatie). Een locatie
+waar geen enkele regeling naar wijst is langs die weg per definitie onbereikbaar.
+Het is dus geen replicatiefout maar een eigenschap van de scope-richting.
+
+Kolommen: leden = rijen in locatiegroep_lid met deze locatie als groep;
+          lid_van = idem als lid; pons = rijen in p2p.pons; basisgeo = geometrie-
+          koppelingen. Geen van de 47 hangt aan een activiteit, gebiedsaanwijzing,
+          tekstdeel of normwaarde -- dat is nagemeten en overal 0.
+
+
+--- Ambtsgebied (3) -------------------------------------------------
+identificatie                                                   geo  leden  lid_van  pons  basisgeo
+nl.imow-gm0243.ambtsgebied.0598ee99cde440eb98933b7caba40992      ja      0        0     0         0
+    noemer: Ambtsgebied Gemeente Harderwijk
+nl.imow-gm0273.ambtsgebied.a3f52311a14f498daace52c7cd527453      ja      0        0     0         0
+    noemer: Ambtsgebied Gemeente Putten
+nl.imow-ws0653.ambtsgebied.3db5443df0844b5d895f77224d2222fe      ja      0        0     0         0
+    noemer: Ambtsgebied Wetterskip Fryslan
+
+--- Gebied (6) ------------------------------------------------------
+identificatie                                                   geo  leden  lid_van  pons  basisgeo
+nl.imow-gm0160.gebied.4c6b18fa3ec441a8b8a03750266fdba7           ja      0        0     0         0
+    noemer: voorlopige regels
+nl.imow-gm0160.gebied.54355cb2783349df93cd46186d4e5bb2           ja      0        0     0         0
+    noemer: bouwvlak Rollepaal Oost
+nl.imow-gm0995.gebied.907bb13014dc44c088e4cf15fe3bc487           ja      0        0     0         0
+    noemer: bouwgebied openbare buitenruimte
+nl.imow-gm1728.gebied.0792c04fc98f46d0a107953669a9ec44           ja      0        0     0         0
+    noemer: kleinschalige ondergeschikte (bedrijfs)activiteiten categorie B en C
+nl.imow-gm1728.gebied.1f1b93a390954b629e873dcd250ab689           ja      0        0     0         0
+    noemer: langzaam verkeer
+nl.imow-mnre1130.gebied.PB2026000100                             ja      0        0     0         0
+    noemer: projectgebied
+
+--- Gebiedengroep (38) -----------------------------------------------
+identificatie                                                   geo  leden  lid_van  pons  basisgeo
+nl.imow-gm0228.gebiedengroep.c53f16ab49d0437391c9c6dba26b4ec2    ja      0        0     1         0
+    noemer: Pons Gemeente Ede
+nl.imow-gm0232.gebiedengroep.0997d6c280ac4165b3f39dcd5cea0cf3    ja      0        0     1         0
+    noemer: Pons Gemeente Epe
+nl.imow-gm0243.gebiedengroep.24c1b5e66821405d8f49f46e805c6294    ja      0        0     0         0
+    noemer: Hierden dorp
+nl.imow-gm0273.gebiedengroep.c9f2d2f5546d403991f71823e7707f30    ja      0        0     0         1
+    noemer: Transformatie Sligro naar wonen
+nl.imow-gm0376.gebiedengroep.00400000000000000000071n            ja      0        0     0         0
+    noemer: maximum goothoogte
+nl.imow-gm0794.gebiedengroep.fa81a833a2604c189b56418d8c9d80ae    ja      0        0     0         0
+    noemer: Floriskwartier
+nl.imow-gm0798.gebiedengroep.00400000000000000000022n            ja      0        0     0         0
+    noemer: aaneengebouwd
+nl.imow-gm0798.gebiedengroep.00400000000000000000023n            ja      0        0     0         0
+    noemer: gestapeld
+nl.imow-gm0798.gebiedengroep.00400000000000000000025n            ja      0        0     0         0
+    noemer: vrijstaand
+nl.imow-gm0798.gebiedengroep.00400000000000000000026n            ja      0        0     0         0
+    noemer: maximaal aantal woningen
+nl.imow-gm0798.gebiedengroep.00400000000000000000027n            ja      0        0     0         0
+    noemer: maximum bebouwingspercentage bedrijfsgebouwen
+nl.imow-gm0798.gebiedengroep.00400000000000000000028n            ja      0        0     0         0
+    noemer: maximale bouwhoogte bedrijfsgebouwen
+nl.imow-gm0798.gebiedengroep.00400000000000000000029n            ja      0        0     0         0
+    noemer: maximale goothoogte bedrijfsgebouwen
+nl.imow-gm0798.gebiedengroep.00400000000000000000032n            ja      0        0     0         0
+    noemer: maximum bebouwde oppervlakte bedrijfsgebouwen
+nl.imow-gm0798.gebiedengroep.00400000000000000000033n            ja      0        0     0         0
+    noemer: maximale oppervlakte bijbehorende bouwwerken bij een woning
+nl.imow-gm0798.gebiedengroep.00400000000000000000034n            ja      0        0     0         0
+    noemer: maximum gebruiksoppervlakte ondersteunende horeca
+nl.imow-gm0798.gebiedengroep.00400000000000000000035n            ja      0        0     0         0
+    noemer: twee-aaneen
+nl.imow-gm0798.gebiedengroep.00400000000000000000037n            ja      0        0     0         0
+    noemer: maximale goothoogte burgerwoning
+nl.imow-gm0798.gebiedengroep.00400000000000000000038n            ja      0        0     0         0
+    noemer: maximale bouwhoogte burgerwoning
+nl.imow-gm0798.gebiedengroep.00400000000000000000039n            ja      0        0     0         0
+    noemer: maximale bouwhoogte woning
+nl.imow-gm0798.gebiedengroep.00400000000000000000040n            ja      0        0     0         0
+    noemer: maximale goothoogte woning
+nl.imow-gm0798.gebiedengroep.00400000000000000000041n            ja      0        0     0         0
+    noemer: maximale diepte burgerwoning
+nl.imow-gm0798.gebiedengroep.00400000000000000000042n            ja      0        0     0         0
+    noemer: maximale inhoud burgerwoning
+nl.imow-gm0798.gebiedengroep.00400000000000000000043n            ja      0        0     0         0
+    noemer: maximale gezamenlijke inhoud burgerwoningen
+nl.imow-gm0798.gebiedengroep.00400000000000000000044n            ja      0        0     0         0
+    noemer: maximum hoogte houtgewas
+nl.imow-gm0824.gebiedengroep.00400000000000000000003n            ja      0        0     0         0
+    noemer: minimum dakhelling
+nl.imow-gm0824.gebiedengroep.00400000000000000000004n            ja      0        0     0         0
+    noemer: maximum dakhelling
+nl.imow-gm0824.gebiedengroep.00400000000000000000014n            ja      0        0     0         0
+    noemer: maximum bebouwingspercentage agrarisch
+nl.imow-gm0824.gebiedengroep.00400000000000000000015n            ja      0        0     0         0
+    noemer: maximum goothoogte agrarische bedrijfsgebouwen
+nl.imow-gm0824.gebiedengroep.00400000000000000000016n            ja      0        0     0         0
+    noemer: maximum bouwhoogte agrarische bedrijfsgebouwen
+nl.imow-gm0824.gebiedengroep.00400000000000000000017n            ja      0        0     0         0
+    noemer: maximum bouwhoogte bedrijfsgebouwen
+nl.imow-gm0824.gebiedengroep.00400000000000000000018n            ja      0        0     0         0
+    noemer: maximum goothoogte bedrijfsgebouwen
+nl.imow-gm0824.gebiedengroep.00400000000000000000019n            ja      0        0     0         0
+    noemer: maximum bebouwingspercentage bedrijfsgebouwen
+nl.imow-gm0824.gebiedengroep.00400000000000000000020n            ja      0        0     0         0
+    noemer: maximum goothoogte woningen
+nl.imow-gm0824.gebiedengroep.00400000000000000000021n            ja      0        0     0         0
+    noemer: maximum bouwhoogte woningen
+nl.imow-gm0824.gebiedengroep.00400000000000000000022n            ja      0        0     0         0
+    noemer: maximum aantal woningen
+nl.imow-gm0861.gebiedengroep.2dd134a6dc8343e98f0e5ef1346193e0    ja      0        0     0         0
+    noemer: keergelegenheid
+nl.imow-gm1509.gebiedengroep.aca7a7df210f49c795a1d37e19a4d950    ja      0        0     1         0
+    noemer: Pons Gemeente Oude IJsselstreek
+
+==============================================================================
+Opvallend: van de 38 Gebiedengroepen heeft er geen enkele een lid in
+p2p.locatiegroep_lid. Een Gebiedengroep zonder leden is per definitie leeg en
+kan dus ook nergens aan gekoppeld zijn. Dat past bij de bekende loader-gap rond
+locatiegroep_lid en is een eigen vraag -- zie verbeterplan 4.6.
+
+Besluit (verbeterplan, hoofdstuk 4): deze 47 worden BEWUST NIET naar prod
+gekopieerd. Ze hangen nergens aan; overzetten is ruis kopieren, geen gat dichten.
