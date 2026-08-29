@@ -52,7 +52,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
-from scripts.repliceer_p2p_naar_prod import kolommen  # noqa: E402
+from scripts.repliceer_p2p_naar_prod import identity_kolommen, kolommen  # noqa: E402
 
 # (tabel, pk-kolommen, [(fk-kolom, oudertabel, ouder-pk), …])
 # Volgorde is FK-volgorde: ouders eerst.
@@ -70,6 +70,25 @@ KETEN = [
     ("p2p.tekstdeel_hoofdlijn", ["tekstdeel_id", "hoofdlijn_id"],
      [("tekstdeel_id", "p2p.tekstdeel", "identificatie"),
       ("hoofdlijn_id", "p2p.hoofdlijn", "identificatie")]),
+
+    # Eén tabel verder in dezelfde keten. Een kaartlaag kan aan een
+    # gebiedsaanwijzing hangen, en de gebiedsaanwijzingen uit het tekstdeel-pad
+    # vielen buiten de replicatiescope -- dus vielen hún kaarten dat ook.
+    # Gemeten 2026-08-29 door diff_lokaal_prod.py: 2 kaarten en 7 kaartlagen,
+    # alle zeven met een gebiedsaanwijzing als anker.
+    ("p2p.kaart", ["identificatie"], []),
+    ("p2p.kaartlaag", ["id"],
+     [("kaart_id", "p2p.kaart", "identificatie"),
+      ("activiteit_id", "p2p.activiteit", "identificatie"),
+      ("gebiedsaanwijzing_id", "p2p.gebiedsaanwijzing", "identificatie"),
+      ("norm_id", "p2p.norm", "identificatie")]),
+
+    # En de pons. Die staat hier omdat de eerste conclusie over de 47
+    # ongerefereerde locaties te snel was: drie ervan dragen wél een pons, en
+    # pons is precies wat ponsenkaart.nl toont. "Hangt nergens aan" gold voor
+    # activiteit, gebiedsaanwijzing, tekstdeel en normwaarde -- niet voor pons.
+    ("p2p.pons", ["identificatie"],
+     [("locatie_id", "p2p.locatie", "identificatie")]),
 ]
 
 # De locatie-scope is niet "alle locaties" maar alleen wat deze keten nodig heeft:
@@ -81,6 +100,8 @@ LOCATIE_SCOPE = """
         SELECT locatie_id FROM p2p.gebiedsaanwijzing
         UNION ALL
         SELECT locatie_id FROM p2p.tekstdeel
+        UNION ALL
+        SELECT locatie_id FROM p2p.pons
     ) x WHERE locatie_id IS NOT NULL
 """
 
@@ -185,9 +206,21 @@ def main() -> int:
                 with pc.copy(f"COPY {stg} ({kol_csv}) FROM STDIN (FORMAT TEXT)") as inn:
                     for blok in uit:
                         inn.write(blok)
-            pc.execute(f"INSERT INTO {tabel} ({kol_csv}) SELECT {kol_csv} FROM {stg} "
+            # p2p.kaartlaag.id is GENERATED ALWAYS. De lokale id meenemen in
+            # plaats van prod een nieuwe laten uitdelen: dezelfde reden als in
+            # repliceer_p2p_naar_prod.py -- twee kanten met verschillende id's
+            # voor dezelfde rij maken elke latere vergelijking onbruikbaar.
+            idents = identity_kolommen(pc, tabel)
+            overriding = " OVERRIDING SYSTEM VALUE" if any(a for _, a in idents) else ""
+            pc.execute(f"INSERT INTO {tabel} ({kol_csv}){overriding} "
+                       f"SELECT {kol_csv} FROM {stg} "
                        f"ON CONFLICT DO NOTHING RETURNING 1")
             n = len(pc.fetchall())
+            for kol, _ in idents:
+                # sequence meeschuiven, anders botst de eerstvolgende insert
+                pc.execute("SELECT setval(pg_get_serial_sequence(%s, %s), "
+                           f"  coalesce((SELECT max({kol}) FROM {tabel}), 1))",
+                           (tabel, kol))
             pconn.commit()
             totaal += n
             print(melding + f"  → +{n:,} ({time.time() - t0:.1f}s)")

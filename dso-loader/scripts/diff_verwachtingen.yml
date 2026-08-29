@@ -1,0 +1,179 @@
+# Verwachte verschillen tussen de lokale werkbank en productie.
+#
+# Alleen hier hoort een verschil te staan dat we begrijpen en accepteren. Alles
+# wat niet in deze lijst staat en toch verschilt, is een AFWIJKING en vraagt om
+# een verklaring. Zo blijft de uitvoer van diff_lokaal_prod.py leeg als het goed
+# is -- en een controle die altijd ruis geeft wordt niet gelezen.
+#
+# Per tabel:
+#   min / max : de marge waarbinnen (lokaal - prod) mag vallen. Een marge in
+#               plaats van een vast getal, want deze verschillen groeien mee;
+#               een gat dat buiten de marge loopt hoort weer op te vallen.
+#   reden     : waarom dit verschil er hoort te zijn. Verplicht in de praktijk --
+#               zonder reden meldt het script dat de verwachting onvolledig is.
+
+verwacht:
+
+  p2p.locatie:
+    min: 0
+    max: 200
+    reden: >-
+      Ongerefereerde locaties. De replicatie bouwt zijn scope vanaf de geladen
+      regelingen omlaag, dus een locatie waar geen enkele regeling naar wijst is
+      onbereikbaar. Stand 2026-08-29 na de backfill: 44 (was 47; de drie met een
+      pons zijn alsnog overgezet, want pons voedt ponsenkaart.nl). Zie
+      docs/locaties-niet-op-prod-2026-08-29.txt.
+
+  p2p.locatie_basisgeo:
+    min: 0
+    max: 1500
+    reden: >-
+      Geometrie-koppelingen van diezelfde ongerefereerde locaties. Stand
+      2026-08-29: 330. Schaalt met p2p.locatie hierboven.
+
+  p2pwijziging.tekst_element:
+    min: 0
+    max: 2000000
+    reden: >-
+      Runbook stap 10 ruimt het wijzigingsspoor lokaal op; prod wordt daarna
+      gespiegeld door repliceer_p2pwijziging_naar_prod.py. Tussen die twee
+      momenten in loopt prod voor. Draai die replicatie en het verschil hoort
+      nul te zijn.
+
+  p2pwijziging.annotatie_delta:
+    min: 0
+    max: 2000000
+    reden: idem -- zie p2pwijziging.tekst_element.
+
+  p2pwijziging.locatie_delta:
+    min: 0
+    max: 2000000
+    reden: idem -- zie p2pwijziging.tekst_element.
+
+  i2a.toepasbaar_regelbestand:
+    min: -100
+    max: 100
+    reden: >-
+      i2a heeft geen push-script; het verschil loopt op tot iemand repliceert.
+      Runbook stap 5: triviaal verschil laten staan. Stand 2026-08-29: 14.
+
+  i2a.uitvoeringsregel:
+    min: -50000
+    max: 50000
+    reden: >-
+      Zelfde reden als toepasbaar_regelbestand. Stand 2026-08-29: 5.364 op
+      1,24 miljoen (0,4%).
+
+  i2a.dmn_element:
+    min: -50000
+    max: 50000
+    reden: idem -- zie i2a.uitvoeringsregel.
+
+  # ── afgeleide geometrie: op prod herbouwd, niet gekopieerd ────────────────
+
+  p2p.locatie_subdiv:
+    min: -50000
+    max: 50000
+    reden: >-
+      ST_Subdivide-afgeleide, per bronhouder herbouwd op prod (runbook stap 3).
+      Alleen de bronhouders met nieuwe regelingen worden herbouwd, dus prod
+      drift langzaam voor de rest. Stand 2026-08-29: 10.131 op 7,76 miljoen
+      (0,13%). Loopt dit op, dan is een landelijke refresh-subdiv aan de orde.
+
+  p2p.locatie_generalisatie:
+    min: -1000000
+    max: 1000000
+    reden: >-
+      Vector-tile-generalisatie (vul_locatie_generalisatie.py), gelezen door
+      ocd-api/tiles.py vanaf z11. LET OP -- dit is een ruime marge omdat het
+      script in GEEN ENKELE sync-stap draait: op 2026-08-29 liep prod 659.773
+      rijen achter en misten ook lokaal 17.230 locaties een generalisatie. Zodra
+      dat is opgelost hoort deze marge strak te worden gezet. Zie het
+      verbeterplan.
+
+  # ── lokale werktabellen: bestaan bewust niet op prod ──────────────────────
+  # (het script meldt deze als ONTBREEKT; ze staan hier ter documentatie)
+  #   v2a.embed_state              dirty-detectie van refresh-v2a, lokaal werk
+  #   v2a.wijziging_categorie      tussenresultaat van de onderwerp-as
+  #   vth.adres_geocode            geocode-cache van de vth-verrijking
+  #   wro.planobject_generalisatie tegel-laag voor Wro, lokaal gebouwd
+  #
+  # ── prod-only tabellen: bewust alleen daar ────────────────────────────────
+  #   mer.project_regeling         door build_regeling_links.py TEGEN prod gebouwd
+  #   mer.besluit_extref           leeg
+  #   v2a.*_oud                    schaduwtabellen van de swap in stap 6c;
+  #                                de rollback-kopie, hoort te blijven staan
+  #   irm.*_pre_fix                eenmalige back-ups van een eerdere reparatie
+
+  core.load_run:
+    min: -10000
+    max: 10000
+    reden: >-
+      Run-historie. Lokaal draaien alle fasen, op prod alleen de replicatie- en
+      herbouwstappen; de reeksen lopen per definitie uiteen.
+
+  vth.etl_run:
+    min: -10000
+    max: 10000
+    reden: idem -- lokale ETL-historie tegen de prod-reeks.
+
+  i2a.regelbeheerobject:
+    min: -50000
+    max: 50000
+    reden: Zelfde reden als i2a.uitvoeringsregel -- geen push-script.
+
+  # ── vth-werktabellen die de prod-API niet leest ───────────────────────────
+
+  vth.omgevingsvergunning_dso:
+    min: -20000
+    max: 20000
+    reden: >-
+      BOPA-snapshot uit load-ovg. refresh-koop-to-prod.ps1 pusht uitsluitend
+      vth.vergunningkennisgeving; deze tabel gaat nooit mee. Nagelopen op
+      2026-08-29: geen enkele endpoint in ocd-api leest hem -- de
+      afwijkvergunning-informatie zit als afwijk_*-kolommen ÓP
+      vergunningkennisgeving, en die worden wel gepusht. Enige gevolg: de teller
+      bron_totaal('ozon-afwijkvergunningen') is op prod verouderd, en die voedt
+      /v1/load-status. Stand 2026-08-29: 805.
+
+  vth.vergunning_deeplink:
+    min: -20000
+    max: 20000
+    reden: >-
+      Deeplink-cache uit backfill_deeplinks.py, zelfde verhaal als
+      omgevingsvergunning_dso: lokaal gevuld, niet gepusht, niet door de API
+      gelezen. Stand 2026-08-29: 598.
+
+  # ── irm: alleen wat build/query.sql leest wordt gesynct ───────────────────
+
+  irm.screening_hit_doel:
+    min: -100000
+    max: 100000
+    reden: >-
+      sync_prod.py synchroniseert bewust alleen de vijf tabellen waar
+      build/query.sql op leunt (doel_relevantie, doelcel, judge_uniek,
+      opgenomen_indicatief, screening_cel). De hit-tabellen zijn tussenresultaat
+      van de screening. Prod staat daarom op 0 tegen 17.933 lokaal -- dat is
+      geen gat maar de afbakening.
+
+  irm.screening_hit:
+    min: -200000
+    max: 200000
+    reden: >-
+      Idem. Dat prod hier tóch 167k rijen heeft is een restant van een eerdere
+      restore, niet van een sync.
+
+  irm.ir_embedding:
+    min: -5000
+    max: 5000
+    reden: Idem -- niet in de sync_prod-lijst.
+
+  irm.judge_uniek_pre_fix:
+    min: -100000
+    max: 100000
+    reden: Eenmalige back-uptabel van een eerdere reparatie; niet gesynchroniseerd.
+
+  irm.opgenomen_indicatief_pre_fix:
+    min: -100000
+    max: 100000
+    reden: idem.

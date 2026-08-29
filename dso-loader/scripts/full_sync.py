@@ -160,6 +160,16 @@ def subproc(args: list[str], omschrijving: str, timeout: int | None = None) -> b
 # ── Fase 0: preflight ────────────────────────────────────────────────
 
 def preflight() -> dict:
+    # De engine moet er zijn voordat get_conn() het probeert. Twee syncs op rij
+    # (21-08 en 28-08) begonnen met een dode Docker; preview_sync.py draagt de
+    # helper, inclusief de WSL-aanwijzing voor het geval dat `docker ps` hangt
+    # in plaats van te falen.
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from preview_sync import docker_preflight
+        docker_preflight()
+    except Exception as e:
+        log(f"docker-preflight overgeslagen: {str(e)[:60]}")
     conn = get_conn()
     cur = conn.cursor()
     info = {
@@ -177,9 +187,67 @@ def preflight() -> dict:
         load_dotenv(ROOT / ".env")
         if not os.environ.get("DSO_API_KEY"):
             raise SystemExit("DSO_API_KEY ontbreekt in omgeving/.env")
+    info["statistieken_hersteld"] = herstel_statistieken_na_herstart()
     log(f"Preflight ok: DB {info['db_size']}, {info['regelingen']} regelingen, "
         f"{info['disk_vrij_gb']} GB vrij")
     return info
+
+
+# Tabellen die groot zijn, elke sync wisselen en daarna vooral gelézen worden.
+# Precies de combinatie waarbij een lege statistiek-boekhouding het meeste kost.
+HETE_TABELLEN = [
+    "v2a.tekst_embedding", "v2a.chunk_categorie", "v2a.chunk_annotatie",
+    "v2a.artikel_indeling", "v2a.hertaling",
+    "p2p.tekst_element", "p2p.locatie", "p2p.juridische_regel",
+    "p2p.locatie_basisgeo", "p2p.tekst_inline_referentie",
+    "irm.screening_cel", "irm.judge_uniek",
+]
+
+
+def herstel_statistieken_na_herstart() -> int:
+    """ANALYZE de hete tabellen als de statistiek-boekhouding leeg is.
+
+    PostgreSQL 16 houdt de cumulatieve statistieken in gedeeld geheugen en gooit
+    ze weg bij een onreine afsluiting. Docker Desktop lag er op 2026-08-21 én
+    2026-08-28 uit; op die tweede datum startte de postmaster drie minuten vóór
+    de sync met **159 van de 195 tabellen** zonder `last_autoanalyze`. Autovacuum
+    ziet dan overal "sinds de laatste analyse niets gewijzigd" en doet niets — een
+    tabel die na de herstart veel gelezen maar weinig geschreven wordt, komt zo
+    nooit boven de drempel.
+
+    Wat dat kostte, gemeten op `tier1_screen.py`: **> 30 s/regel** tegen 2,36
+    s/regel na een `ANALYZE` van 81 s. Zie vault G-133.
+
+    We analyseren alleen als het nodig lijkt (postmaster jonger dan de oudste
+    `last_autoanalyze`, of helemaal geen autoanalyse bekend), zodat een gewone run
+    hier geen minuut aan verliest.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        n_leeg = q1(cur, """
+            SELECT count(*) n FROM pg_stat_user_tables
+             WHERE last_autoanalyze IS NULL AND last_analyze IS NULL""")
+        n_totaal = q1(cur, "SELECT count(*) n FROM pg_stat_user_tables")
+        if n_totaal and n_leeg / n_totaal < 0.5:
+            return 0
+        start = q1(cur, "SELECT pg_postmaster_start_time() n")
+        log(f"Statistieken grotendeels leeg ({n_leeg}/{n_totaal} tabellen, "
+            f"postmaster sinds {start:%Y-%m-%d %H:%M}) — hete tabellen analyseren")
+        conn.autocommit = True
+        cur.execute("SET max_parallel_maintenance_workers = 0")
+        gedaan = 0
+        for tabel in HETE_TABELLEN:
+            try:
+                t0 = time.time()
+                cur.execute(f"ANALYZE {tabel}")
+                gedaan += 1
+                log(f"  ANALYZE {tabel}: {time.time() - t0:.0f}s")
+            except Exception as e:
+                log(f"  ANALYZE {tabel} overgeslagen: {str(e)[:70]}")
+        return gedaan
+    finally:
+        conn.close()
 
 
 # ── Fase 1+2: snapshot + dedup ───────────────────────────────────────
@@ -636,9 +704,30 @@ def fase_post(run_start: datetime.datetime, gewijzigd: set[str] | None = None):
                           FROM p2p.regeling""")
     conn.close()
 
+    # De vectorlaag wisselt elke sync duizenden rijen en wordt daarna vooral
+    # gelezen — precies de tabel waar verouderde statistieken het duurst zijn.
+    # 81 s hier bespaarde op 2026-08-28 een factor 13 op de doorwerkingsmeting
+    # (> 30 s/regel → 2,36 s/regel). Zie vault G-133.
+    n_analyze = 0
+    try:
+        conn_a = get_conn()
+        conn_a.autocommit = True
+        cur_a = conn_a.cursor()
+        cur_a.execute("SET max_parallel_maintenance_workers = 0")
+        for tabel in ("v2a.tekst_embedding", "v2a.chunk_categorie",
+                      "v2a.chunk_annotatie", "v2a.artikel_indeling"):
+            t0 = time.time()
+            cur_a.execute(f"ANALYZE {tabel}")
+            n_analyze += 1
+            log(f"ANALYZE {tabel}: {time.time() - t0:.0f}s")
+        conn_a.close()
+    except Exception as e:
+        fouten.append(f"ANALYZE vectorlaag: {e}")
+
     regels = [f"- nieuw geladen regelingen deze run: {nieuw}",
               f"- DB-grootte na sync: {db_size}",
-              f"- regelingen inactief/totaal: {inactief[0]}/{inactief[1]}"]
+              f"- regelingen inactief/totaal: {inactief[0]}/{inactief[1]}",
+              f"- ANALYZE op de vectorlaag: {n_analyze} tabellen"]
     if health:
         regels.append(f"- v_data_health: {health}")
     rapporteer("Post-processing", regels)

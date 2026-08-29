@@ -312,6 +312,58 @@ def main_vanuit_sync(sync_args):
           f"om het echt te doen.\n{'═' * 100}")
 
 
+def docker_preflight() -> None:
+    """Start Docker Desktop als de engine niet draait, en wijs anders WSL aan.
+
+    Twee syncs op rij (2026-08-21 en 2026-08-28) begonnen met een dode engine, en
+    beide keren kostte het de eerste tien minuten van de run. De symptomen
+    verschillen: op 21-08 draaiden de Docker-processen wél maar stond de
+    WSL-distro `docker-desktop` op `Stopped`; op 28-08 draaide er niets.
+
+    De verwarrende variant is de eerste. `docker ps` hangt dan zonder foutmelding
+    en dat lijkt een Docker-probleem, terwijl `wsl --list --verbose` het in één
+    regel aanwijst. Vandaar dat we die uitvoer tonen in plaats van alleen te
+    melden dat het misging.
+
+    Bijvangst die de moeite van het weten waard is: een onreine afsluiting van de
+    container gooit de cumulatieve statistieken van PostgreSQL weg (vault G-133),
+    dus een dode engine is niet alleen vertraging bij de start maar ook een trage
+    database daarna. full_sync.py vangt dat op in zijn eigen preflight.
+    """
+    import shutil as _sh
+    import subprocess as _sp
+    if not _sh.which("docker"):
+        return
+    def _engine_ok() -> bool:
+        try:
+            return _sp.run(["docker", "ps"], capture_output=True, timeout=25).returncode == 0
+        except Exception:
+            return False
+    if _engine_ok():
+        return
+    print("Docker-engine reageert niet — Docker Desktop starten...", flush=True)
+    for pad in (r"C:\Program Files\Docker\Docker\Docker Desktop.exe",):
+        if Path(pad).exists():
+            try:
+                _sp.Popen([pad])
+            except Exception as e:
+                print(f"  starten mislukt: {e}")
+            break
+    else:
+        print("  Docker Desktop niet op de verwachte plek gevonden.")
+    for _ in range(30):          # tot ~2,5 minuut
+        time.sleep(5)
+        if _engine_ok():
+            print("  engine is op.", flush=True)
+            return
+    print("  engine komt niet op. Kijk eerst naar WSL, niet naar Docker:", flush=True)
+    try:
+        r = _sp.run(["wsl", "--list", "--verbose"], capture_output=True, timeout=20)
+        print((r.stdout or b"").decode("utf-16-le", "replace").replace(chr(0), ""))
+    except Exception:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser(description="READ-ONLY preview van een sync")
     ap.add_argument("--target", choices=["local", "prod"], default="local")
@@ -328,6 +380,7 @@ def main():
     ap.add_argument("--skip-embed", action="store_true")
     ap.add_argument("--json", action="store_true", help="machineleesbare uitvoer")
     args = ap.parse_args()
+    docker_preflight()   # de DB moet er zijn voordat we iets vergelijken
 
     doel = kies_doelwit_db(args.target, args.dsn)
     if not args.json:

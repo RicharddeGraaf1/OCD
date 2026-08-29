@@ -60,6 +60,17 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+# publish.py las tot 2026-08-29 alleen os.environ en niet de .env die er vlak
+# naast staat. Gevolg: OCD_PROD_URL was leeg terwijl dso-loader/.env dezelfde
+# waarde als PROD_DB_URL bevat, en de mer-verrijkers vielen om zonder dat iemand
+# begreep waarom. `override=False`, dus een expliciet gezette omgevingsvariabele
+# wint nog steeds van het bestand.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+except ImportError:
+    pass
+
 # ── Paden (pas aan als de repos elders staan) ────────────────────────────────
 GIT_ROOT = Path(os.environ.get("GIT_ROOT", r"C:/GIT"))
 PONSENKAART = GIT_ROOT / "ponsenkaart.nl"
@@ -68,7 +79,11 @@ ANNOTATIECONFORMITEIT = GIT_ROOT / "annotatieconformiteit.nl"
 MER_REGISTER = GIT_ROOT / "MER-register.nl"
 
 # Prod-Postgres-connectstring (Railway TCP-proxy). Nooit hardcoden — via env.
-PROD_URL = os.environ.get("OCD_PROD_URL")  # bv. postgresql://postgres:PW@host:port/railway
+# OCD_PROD_URL is de naam die publish.py verwacht; dso-loader/.env kent dezelfde
+# waarde als PROD_DB_URL. Zonder deze terugval draait publish.py zonder prod-DSN
+# terwijl hij vlak naast een .env staat die hem heeft — dat is op 2026-08-28
+# gebeurd en kostte de hele mer-register-stap.
+PROD_URL = os.environ.get("OCD_PROD_URL") or os.environ.get("PROD_DB_URL")
 
 
 @dataclass
@@ -142,9 +157,11 @@ def sites(db_source: str) -> list[Site]:
     if PROD_URL:
         mer_env["MER_PROD_URL"] = PROD_URL
     else:
-        print("  ! mer-register: OCD_PROD_URL niet gezet — de verrijkers "
-              "(onderliggendeRegelingen, bevoegdGezagUniform) vallen om",
-              file=sys.stderr)
+        # Geen waarschuwing meer maar een harde stop voor déze site. Op 2026-08-28
+        # stond hier een print naar stderr en draaide publish.py gewoon door; de
+        # site werd toen zonder beide verrijkingen gepubliceerd en niets was
+        # daaraan te zien. Een waarschuwing die je kunt missen is geen poort.
+        mer_env["_ONTBREEKT"] = "OCD_PROD_URL"
 
     return [
         Site(
@@ -227,6 +244,19 @@ def sites(db_source: str) -> list[Site]:
                 # SQLite: de regeling-koppeling zit in mer.project_regeling en de
                 # canonieke BG-naam in core.bronhouder. Volgorde is dwingend —
                 # export eerst, anders overschrijft hij hun velden weer.
+                # resolve_bronhouder is geen optie maar een voorwaarde:
+                # add_bg_uniform_to_merdata.py joint op mer.project.bronhouder_code,
+                # en die kolom BESTAAT NIET tot dit script hem aanmaakt
+                # (ADD COLUMN IF NOT EXISTS) en vult. Stond hier tot 2026-08-29
+                # niet, waardoor de verrijker faalde met UndefinedColumn en de
+                # hele mer-register-stap omviel. Idempotent en goedkoop (~10 s).
+                Stap(
+                    [sys.executable, "harvest/resolve_bronhouder.py"],
+                    cwd=MER_REGISTER, env=mer_env,
+                    beschrijving="koppel mer.event/project aan core.bronhouder "
+                                 "(maakt bronhouder_code aan; voorwaarde voor de "
+                                 "bevoegdGezagUniform-verrijking)",
+                ),
                 Stap(
                     [sys.executable, "harvest/add_regeling_to_merdata.py"],
                     cwd=MER_REGISTER, env=mer_env,
@@ -334,6 +364,17 @@ def publiceer_site(site: Site, dry: bool, force: bool = False) -> tuple[str, str
     if not site.deploy:
         print(f"    ! geen deploy-stap ingevuld — {site.notitie}")
         return site.naam, "skip"
+    # Een build-stap die een env-var nodig heeft die er niet is, hoort niet te
+    # starten. Zonder deze controle draaide mer-register door en publiceerde de
+    # site zonder verrijking (2026-08-28) -- zichtbaar aan niets.
+    ontbreekt = {st.env["_ONTBREEKT"] for st in (site.build or [])
+                 if st.env and "_ONTBREEKT" in st.env}
+    if ontbreekt:
+        var = ", ".join(sorted(ontbreekt))
+        print(f"    ! OVERGESLAGEN — {var} ontbreekt in de omgeving; de build "
+              f"zou onvolledige data publiceren.", file=sys.stderr)
+        return site.naam, f"overgeslagen: {var} niet gezet"
+
     reden = run_preflight(site, force)
     if reden:
         print(f"    ! OVERGESLAGEN — {reden}. Draai eerst de pijplijn, of "

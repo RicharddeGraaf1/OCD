@@ -111,6 +111,33 @@ def db_url() -> str:
             f"@{os.environ['DB_HOST']}:{os.environ['DB_PORT']}/{os.environ['DB_NAME']}")
 
 
+
+def archiveer_vorige(werk):
+    """Zet een map met afgeronde uitvoer opzij in plaats van te weigeren.
+
+    De klep hieronder is terecht -- de batches zijn óók de referentie waartegen
+    het laadscript natelt, dus een tweede export erover schrijft de controle
+    weg. Maar de oplossing is mechanisch: hernoem de map naar
+    `<naam>-<datum-van-de-inhoud>` en begin schoon. Tot 2026-08-29 moest dat met
+    de hand, en dat is precies het soort stap dat je één keer vergeet.
+
+    De datum komt van de nieuwste `out-*.jsonl` in de map, niet van vandaag: zo
+    heet het archief naar de run waar het bij hoort.
+    """
+    import datetime as _dt
+    uitvoer = sorted(werk.glob("out-*.jsonl"))
+    if not uitvoer:
+        return None
+    datum = _dt.date.fromtimestamp(max(f.stat().st_mtime for f in uitvoer))
+    doel = werk.with_name(f"{werk.name}-{datum:%Y-%m-%d}")
+    n = 2
+    while doel.exists():
+        doel = werk.with_name(f"{werk.name}-{datum:%Y-%m-%d}-{n}")
+        n += 1
+    werk.rename(doel)
+    werk.mkdir(parents=True, exist_ok=True)
+    return doel
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sinds", help="ISO-tijdstip; default = start laatste geslaagde sync")
@@ -131,10 +158,8 @@ def main() -> None:
     # schrijft ze leeg, en dan is er niets meer om de uitvoer tegen te houden.
     # Gebeurd op 2026-08-16; vandaar deze klep.
     if not args.opnieuw and any(werk.glob("out-*.jsonl")):
-        raise SystemExit(
-            f"{werk} bevat al subagent-uitvoer (out-*.jsonl).\n"
-            "Laad die eerst met hertaal_fanout_laad.py, of ruim de map op.\n"
-            "Alleen controleren of er nog iets openstaat? Gebruik --dir met een lege map.")
+        oud = archiveer_vorige(werk)
+        print(f"vorige uitvoer gearchiveerd naar {oud.name}")
 
     with psycopg.connect(db_url(), row_factory=dict_row) as conn, conn.cursor() as cur:
         sinds = args.sinds
