@@ -251,10 +251,10 @@ wegzetten als `<naam>-<datum>` in plaats van te weigeren. De weigering is terech
 — de batches zijn de referentie voor de natelling — maar de oplossing is
 mechanisch en hoort niet handmatig.
 
-**4.4 · De prod-API-sleutel bereikbaar maken** *(B-18)*
-Stap 7 controleert nu de database maar niet de API-laag. Zet de sleutel in
-`dso-loader/.env` (niet in git) zodat `/v1/load-status` en `/v1/data-health`
-onderdeel van de verificatie worden.
+**4.4 · De prod-API-sleutel bereikbaar maken** *(B-18)* — **gedaan 2026-08-29**
+Zie [bijlage A](#bijlage-a--de-prod-api-sleutel). `OCD_API_KEY_PUBLIC` staat nu in
+`dso-loader/.env`; beide endpoints antwoorden. Blijft over: de aanroep opnemen in
+runbook stap 7.
 
 **4.5 · Indexnamen gelijktrekken** *(B-19)*
 `idx_te_plain_trgm` op prod hernoemen naar `idx_te_inhoud_plain_trgm`. Vijf
@@ -306,3 +306,92 @@ En de natelling op de subagents leverde deze keer **nul** verzonnen sleutels:
 940/940, 270/270 en 156/156 gedekt bij de eerste controle. Dat de controle er is
 blijft nodig — op 16-08 verzon een agent er wél een — maar het model doet het beter
 dan de vorige keer.
+
+
+---
+
+## Bijlage A — De prod-API-sleutel
+
+*Toegevoegd 2026-08-29 naar aanleiding van B-18: stap 7 kon de API-laag niet
+controleren omdat de sleutel nergens op deze machine stond.*
+
+### Hoe de authenticatie werkt
+
+`ocd-api` leest drie omgevingsvariabelen (`ocd-api/main.py`, regel 44–60):
+
+| variabele | bedoeld voor |
+|---|---|
+| `OCD_API_KEY_PUBLIC` | client-side viewers (ponsenkaart, vergunningenregister). Te invalideren bij scraper-misbruik zonder backend-clients te raken. |
+| `OCD_API_KEY_PRIVATE` | backend-clients zoals de Omgevingsbot. Komt nooit in browsercode. |
+| `OCD_API_KEY` | legacy single-key; werkt alleen als de twee hierboven leeg zijn. Staat **niet** op de Railway-service. |
+
+De header heet `X-Api-Key`. `verify_key` accepteert **elke** geldige sleutel en
+onderscheidt alleen de *tier* voor logging — `/v1/load-status` en
+`/v1/data-health` hangen allebei aan `Depends(verify_key)` zonder tier-eis. Voor
+verificatie volstaat dus de **publieke** sleutel; de private is hier niet nodig.
+
+> **Let op, het codecommentaar klopt niet meer.** `main.py` zegt dat de publieke
+> sleutel "in de client-side HTML van publieke viewers" zit. Dat gold ooit, maar
+> ponsenkaart.nl zet `window.OCD_API_KEY = ''` en houdt de sleutel server-side in
+> een Cloudflare Pages Function (`functions/api/[[catchall]].js`, env-var
+> `OCD_API_KEY_PUBLIC`). Je kunt hem dus **niet** uit de gepubliceerde site
+> plukken — en dat is maar goed ook.
+
+### Waar je hem vandaan haalt
+
+**Route 1 — Railway CLI (snelst).** De CLI is op deze machine ingelogd en aan
+project `ocd` / environment `production` gekoppeld:
+
+```bash
+cd c:/GIT/OCD
+railway variables --service ocd-api --kv | grep OCD_API_KEY_PUBLIC
+```
+
+`--kv` geeft `NAAM=waarde`-regels; zonder die vlag krijg je een tabel met
+afgekapte waarden. `--service` is verplicht in niet-interactieve shells.
+
+**Route 2 — Railway-dashboard.** Project `ocd` → service **ocd-api** →
+*Variables* → oogje bij `OCD_API_KEY_PUBLIC`.
+
+**Route 3 — Cloudflare.** De Pages-projecten dragen dezelfde waarde als
+`OCD_API_KEY_PUBLIC`-env-var, maar Cloudflare maskeert secrets ná opslaan. Alleen
+bruikbaar als je hem daar zelf net hebt gezet.
+
+### Waar hij hoort te staan
+
+In `dso-loader/.env`, dat door `dso-loader/.gitignore` regel 1 wordt genegeerd en
+niet getrackt is. **Nooit** in een bestand dat git ziet — de eerdere
+`.env`-in-Cloudflare-deploy heeft laten zien hoe snel dat publiek wordt.
+
+```
+# prod-API (Railway service ocd-api) — voor stap 7 van het sync-runbook
+OCD_API_KEY_PUBLIC=<32 tekens>
+```
+
+### De controle zelf
+
+```bash
+K=$(sed -n 's/^OCD_API_KEY_PUBLIC=//p' dso-loader/.env | tr -d '')
+curl -s -H "X-Api-Key: $K" https://ocd-api-production.up.railway.app/v1/data-health
+curl -s -H "X-Api-Key: $K" https://ocd-api-production.up.railway.app/v1/load-status
+```
+
+Gemeten 2026-08-29, ná deze sync — `data-health` op prod is gelijk aan lokaal:
+
+```
+bronhouders 511 · met content 381 · duplicate_naam 0 · pdok_mismatch 0
+regelingen_zonder_tekst 0 · dso_mist_totaal 0
+geo: vindbare_locaties 320.459 · subdiv_geometrie_null 0 · subdiv_orphans 0
+```
+
+Dat `subdiv_orphans` en `subdiv_geometrie_null` allebei op **0** staan is de
+onafhankelijke bevestiging dat de `locatie_subdiv`-herbouw op prod (10 bronhouders,
+171.053 stukjes) compleet is.
+
+> **Eén ding om niet van te schrikken**: `/v1/load-status` toont voor
+> `ozon-regelingen` een `finished_at` van **2026-08-01**. Dat is geen achterstand
+> maar het gevolg van runbook-principe 2 — prod krijgt gegevens, geen loaders. De
+> laatste échte loader-run op prod dateert van vóór die keuze. Voor `vth` staat er
+> wél een verse datum, want dat is een push. Wie `load-status` als
+> actualiteitsmeter gebruikt, leest hier dus een verkeerd signaal; overweeg de
+> replicatiestappen ook een `core.load_run`-rij op prod te laten schrijven.
