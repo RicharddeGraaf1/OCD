@@ -1389,7 +1389,13 @@ CREATE INDEX IF NOT EXISTS idx_mer_event_type  ON mer.event (event_type);
 
 CREATE TABLE IF NOT EXISTS mer.project (
     slug             text PRIMARY KEY,
-    project_nr       integer UNIQUE,
+    -- GEEN UNIQUE: de Commissie m.e.r. publiceert soms twee adviespagina's
+    -- onder hetzelfde projectnummer. Gemeten 2026-08-28 op nr 3818
+    -- (Verbindingen Aanlanding Wind op Zee 2031-2040), dat onder twee slugs
+    -- in de sitemap staat met verschillend bevoegd gezag. De UNIQUE liet
+    -- `load-mer` toen hard afbreken. De harvest-store (schema_sqlite.sql) had
+    -- hem nooit; Postgres week af van de laag die hij 1-op-1 zou spiegelen.
+    project_nr       integer,
     titel            text NOT NULL,
     bevoegd_gezag    text,
     bronhouder_id    integer,

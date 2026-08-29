@@ -142,6 +142,24 @@ de lange pool.
 > uur**, want toen werden er voor het eerst ~50.000 DMN-bestanden opgehaald.
 > Met de delta hieronder is het ~40 min. Zie §i2a-delta.
 
+#### Als een handvol bronhouders op 503 strandt
+
+*Toegevoegd 2026-08-28, toen er acht omvielen ná vijf retries.* De 503's zijn
+transiënt — dezelfde acht kwamen er daarna in **45 seconden** alsnog doorheen —
+maar zonder herstel dragen die bronhouders de toepasbare-regel-stand van vóór de
+sync, en `core.load_run` sluit af op `deels` zonder dat iets verder klaagt.
+
+`python -m src.cli load-imtr` is hiervoor **niet** het gereedschap: dat laadt
+alleen de POC-bronhouder uit `.env` (Utrecht). De landelijke sweep zit in
+`full_sync.fase_i2a` en heeft geen filter. Daarom:
+
+```bash
+python scripts/i2a_herstel_bronhouders.py 0394 0753 0880   # kale codes, zoals de sync ze meldt
+```
+
+Roept dezelfde `i2a.run` aan met een gefilterde bronhouderlijst en slaat de
+landelijke werkzaamhedencatalogus over.
+
 ### Stap 1b — Wijzigingsspoor (ontwerpen + besluitversies)
 
 **Stond tot 2026-08-11 helemaal niet in dit runbook.** `full_sync.py` raakt
@@ -273,6 +291,20 @@ de omvang zit in afgeleide objecten die je nooit over de lijn moet sturen.
 `locatie_subdiv` meesturen zou in z'n eentje meer dan de helft van het
 p2p-volume over de proxy duwen, voor geometrie die prod in seconden per
 bronhouder zelf berekent.
+
+> ⚠️ **Stap 3 kan niet vóór de post-fase.** `p2p.regeling_load` wordt niet door de
+> p2p-fase geschreven maar door `fase_post` (`REGELING_LOAD_BACKFILL`,
+> `geladen_op = now()`). Draai je `repliceer_p2p_naar_prod.py` halverwege de run,
+> dan staat de nieuwste `geladen_op` nog op de vórige sync en repliceert hij
+> keurig de **vorige** set — met exit 0 en zonder één signaal. Gemeten 2026-08-28:
+> de droogloop gaf 20 expressies waarvan er nul van die nacht waren. Wacht dus tot
+> het sync-rapport er staat, of tot een query op `p2p.regeling_load` rijen van
+> deze run toont.
+>
+> Datzelfde verklaart waarom de scope vaak **groter** is dan het aantal nieuw
+> geladen regelingen: de default is "sinds de start van de laatste geslaagde
+> sync", en zolang de huidige run nog open staat is dat de vorige. Onschadelijk
+> (upsert), maar reken erop bij het beoordelen van de tellingen.
 
 #### Volgorde
 
@@ -515,11 +547,14 @@ Twee dingen om te weten vóór je hier tijd in steekt:
   (`gm0363`) terwijl de RTR de kale code verwacht (`0363` → 113 activiteiten).
   Geen activiteiten → geen OIN → STTR stilzwijgend overgeslagen. Na de fix:
   **+384.178 uitvoeringsregels (+46%)**, van 831.835 naar 1.216.013.
-- **Productie draait bewust nog op de oude stand** (831.835). Het verschil met
-  lokaal is dus geen datagat maar een openstaande keuze: eerst moet vaststaan
-  welke afnemer de toepasbare regels op prod gebruikt. Vastgelegd in de vault
-  onder Gebruikersinput 2026-08-08. Wie hier een afwijking ziet — of de
-  regressiecheck die hem meldt — weet nu waarom.
+- **Dit klopt sinds ergens na 08-08 niet meer.** Hier stond dat productie
+  "bewust nog op de oude stand (831.835)" draait. Gemeten 2026-08-28:
+  `i2a.uitvoeringsregel` staat op prod op **1.232.842** tegen 1.238.206 lokaal —
+  een verschil van 0,4%, niet van 46%. `dmn_element` is aan beide kanten exact
+  959.216 en `toepasbaar_regelbestand` scheelt 14. Prod is dus bijgetrokken, langs
+  welke weg dan ook. Volgens de regel hierboven ("verschil triviaal → laten
+  staan") valt hier niets meer te doen; de openstaande keuze over de afnemer is de
+  facto al beantwoord.
 
 ### Stap 6 — Embeddings + onderwerp-as
 
@@ -635,6 +670,36 @@ SELECT (SELECT count(*) FROM ch) AS chunks,
 Na de herbouw van 13-08: 7.302 chunks, 5.810 met categorie (80%), 6.733 met
 annotatie (92%). **Draai stap 6c pas hierná** — anders zet je de onvolledige
 toewijzingen over en moet je hem twee keer doen (zoals op 13-08 gebeurd is).
+
+#### En daarna: `ANALYZE v2a.tekst_embedding` — niet overslaan
+
+*Toegevoegd 2026-08-28.* De vectorlaag verandert elke sync (die run: +10.867
+chunks, −11.386 opgeruimd), maar **autovacuum heeft deze tabel nog nooit
+opgepakt**. Gemeten vlak ná de embed-stap:
+
+```
+relname          n_live_tup  n_dead_tup  last_analyze  last_autoanalyze
+tekst_embedding           0       11386          None              None
+```
+
+Nul levende rijen op een tabel van 1,65 miljoen, en `last_autoanalyze` leeg over
+de hele levensduur. Elke planner die daarop bouwt kiest een plan voor een lege
+tabel. Wat dat kost, gemeten op `tier1_screen.py` (stap 6b):
+
+| | s/regel |
+|---|---|
+| statistieken op nul | **> 30** — geen 100 van 940 regels in 50 minuten |
+| ná `ANALYZE` (81 s) + herstart | **2,36** |
+
+```bash
+psql "$OCD_DB_URL" -c "SET max_parallel_maintenance_workers = 0"                    -c "ANALYZE v2a.tekst_embedding"
+```
+
+**De herstart hoort erbij.** `ANALYZE` alleen hielp niet: psycopg3 prepareert een
+statement na vijf uitvoeringen (`prepare_threshold=5`) en houdt dat plan vast voor
+de rest van de verbinding. Een draaiend proces blijft dus op het slechte plan
+zitten, hoe vers de statistieken ook zijn. Ruim vóór de herstart de spook-backend
+op (§4) — die rekent anders door aan werk dat nooit committet.
 
 #### Overslaan mag, maar weet wat je overslaat
 
@@ -768,6 +833,19 @@ zou vallen: de screening is een landelijke top-K per regel, en of die verschoven
 is weet je pas door hem opnieuw te draaien. Vuistregel: **laadde stap 1 nieuwe
 of gewijzigde omgevingsplannen, draai dan 1a–1d ongeacht wat `stand.py` zegt.**
 
+Op 2026-08-28 is die vuistregel voor het eerst hard bewezen. `stand.py` meldde
+**BIJ** op alle zes signalen; `match/verversen.sql` vond daarna **753 gewijzigde
+teksten** en gooide `screening_cel` terug van 89.061 naar 7.266. Was de pre-check
+gevolgd, dan had de site de oordelen van vóór de sync getoond, zonder één
+foutmelding.
+
+> **Let op de werkvoorraad-teller van `doel_screen.py`.** Die meldde 5.694 sets
+> terwijl `judge_fanout_export --pijplijn doel` op **156** uitkwam (en de database
+> op 110 unieke `bewijs_hash` zonder oordeel). Hij telt kennelijk per (regel,
+> doeltype) en niet gededupliceerd tegen `irm.judge_uniek`. Het verschil is het
+> verschil tussen vier subagents en honderdveertig — stuur op de export, niet op
+> de METING-regel.
+
 ### Stap 6bis — Begrijpelijke varianten (hertaling)
 
 *Toegevoegd 2026-08-13. Stond niet in dit runbook en liep daardoor achter: de
@@ -869,11 +947,12 @@ python scripts/2026-08-06-categorie-naar-productie.py        # droogloop
 python scripts/2026-08-06-categorie-naar-productie.py --ja   # echt
 ```
 
-De droogloop vergelijkt een md5 over alle `v2a.tekst_embedding`-id's aan beide
-kanten. Komt die niet overeen, dan stopt hij: de `chunk_id`'s zouden dan naar
-andere tekst wijzen. Dat is precies het geval **als je stap 6 lokaal hebt
-gedraaid en er nieuwe chunks bij zijn gekomen** — dan moet eerst de
-embedding-tabel zelf mee naar prod, anders klopt de sleutelruimte niet.
+Hier stond dat de droogloop stopt op een md5-mismatch over
+`v2a.tekst_embedding` en dat je dán eerst de embedding-tabel zelf moet
+overzetten. **Dat is achterhaald**: het script regelt het chunk-verschil sinds
+enige tijd zelf. Gemeten 2026-08-28: `chunks: 10867 nieuw lokaal, 11386 alleen
+nog op prod` → prod opgeschoond (11.386 weg) en 10.867 bijgewerkt in 11 s, zonder
+tussenstap.
 
 Wat hij doet: `v2a.categorie` gelijktrekken (alleen `UPDATE`, de 99 id's zijn
 aan beide kanten dezelfde), de toewijzingen in een schaduwtabel laden en die

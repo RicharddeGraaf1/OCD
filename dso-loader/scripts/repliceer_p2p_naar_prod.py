@@ -160,6 +160,36 @@ CREATE TEMP TABLE scope_td ON COMMIT DROP AS
     SELECT identificatie, locatie_id FROM p2p.tekstdeel
      WHERE locatie_id IN (SELECT identificatie FROM scope_loc);
 
+-- Gebiedsaanwijzingen komen langs twéé routes binnen: via de juridische regel
+-- (scope_ga hierboven) en via het tekstdeel. Die tweede route kwam er op
+-- 2026-08-09 bij met de reparatie van G-124 en stond hier niet, waardoor na de
+-- sync van 21-08 38 gebiedsaanwijzingen op prod ontbraken (vault G-130).
+-- Het is geen randgeval: landelijk hangen 2.049 gebiedsaanwijzingen aan géén
+-- enkele juridische regel en dus uitsluitend aan een tekstdeel.
+-- Eén doorgang volstaat: de nieuwe gebiedsaanwijzingen kunnen scope_td niet
+-- verder verbreden, want tekstdelen hangen aan locaties, niet aan
+-- gebiedsaanwijzingen.
+INSERT INTO scope_ga
+    SELECT DISTINCT tga.gebiedsaanwijzing_id
+      FROM p2p.tekstdeel_gebiedsaanwijzing tga
+     WHERE tga.tekstdeel_id IN (SELECT identificatie FROM scope_td)
+       AND tga.gebiedsaanwijzing_id NOT IN (SELECT identificatie FROM scope_ga);
+
+-- die extra gebiedsaanwijzingen dragen een locatie-FK die mee moet, anders
+-- faalt de INSERT aan de prod-kant.
+INSERT INTO scope_loc
+    SELECT DISTINCT g.locatie_id FROM p2p.gebiedsaanwijzing g
+     WHERE g.identificatie IN (SELECT identificatie FROM scope_ga)
+       AND g.locatie_id IS NOT NULL
+       AND g.locatie_id NOT IN (SELECT identificatie FROM scope_loc);
+
+-- en is zo'n locatie een groep, dan moeten zijn leden er weer bij (zelfde
+-- reden als de groepsuitbreiding hierboven; die draaide vóór deze aanvulling).
+INSERT INTO scope_loc
+    SELECT DISTINCT lg.lid_identificatie FROM p2p.locatiegroep_lid lg
+     WHERE lg.groep_identificatie IN (SELECT identificatie FROM scope_loc)
+       AND lg.lid_identificatie NOT IN (SELECT identificatie FROM scope_loc);
+
 CREATE TEMP TABLE scope_kaart ON COMMIT DROP AS
     SELECT DISTINCT kaart_id AS identificatie FROM p2p.kaartlaag
      WHERE activiteit_id IN (SELECT identificatie FROM scope_act)
@@ -266,6 +296,13 @@ PLAN = [
     ("p2p.tekstdeel_hoofdlijn",
      "SELECT t.* FROM p2p.tekstdeel_hoofdlijn t "
      "WHERE t.tekstdeel_id IN (SELECT identificatie FROM scope_td)"),
+
+    # Stond hier tot 2026-08-28 helemaal niet, terwijl de tabel sinds de
+    # G-124-reparatie gevuld wordt: 7.118 rijen lokaal tegen 6.919 op prod.
+    ("p2p.tekstdeel_gebiedsaanwijzing",
+     "SELECT t.* FROM p2p.tekstdeel_gebiedsaanwijzing t "
+     "WHERE t.tekstdeel_id IN (SELECT identificatie FROM scope_td) "
+     "  AND t.gebiedsaanwijzing_id IN (SELECT identificatie FROM scope_ga)"),
 
     ("p2p.pons",
      "SELECT t.* FROM p2p.pons t WHERE t.locatie_id IN (SELECT identificatie FROM scope_loc)"),
