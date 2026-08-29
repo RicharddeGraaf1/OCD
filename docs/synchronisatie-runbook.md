@@ -1118,6 +1118,37 @@ noemde:
 | annotatieconformiteit | baked | `collect --structuur --rtr` → `score` → `export -f json` → `npm run deploy` |
 | mer-register | baked | `export_mer_data.py` → `add_regeling_to_merdata.py` → `add_bg_uniform_to_merdata.py` → `./deploy.sh`, mét pre-flight `harvest/stand.py` |
 
+> ⚠️ **De mer-register-keten mist twee dingen, gemeten 2026-08-28.**
+>
+> 1. **`OCD_PROD_URL` moet in de omgeving staan.** `publish.py` waarschuwt er wel
+>    voor ("de verrijkers vallen om") maar gaat gewoon door, en de site wordt dan
+>    zonder `onderliggendeRegelingen` en `bevoegdGezagUniform` gepubliceerd.
+> 2. **`harvest/resolve_bronhouder.py` is een voorwaarde die nergens staat.**
+>    `add_bg_uniform_to_merdata.py` joint op `mer.project.bronhouder_code`, en die
+>    kolom bestáát niet tot `resolve_bronhouder.py` hem aanmaakt
+>    (`ADD COLUMN IF NOT EXISTS`) en vult. Zolang dat niet is gebeurd faalt de
+>    verrijker met `UndefinedColumn: column p.bronhouder_code does not exist`, en
+>    valt de hele mer-register-stap om.
+>
+>    Dat verklaart ook een schijnbare tegenspraak: `mer.project` heeft wél een
+>    `bronhouder_id`-kolom (uit `ddl.py`), maar die stond op **0 van 3.620 gevuld**
+>    en wordt door niets geschreven. De twee schemadefinities — `ddl.py` en
+>    `MER-register.nl/sql/mer-schema.sql` — zijn hier uit elkaar gelopen.
+>
+> Volgorde die wél werkt:
+>
+> ```bash
+> export OCD_PROD_URL="$PROD_DB_URL"; export MER_PROD_URL="$OCD_PROD_URL"
+> python harvest/resolve_bronhouder.py       # eenmalig per nieuwe bronhouder-stand
+> python harvest/export_mer_data.py
+> python harvest/add_regeling_to_merdata.py
+> python harvest/add_bg_uniform_to_merdata.py
+> ./deploy.sh
+> ```
+>
+> Gemeten resultaat: 2.759 van 3.620 projecten gekoppeld (76%), en het BG-filter
+> ging van 1.271 rauwe strings naar **712** canonieke waarden.
+
 **RoM staat er niet in** — buiten scope sinds 2026-07-24. Het staat nog wél in de
 docstring van `publish.py` en in de `--only`-hulptekst; die zijn achterhaald, de
 registry is de waarheid.
