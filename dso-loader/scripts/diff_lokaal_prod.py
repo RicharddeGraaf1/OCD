@@ -115,7 +115,21 @@ def laad_verwachtingen() -> dict:
 def beoordeel(tabel: str, lok: int | None, prod: int | None, verwacht: dict):
     """→ (status, toelichting). status ∈ gelijk | verwacht | AFWIJKING | ONTBREEKT."""
     if lok is None or prod is None:
+        # Een tabel die maar aan één kant bestaat kon aanvankelijk nooit
+        # "verwacht" worden, waardoor het script na de eerste triage nog altijd
+        # elf afwijkingen meldde -- precies de ruis waar de kop van dit bestand
+        # voor waarschuwt. `alleen: lokaal` / `alleen: prod` in het
+        # verwachtingenbestand dekt dat af, en meldt het alsnog als de tabel aan
+        # de verkeerde kant opduikt.
         kant = "prod" if prod is None else "lokaal"
+        aanwezig = "lokaal" if prod is None else "prod"
+        v = verwacht.get(tabel) or {}
+        if v.get("alleen") == aanwezig:
+            return "verwacht", v.get("reden", "(geen reden opgegeven — vul aan)")
+        if v.get("alleen"):
+            return ("AFWIJKING",
+                    f"verwacht alleen aan de {v['alleen']}-kant, maar staat nu "
+                    f"alleen aan de {aanwezig}-kant")
         return "ONTBREEKT", f"tabel bestaat niet aan de {kant}-kant"
     verschil = lok - prod
     if verschil == 0:

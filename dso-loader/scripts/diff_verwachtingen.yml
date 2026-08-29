@@ -91,19 +91,61 @@ verwacht:
       dat is opgelost hoort deze marge strak te worden gezet. Zie het
       verbeterplan.
 
-  # ── lokale werktabellen: bestaan bewust niet op prod ──────────────────────
-  # (het script meldt deze als ONTBREEKT; ze staan hier ter documentatie)
-  #   v2a.embed_state              dirty-detectie van refresh-v2a, lokaal werk
-  #   v2a.wijziging_categorie      tussenresultaat van de onderwerp-as
-  #   vth.adres_geocode            geocode-cache van de vth-verrijking
-  #   wro.planobject_generalisatie tegel-laag voor Wro, lokaal gebouwd
-  #
-  # ── prod-only tabellen: bewust alleen daar ────────────────────────────────
-  #   mer.project_regeling         door build_regeling_links.py TEGEN prod gebouwd
-  #   mer.besluit_extref           leeg
-  #   v2a.*_oud                    schaduwtabellen van de swap in stap 6c;
-  #                                de rollback-kopie, hoort te blijven staan
-  #   irm.*_pre_fix                eenmalige back-ups van een eerdere reparatie
+  # ── tabellen die maar aan één kant horen te bestaan ───────────────────────
+  # `alleen:` zegt aan welke kant. Duikt zo'n tabel aan de andere kant op, dan
+  # meldt het script dat alsnog als afwijking -- de verwachting is "hier en
+  # nergens anders", niet "negeer deze tabel".
+
+  v2a.embed_state:
+    alleen: lokaal
+    reden: Dirty-detectie van refresh-v2a; puur lokale werkboekhouding.
+
+  v2a.wijziging_categorie:
+    alleen: lokaal
+    reden: Tussenresultaat van de onderwerp-as; prod krijgt de uitkomst, niet de tussenstap.
+
+  vth.adres_geocode:
+    alleen: lokaal
+    reden: Geocode-cache van de vth-verrijking; het resultaat zit in de geometrie-kolommen die wél mee gaan.
+
+  wro.planobject_generalisatie:
+    alleen: lokaal
+    reden: >-
+      Vector-tile-laag voor Wro, lokaal gebouwd. Prod heeft hem niet -- de
+      Wro-tegels worden daar niet geserveerd. Let op de samenhang met
+      p2p.locatie_generalisatie hierboven: dat is dezelfde bouwstap voor de
+      Ow-kant, en die draait momenteel nergens.
+
+  mer.project_regeling:
+    alleen: prod
+    reden: >-
+      Wordt door build_regeling_links.py TEGEN prod gebouwd (runbook stap 6d),
+      omdat de koppeling de prod-regelingvoorraad nodig heeft. Lokaal bestaat
+      hij daarom niet.
+
+  mer.besluit_extref:
+    alleen: prod
+    reden: Leeg; restant van een eerder ontwerp.
+
+  v2a.artikel_indeling_oud:
+    alleen: prod
+    reden: Schaduwtabel van de swap in stap 6c -- de rollback-kopie, hoort te blijven staan.
+
+  v2a.chunk_annotatie_oud:
+    alleen: prod
+    reden: idem -- rollback-kopie van de onderwerp-as-swap.
+
+  v2a.chunk_categorie_oud:
+    alleen: prod
+    reden: idem -- rollback-kopie van de onderwerp-as-swap.
+
+  v2a.pad_categorie_oud:
+    alleen: prod
+    reden: idem -- rollback-kopie van de onderwerp-as-swap.
+
+  irm.screening_cel_pre_fix:
+    alleen: prod
+    reden: Eenmalige back-up van een eerdere reparatie; niet gesynchroniseerd.
 
   core.load_run:
     min: -10000
