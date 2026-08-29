@@ -398,6 +398,25 @@ vooral provincies. Dat 212 bronhouders consequent lege groepen publiceren terwij
 dertien dat niet doen, is als contentverklaring onwaarschijnlijk. Vastgelegd als
 vault-gap **G-135**; de oorzaak (welk API-pad levert de leden?) staat nog open.
 
+### Eindstand van de diff
+
+Na de triage en de reparaties:
+
+```
+122 tabellen · 95 gelijk · 27 verwacht verschil · 0 AFWIJKEND
+```
+
+Elk van die 27 verschillen draagt in `diff_verwachtingen.yml` de reden waarom hij
+er hoort te zijn. Dat is het punt van deze stap: vanaf de volgende sync is elk
+nieuw verschil per definitie iets om te verklaren. Precies dat ontbrak toen
+`tekstdeel_hoofdlijn` negentien dagen op nul stond.
+
+Eén ontwerpfout in het gereedschap zelf kwam daarbij boven. Een tabel die maar
+aan één kant bestaat viel uit de verwachtingslogica, waardoor het script na de
+eerste triage nog altijd elf afwijkingen meldde — de ruis waar zijn eigen kop
+voor waarschuwt. `alleen: lokaal` / `alleen: prod` dekt dat nu af, en is geen
+doofpot: duikt zo'n tabel aan de verkeerde kant op, dan meldt hij dat alsnog.
+
 ### Nog te doen
 
 | # | Wat | Waarom het bleef liggen |
