@@ -1,7 +1,7 @@
-47 locaties die lokaal bestaan en op prod ontbreken
+44 locaties die lokaal bestaan en op prod ontbreken (was 47)
 ==============================================================================
 Gemeten   : 2026-08-29 11:13, na de sync van 2026-08-28 (run 11)
-Lokaal    : p2p.locatie 320.767   Prod: 320.720   Verschil: 47
+Lokaal    : p2p.locatie 320.767   Prod: 320.723   Verschil: 44
 
 Waarom ze ontbreken: repliceer_p2p_naar_prod.py bouwt zijn scope vanaf de
 geladen regelingen omlaag (regeling -> juridische regel -> locatie). Een locatie
@@ -12,6 +12,13 @@ Kolommen: leden = rijen in locatiegroep_lid met deze locatie als groep;
           lid_van = idem als lid; pons = rijen in p2p.pons; basisgeo = geometrie-
           koppelingen. Geen van de 47 hangt aan een activiteit, gebiedsaanwijzing,
           tekstdeel of normwaarde -- dat is nagemeten en overal 0.
+
+CORRECTIE 2026-08-29: drie van de oorspronkelijke 47 droegen wel een PONS, en
+pons is precies wat ponsenkaart.nl toont. "Hangt nergens aan" gold dus voor vier
+van de vijf koppelingen, niet voor alle vijf. Die drie zijn alsnog naar prod
+overgezet (met hun locatie), waarmee het restant op 44 komt. De drie staan
+hieronder nog in de lijst, met pons=1; dat is de reden dat ze inmiddels wel op
+prod staan. Gevonden door scripts/diff_lokaal_prod.py.
 
 
 --- Ambtsgebied (3) -------------------------------------------------

@@ -310,6 +310,106 @@ dan de vorige keer.
 
 ---
 
+## 6. Uitvoering — stand 2026-08-29
+
+Het plan is dezelfde dag uitgevoerd. Wat het opleverde staat hieronder; de
+verrassing is dat de **detectie** (1.1) meer vond dan de reparaties waarvoor hij
+was bedoeld.
+
+### Gedaan
+
+| # | Wat | Uitkomst |
+|---|---|---|
+| 1.1 | `scripts/diff_lokaal_prod.py` + `diff_verwachtingen.yml` | telt 122 tabellen aan beide kanten, parallel; **26 afwijkingen op de eerste run** |
+| 1.2 | Backfill-afspraak in runbook §3a; keten uitgebreid | kaart, kaartlaag en pons erbij; +10 rijen naar prod |
+| 1.3 | MER-keten | `resolve_bronhouder.py` in `publish.py`, `.env` wordt geladen, ontbrekende env-var is nu een poort |
+| 1.4 | i2a-herstel | het sync-rapport drukt nu het herstelcommando mét codes af |
+| 2.1 | `doel_screen.py`-teller | telt nu hetzelfde als de export |
+| 2.3 | `stand.py` | zevende signaal: omgevingsplannen die nooit gescreend zijn |
+| 3.1 | `ANALYZE` | in `fase_post` én in de preflight, met detectie van lege statistieken |
+| 3.2 | Oorzaak autovacuum | **gevonden** — zie hieronder |
+| 3.3 | `prepare_threshold=None` | in `tier1_screen.py` en `doel_screen.py` |
+| 4.1 | Docker-preflight | start de engine, wijst bij uitblijven WSL aan |
+| 4.3 | Exportmappen | archiveren zichzelf naar `<naam>-<datum>` |
+| 4.4 | Prod-API-sleutel | bijlage A; beide endpoints antwoorden |
+| 4.5 | Indexnaam | prod hernoemd naar `idx_te_inhoud_plain_trgm` |
+| 4.6 | Gebiedengroepen | gemeten → nieuwe gap, zie hieronder |
+| B-11 | MER-poort | vraagt nu de bron in plaats van de kalender |
+
+### 3.2 — de oorzaak was niet wat G-133 eerst zei
+
+De eerste diagnose was "autovacuum heeft deze tabel over zijn hele levensduur
+nooit opgepakt". Dat klopte niet. **PostgreSQL 16 houdt de cumulatieve
+statistieken in gedeeld geheugen en gooit ze weg bij een onreine afsluiting.**
+Docker Desktop lag eruit toen de sync begon, dus de postmaster startte om
+**20:39:22** — drie minuten vóór de run — met een schone lei:
+
+```
+pg_stat_database.stats_reset : None
+pg_postmaster_start_time()   : 2026-08-28 20:39:22
+tabellen zonder last_autoanalyze: 159 van 195
+```
+
+Niet één tabel dus, maar 159 van de 195. Autovacuum zag overal "sinds de laatste
+analyse niets gewijzigd" en deed niets. Dat maakt B-16 (dode Docker) en B-12
+(trage screening) **hetzelfde incident**, twee uur uit elkaar zichtbaar geworden.
+`pg_class.reltuples` overleeft zo'n reset, dus de meeste tabellen hielden een
+bruikbare schatting — de vectorlaag was de uitzondering omdat hij groot is, elke
+sync wisselt, en daarna vooral gelezen wordt.
+
+### Wat de diff op zijn eerste run vond
+
+122 tabellen, 92 gelijk, 26 afwijkend. Na triage bleven er drie over die er
+werkelijk toe deden:
+
+1. **`p2p.kaartlaag` (7) en `p2p.kaart` (2) misten op prod** — dezelfde
+   tekstdeel-keten als [[G-130]], één tabel verder: alle zeven kaartlagen hangen
+   aan een gebiedsaanwijzing die alleen via een tekstdeel bereikbaar was.
+2. **`p2p.pons` (3) miste op prod** — en dit corrigeert een conclusie uit
+   hoofdstuk 4. Daar stond dat de 47 ongerefereerde locaties "nergens aan hangen,
+   dus overzetten is ruis kopiëren". Dat gold voor activiteit, gebiedsaanwijzing,
+   tekstdeel en normwaarde — **niet voor pons**, en pons is precies wat
+   ponsenkaart.nl toont. Drie van de 47 droegen er een. Die zijn alsnog overgezet;
+   het restant is nu 44.
+3. **`p2p.locatie_generalisatie` loopt 659.773 rijen achter op prod** — en óók
+   lokaal missen 17.230 locaties een generalisatie. `ocd-api/tiles.py` leest die
+   tabel vanaf z11, en `vul_locatie_generalisatie.py` draait in **geen enkele
+   sync-stap**. Zie hieronder bij "nog te doen".
+
+De rest was verklaarbaar en staat nu met reden in `diff_verwachtingen.yml`:
+lokale werktabellen, prod-only tabellen (`mer.project_regeling` wordt tégen prod
+gebouwd), de `*_oud`-schaduwtabellen van de swap in stap 6c, run-historie, en de
+irm-hit-tabellen die `sync_prod.py` bewust niet meeneemt omdat `build/query.sql`
+ze niet leest.
+
+Twee tabellen bleken lokaal gevuld maar op prod niet gelezen:
+`vth.omgevingsvergunning_dso` (805) en `vth.vergunning_deeplink` (598). Nagelopen
+in `ocd-api/`: geen enkele endpoint raakt ze. De afwijkvergunning-informatie zit
+als `afwijk_*`-kolommen ÓP `vergunningkennisgeving`, en die worden wél gepusht.
+Enige gevolg is een verouderde teller in `/v1/load-status`.
+
+### 4.6 — 92% van de Gebiedengroepen is leeg
+
+De 38 Gebiedengroepen zonder leden uit de 47-lijst bleken geen curiositeit maar
+de landelijke norm: **11.028 van de 11.960 (92,2%)** heeft geen enkele rij in
+`p2p.locatiegroep_lid`, en alle 11.028 hebben wél geometrie. Van de 225
+bronhouders met Gebiedengroepen hebben er **13** groepen met leden, en dat zijn
+vooral provincies. Dat 212 bronhouders consequent lege groepen publiceren terwijl
+dertien dat niet doen, is als contentverklaring onwaarschijnlijk. Vastgelegd als
+vault-gap **G-135**; de oorzaak (welk API-pad levert de leden?) staat nog open.
+
+### Nog te doen
+
+| # | Wat | Waarom het bleef liggen |
+|---|---|---|
+| 2.2 | preview-embed-teller vervangen door de dirty-set | kleine wijziging in `preview_sync.py`, niet urgent nu de dirty-set in het runbook staat |
+| 3.4 | p2p→prod filteren op wat werkelijk verschilt | 9 van de 12,7 min winst, maar het raakt het hart van de replicatie; verdient een eigen wijziging met eigen verificatie |
+| 4.2 | de TCP-proxy-stap | vraagt een besluit, geen code — zie hoofdstuk 4 |
+| — | **`vul_locatie_generalisatie.py` inplannen** | volledige herbouw van 20 mln rijen aan beide kanten; een geplande operatie, geen stap die je erbij doet |
+| — | **G-135 uitzoeken** | vraagt onderzoek in de Presenteren-API, niet in onze code |
+
+---
+
 ## Bijlage A — De prod-API-sleutel
 
 *Toegevoegd 2026-08-29 naar aanleiding van B-18: stap 7 kon de API-laag niet
@@ -371,7 +471,8 @@ OCD_API_KEY_PUBLIC=<32 tekens>
 ### De controle zelf
 
 ```bash
-K=$(sed -n 's/^OCD_API_KEY_PUBLIC=//p' dso-loader/.env | tr -d '')
+K=$(sed -n 's/^OCD_API_KEY_PUBLIC=//p' dso-loader/.env | tr -d '
+')
 curl -s -H "X-Api-Key: $K" https://ocd-api-production.up.railway.app/v1/data-health
 curl -s -H "X-Api-Key: $K" https://ocd-api-production.up.railway.app/v1/load-status
 ```

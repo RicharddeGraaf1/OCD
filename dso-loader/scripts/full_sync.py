@@ -459,9 +459,20 @@ def fase_i2a(bronhouders):
         run.set(n_fout=len(err))
     for k, v in err.items():
         fouten.append(f"i2a {k}: {v}")
-    rapporteer("i2a (IMTR toepasbare regels)", [
-        f"- {ok}/{len(resultaten)} ok, fouten: {len(err)}",
-    ])
+    regels = [f"- {ok}/{len(resultaten)} ok, fouten: {len(err)}"]
+    if err:
+        # De codes hier laten staan is het verschil tussen "iemand ziet het" en
+        # "de bronhouder draagt stil de stand van vóór de sync". core.load_run
+        # sluit af op 'deels' en verder klaagt niets. Gemeten 2026-08-28: acht
+        # bronhouders vielen na vijf retries alsnog om op een 503, en kwamen er
+        # daarna in 45 seconden alsnog door -- transiënt dus, maar niet vanzelf.
+        codes = " ".join(sorted(k for k in err if not k.startswith("__")))
+        regels.append(f"- **HERSTEL NODIG** — deze bronhouders dragen nog de stand "
+                      f"van vóór deze sync:")
+        regels.append(f"  `python scripts/i2a_herstel_bronhouders.py {codes}`")
+        fouten.append(f"i2a: {len(err)} bronhouders niet geladen — "
+                      f"herstel met scripts/i2a_herstel_bronhouders.py {codes}")
+    rapporteer("i2a (IMTR toepasbare regels)", regels)
 
 
 # ── Fase 5: vth ──────────────────────────────────────────────────────

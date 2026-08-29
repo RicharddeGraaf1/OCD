@@ -287,6 +287,17 @@ de omvang zit in afgeleide objecten die je nooit over de lijn moet sturen.
 | **Herbouwen** | `p2p.locatie_subdiv` (12 GB lokaal, ST_Subdivide-afgeleide) | alleen voor de geraakte bronhouders |
 | **Herbouwen** | de drieslag-MV's (`naammatch_signaal`, `naammatch_signaal_intra`, `mv_regel_op_locatie`, `tekst_object_consistentie_mv`, `gio_locatie`, `gio_referentie_consistentie_mv`, `ala_punt`) | `refresh_drieslag.py` tegen prod |
 | **Herbouwen** | health + stats (`core.mv_bronhouder_health`, `core.mv_geo_health`, `v2a.ponsenkaart_gemeente_stats`) | idem |
+| **Herbouwen — ontbrak** | `p2p.locatie_generalisatie` (vector-tile-lagen, gelezen door `ocd-api/tiles.py` vanaf z11) | `vul_locatie_generalisatie.py`, **staat nog in geen enkele stap** — zie hieronder |
+
+> ⚠️ **De vector-tile-generalisatie draait nergens.** Gemeten 2026-08-29 met
+> `diff_lokaal_prod.py`: prod staat op 19.537.747 rijen tegen 20.197.520 lokaal,
+> en óók lokaal missen **17.230 locaties** een generalisatie. `ocd-api/tiles.py`
+> leest die tabel vanaf zoomniveau 11, dus nieuwe planvoorraad verschijnt daar
+> niet in de tegels. `vul_locatie_generalisatie.py` doet een volledige herbouw
+> (geen incrementele detectie, want `p2p.locatie` heeft geen tijdstempel) en is
+> daarmee een aparte, geplande operatie — geen stap die je er even bij doet.
+> Zolang dat niet is opgelost staat er in `diff_verwachtingen.yml` een bewust
+> ruime marge op deze tabel.
 
 `locatie_subdiv` meesturen zou in z'n eentje meer dan de helft van het
 p2p-volume over de proxy duwen, voor geometrie die prod in seconden per
@@ -1057,7 +1068,23 @@ Het bakken en deployen van de site zit **niet** in deze stap maar in stap 8:
 
 ```bash
 python scripts/preview_sync.py --vergelijk-prod    # moet nu ~0 te laden tonen
+python scripts/diff_lokaal_prod.py                 # moet 0 AFWIJKEND tonen (~20 min)
 ```
+
+> **De tabelbrede diff is sinds 2026-08-29 onderdeel van deze stap.** Hij telt
+> élke tabel in `core`, `p2p`, `p2pwijziging`, `v2a`, `i2a`, `irm`, `mer`, `vth`,
+> `wro` en `skos` aan beide kanten en meldt alleen wat onverwacht verschilt;
+> verwachte verschillen staan met reden in `scripts/diff_verwachtingen.yml`.
+>
+> Hij bestaat omdat de twee gaten van 28-08 — `tekstdeel_hoofdlijn` op nul en de
+> 38 ontbrekende locaties — alleen zichtbaar waren door met de hand te tellen. Op
+> zijn eerste run vond hij er meteen drie meer: `kaartlaag` en `pons` misten op
+> prod, en de vector-tile-generalisatie liep 660k rijen achter.
+>
+> Een AFWIJKING is niet automatisch een fout. Klopt hij en hoort hij er te zijn,
+> zet hem dan **met reden** in het verwachtingenbestand — een controle die ruis
+> geeft wordt niet gelezen, en dat is precies hoe "0 fouten" jarenlang valse
+> geruststelling gaf.
 
 En verder:
 
@@ -1287,6 +1314,39 @@ autovacuum de tabellen zelf op. Draai je 'm handmatig, zet dan eerst
 `could not resize shared memory segment` (Docker `/dev/shm`).
 
 ---
+
+## 3a. Afspraak: een backfill levert zijn eigen pad naar prod mee
+
+*Vastgelegd 2026-08-29. Dit is de belangrijkste les van de sync van 28-08 en hij
+is breder dan het geval dat hem opleverde.*
+
+`repliceer_p2p_naar_prod.py` kopieert de rijen van de **expressies die deze run
+zijn geladen**. Dat is precies goed voor nieuwe data, en het maakt hem
+principieel blind voor een **backfill**: een landelijke reparatie over de
+bestaande voorraad raakt geen enkele expressie en komt dus nooit langs de delta —
+niet in de run erna, en niet in enige run daarna.
+
+Wat dat kost, gemeten: de reparatie van [[gaps#G-124]] op 2026-08-09 vulde
+landelijk `p2p.tekstdeel_hoofdlijn`. Negentien dagen later stond die tabel op
+prod nog op **0** tegen 4.955 lokaal, en niets had geklaagd.
+
+**De regel is daarom: wie een backfill draait, levert de overzetstap mee.** Geen
+landelijke reparatie zonder een pad naar productie, in dezelfde wijziging, met
+een meting erbij. `scripts/backfill_tekstdeel_junctions_prod.py` is het werkende
+voorbeeld — hij loopt een tabelketen in FK-volgorde, toetst per tabel of de ouder
+aan de prod-kant bestaat, en slaat wezen over in plaats van ze te forceren.
+
+Twee dingen om te weten voordat je hem hergebruikt:
+
+- **Een droogloop is per constructie pessimistisch.** Hij schrijft niets, dus
+  rapporteert stap N+1 zijn ouders nog als ontbrekend. Op 28-08 gaf de droogloop
+  5.174 aan te bieden en 1.103 wezen; de echte run deed er 5.947 met 330 wezen
+  over.
+- **Identity-kolommen moeten mee.** `p2p.kaartlaag.id` is `GENERATED ALWAYS`;
+  prod nieuwe id's laten uitdelen maakt elke latere vergelijking onbruikbaar.
+
+Controleer het resultaat met `diff_lokaal_prod.py` (runbook stap 7) — dat is de
+tegenhanger die deze afspraak afdwingbaar maakt.
 
 ## 3b. Repo-hygiëne: één branch, `main`
 
