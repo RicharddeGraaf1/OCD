@@ -289,15 +289,35 @@ de omvang zit in afgeleide objecten die je nooit over de lijn moet sturen.
 | **Herbouwen** | health + stats (`core.mv_bronhouder_health`, `core.mv_geo_health`, `v2a.ponsenkaart_gemeente_stats`) | idem |
 | **Herbouwen — ontbrak** | `p2p.locatie_generalisatie` (vector-tile-lagen, gelezen door `ocd-api/tiles.py` vanaf z11) | `vul_locatie_generalisatie.py`, **staat nog in geen enkele stap** — zie hieronder |
 
-> ⚠️ **De vector-tile-generalisatie draait nergens.** Gemeten 2026-08-29 met
-> `diff_lokaal_prod.py`: prod staat op 19.537.747 rijen tegen 20.197.520 lokaal,
-> en óók lokaal missen **17.230 locaties** een generalisatie. `ocd-api/tiles.py`
-> leest die tabel vanaf zoomniveau 11, dus nieuwe planvoorraad verschijnt daar
-> niet in de tegels. `vul_locatie_generalisatie.py` doet een volledige herbouw
-> (geen incrementele detectie, want `p2p.locatie` heeft geen tijdstempel) en is
-> daarmee een aparte, geplande operatie — geen stap die je er even bij doet.
-> Zolang dat niet is opgelost staat er in `diff_verwachtingen.yml` een bewust
-> ruime marge op deze tabel.
+> ⚠️ **De vector-tile-generalisatie draait in geen enkele sync-stap.**
+> `ocd-api/tiles.py` leest `p2p.locatie_generalisatie` voor z0–z10, maar
+> `vul_locatie_generalisatie.py` staat nergens in dit runbook ingeroosterd.
+> Gemeten 2026-08-29 met `diff_lokaal_prod.py`: prod 19.537.747 rijen tegen
+> 20.197.520 lokaal.
+>
+> **Lokaal herbouwd op 2026-08-31**, en dat gaf meteen de maatvoering: 15,0 min
+> voor de drie niveaus (81 chunks over 6 verbindingen) plus 64 s indexbouw, op
+> 28 cores. Uitkomst 20.257.175 rijen. De doorvoer is ~6.000–7.500 rijen/s per
+> verbinding en schaalt met `--workers`.
+>
+> **Prod loopt daarmee 719.428 rijen achter** en dat is echte veroudering:
+> nieuwe planvoorraad die nooit is gegeneraliseerd en dus onder z11 niet
+> verschijnt.
+>
+> **Herbouwen, niet meesturen** — zelfde afweging als bij `locatie_subdiv`
+> hierboven, en hier nog dwingender. De heap is **6,2 GB**; die over de proxy
+> duwen kost bij de gemeten replicatiesnelheid (~1,3 MB/s bij de p2p-locaties op
+> 28-08) uren, terwijl prod de bewerking zelf doet zonder één byte over de lijn.
+> Belangrijker nog is dat het **fout** zou zijn: prod heeft 7.746.299
+> `locatie_subdiv`-rijen tegen 7.756.430 lokaal, dus een gekopieerde
+> generalisatie is afgeleid van een andere bron dan die op prod staat.
+>
+> **Maar draai het script daar niet zoals het nu is.** Hij doet een `TRUNCATE`
+> vooraf, en op prod betekent dat een lege tegellaag zolang de herbouw loopt —
+> voor bezoekers een blanco kaart onder z11, tientallen minuten lang. Twee
+> uitwegen: per `--niveau` draaien (dan is er telkens één zoomband leeg in plaats
+> van alle drie), of het script een schaduwtabel-met-swap geven zoals
+> `2026-08-06-categorie-naar-productie.py` dat doet. Die tweede is de goede.
 
 `locatie_subdiv` meesturen zou in z'n eentje meer dan de helft van het
 p2p-volume over de proxy duwen, voor geometrie die prod in seconden per

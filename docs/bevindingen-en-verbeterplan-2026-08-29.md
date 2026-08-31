@@ -372,10 +372,18 @@ werkelijk toe deden:
    tekstdeel en normwaarde — **niet voor pons**, en pons is precies wat
    ponsenkaart.nl toont. Drie van de 47 droegen er een. Die zijn alsnog overgezet;
    het restant is nu 44.
-3. **`p2p.locatie_generalisatie` loopt 659.773 rijen achter op prod** — en óók
-   lokaal missen 17.230 locaties een generalisatie. `ocd-api/tiles.py` leest die
-   tabel vanaf z11, en `vul_locatie_generalisatie.py` draait in **geen enkele
-   sync-stap**. Zie hieronder bij "nog te doen".
+3. **`p2p.locatie_generalisatie` loopt 659.773 rijen achter op prod.**
+   `ocd-api/tiles.py` leest die tabel voor z0–z10, en
+   `vul_locatie_generalisatie.py` draait in **geen enkele sync-stap**.
+
+   > **Correctie 2026-08-31.** Hier stond er ook bij dat "lokaal 17.230 locaties
+   > een generalisatie missen". Dat was grotendeels onjuist. Na de lokale
+   > herbouw staan er nog **14.560** zonder — en die zijn **alle 14.560**
+   > sub-pixel op het fijnste niveau (grootste bounding box: 3,36 × 3,36 m,
+   > precies de tolerantie). Het script laat ze bewust weg: wat kleiner is dan
+   > een pixel kost bytes in elke tegel en is niet te zien. Van de 17.230 was dus
+   > maar **2.670** echte veroudering; de rest is ontwerp dat ik als gat had
+   > geteld. Het prod-verschil van 659.773 blijft wél echte veroudering.
 
 De rest was verklaarbaar en staat nu met reden in `diff_verwachtingen.yml`:
 lokale werktabellen, prod-only tabellen (`mer.project_regeling` wordt tégen prod

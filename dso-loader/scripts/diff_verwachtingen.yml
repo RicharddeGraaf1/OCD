@@ -81,15 +81,19 @@ verwacht:
       (0,13%). Loopt dit op, dan is een landelijke refresh-subdiv aan de orde.
 
   p2p.locatie_generalisatie:
-    min: -1000000
-    max: 1000000
+    min: -50000
+    max: 800000
     reden: >-
       Vector-tile-generalisatie (vul_locatie_generalisatie.py), gelezen door
-      ocd-api/tiles.py vanaf z11. LET OP -- dit is een ruime marge omdat het
-      script in GEEN ENKELE sync-stap draait: op 2026-08-29 liep prod 659.773
-      rijen achter en misten ook lokaal 17.230 locaties een generalisatie. Zodra
-      dat is opgelost hoort deze marge strak te worden gezet. Zie het
-      verbeterplan.
+      ocd-api/tiles.py voor z0-z10. LET OP -- ruime marge naar boven omdat het
+      script in GEEN ENKELE sync-stap draait. Lokaal herbouwd op 2026-08-31
+      (20.257.175 rijen, 16 min); prod staat nog op de stand van voor die
+      herbouw en loopt 719.428 rijen achter. Zodra prod is herbouwd hoort deze
+      marge naar iets als [-50000, 50000]. De ondergrens is nu al strak: prod
+      hoort nooit meer rijen te hebben dan lokaal.
+      NB de 14.560 locaties die helemaal geen generalisatie hebben zijn GEEN
+      gat -- die zijn sub-pixel op het fijnste niveau (bounding box <= 3,36 m in
+      beide richtingen) en worden bewust weggelaten.
 
   # ── tabellen die maar aan één kant horen te bestaan ───────────────────────
   # `alleen:` zegt aan welke kant. Duikt zo'n tabel aan de andere kant op, dan
