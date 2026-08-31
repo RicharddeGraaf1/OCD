@@ -325,6 +325,7 @@ was bedoeld.
 | 1.3 | MER-keten | `resolve_bronhouder.py` in `publish.py`, `.env` wordt geladen, ontbrekende env-var is nu een poort |
 | 1.4 | i2a-herstel | het sync-rapport drukt nu het herstelcommando mét codes af |
 | 2.1 | `doel_screen.py`-teller | telt nu hetzelfde als de export |
+| 2.2 | preview-embed-teller | toont nu de dirty-set (0) i.p.v. 265.530 elementen zonder embedding |
 | 2.3 | `stand.py` | zevende signaal: omgevingsplannen die nooit gescreend zijn |
 | 3.1 | `ANALYZE` | in `fase_post` én in de preflight, met detectie van lege statistieken |
 | 3.2 | Oorzaak autovacuum | **gevonden** — zie hieronder |
@@ -417,11 +418,20 @@ eerste triage nog altijd elf afwijkingen meldde — de ruis waar zijn eigen kop
 voor waarschuwt. `alleen: lokaal` / `alleen: prod` dekt dat nu af, en is geen
 doofpot: duikt zo'n tabel aan de verkeerde kant op, dan meldt hij dat alsnog.
 
+### Stand: 15 van de 17 planitems af
+
+Spoor 1 en 2 zijn compleet (4 van 4, 3 van 3), spoor 3 op 3 van 4, spoor 4 op 5
+van 6. Wat resteert zijn precies de twee items die bij het opstellen al als
+"eigen wijziging" of "besluit" waren aangemerkt — niet iets dat is blijven
+liggen, maar iets dat niet in deze beweging thuishoorde.
+
+Daarnaast staan er twee **nieuwe** punten open die het plan zelf niet voorzag en
+die door de uitvoering aan het licht kwamen.
+
 ### Nog te doen
 
 | # | Wat | Waarom het bleef liggen |
 |---|---|---|
-| 2.2 | preview-embed-teller vervangen door de dirty-set | kleine wijziging in `preview_sync.py`, niet urgent nu de dirty-set in het runbook staat |
 | 3.4 | p2p→prod filteren op wat werkelijk verschilt | 9 van de 12,7 min winst, maar het raakt het hart van de replicatie; verdient een eigen wijziging met eigen verificatie |
 | 4.2 | de TCP-proxy-stap | vraagt een besluit, geen code — zie hoofdstuk 4 |
 | — | **`vul_locatie_generalisatie.py` inplannen** | volledige herbouw van 20 mln rijen aan beide kanten; een geplande operatie, geen stap die je erbij doet |
