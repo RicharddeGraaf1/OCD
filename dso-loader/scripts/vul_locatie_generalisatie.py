@@ -134,6 +134,92 @@ def _paginas(conn, cfg: dict[str, str]) -> int:
         return cur.fetchone()["relpages"]
 
 
+# ── Incrementeel: per bronhouder ─────────────────────────────────────────────
+#
+# De volledige herbouw is 16 min lokaal (gemeten 2026-08-31) en doet een
+# TRUNCATE. Op productie is dat onbruikbaar: de tegellaag is dan leeg zolang de
+# herbouw duurt, dus de kaart onder z11 blijft blanco voor bezoekers.
+#
+# De goedkope weg is niet delta-detectie maar **scoping op bronhouder**, precies
+# zoals `refresh-subdiv -b <code>` dat voor de brontabel doet. De sync weet welke
+# bronhouders zijn geraakt, en alleen die hoeven opnieuw.
+#
+# Delta-detectie op `bron_hash` is wél geprobeerd en viel af (gemeten 31-08):
+# de bron hashen kost 162 s en de vergelijking per niveau 195 s, dus drie niveaus
+# kosten bijna evenveel als de hele herbouw. Bovendien meldde die detectie
+# 179.135 wijzigingen op een zojuist herbouwde tabel -- precies het aantal rijen
+# dat de sub-pixelzeef weglaat. Zonder diezelfde zeef in de detectiequery
+# rapporteert hij elke run hetzelfde spookverschil.
+#
+# LET OP het prefix-predicaat -- daar zijn twee valkuilen omheen gelopen.
+#
+# Zonder de text_pattern_ops-index uit
+# 2026-09-add-generalisatie-prefix-index.sql kan `identificatie LIKE %s` met een
+# *parameter* de gewone btree niet gebruiken: de database draait op en_US.utf8
+# en onder een niet-C-collatie kan de planner niet bewijzen dat dit een
+# prefix-bereik is. Hij valt dan terug op een volledige parallelle scan --
+# kosten 1.645.474 tegen 21.
+#
+# De voor de hand liggende uitwijk (`>= 'nl.imow-gm0279.' AND
+# < 'nl.imow-gm0279/'`) is *fout* onder die collatie: leestekens wegen licht,
+# waardoor `nl.imow-gm0279.ambtsgebied...` buiten het bereik valt. Gemeten 0
+# rijen waar er 8 zijn -- snel en stil verkeerd, de gevaarlijkste soort.
+#
+# Mét de index is gewoon `LIKE` weer de beste vorm, en veruit: gemeten 0,035 ms
+# tegen 232 ms voor een `COLLATE "C"`-bereik op dezelfde index. Draai die index
+# dus voordat je hierop leunt.
+BRONHOUDER_SQL = """
+INSERT INTO {doel} (identificatie, niveau, geometrie, bron_hash)
+SELECT identificatie, %(niveau)s, g, bron_hash
+  FROM (
+    SELECT identificatie,
+           ST_SimplifyPreserveTopology(geometrie, %(tol)s) AS g,
+           md5(ST_AsBinary(geometrie))::uuid               AS bron_hash
+      FROM {bron}
+     WHERE identificatie LIKE %(pat)s
+       AND NOT (ST_XMax(geometrie) - ST_XMin(geometrie) < %(tol)s
+            AND ST_YMax(geometrie) - ST_YMin(geometrie) < %(tol)s)
+  ) s
+ WHERE g IS NOT NULL AND NOT ST_IsEmpty(g)
+"""
+
+
+def bouw_bronhouders(cfg: dict[str, str], niveaus: dict[int, float],
+                     codes: list[str]) -> None:
+    """Herbouw de generalisatie voor alleen deze bronhouders. Geen TRUNCATE.
+
+    Per bronhouder en per niveau: eerst de bestaande rijen weg, dan opnieuw
+    berekenen. Dat gebeurt in één transactie per bronhouder, zodat een afgebroken
+    run geen half gevulde bronhouder achterlaat -- de tegels van de andere
+    bronhouders blijven ondertussen gewoon staan.
+    """
+    conn = get_conn()
+    sql = BRONHOUDER_SQL.format(**cfg)
+    totaal_rijen, t_totaal = 0, time.monotonic()
+    try:
+        for code in codes:
+            pat = f"nl.imow-{code}.%"
+            t0, rijen, weg = time.monotonic(), 0, 0
+            with conn.cursor() as cur:
+                for n, tol in niveaus.items():
+                    cur.execute(
+                        f'DELETE FROM {cfg["doel"]} '
+                        f'WHERE niveau = %(niveau)s AND identificatie LIKE %(pat)s',
+                        {"niveau": n, "pat": pat})
+                    weg += cur.rowcount
+                    cur.execute(sql, {"niveau": n, "tol": tol, "pat": pat})
+                    rijen += cur.rowcount
+            conn.commit()
+            totaal_rijen += rijen
+            console.print(f"  {code:10s} {weg:>8,} weg → {rijen:>8,} nieuw  "
+                          f"({time.monotonic() - t0:.1f}s)")
+        console.print(f"[bold green]Klaar[/bold green]: {len(codes)} bronhouders, "
+                      f"{totaal_rijen:,} rijen in "
+                      f"{(time.monotonic() - t_totaal) / 60:.1f} min")
+    finally:
+        conn.close()
+
+
 def _bouw_niveau(
     cfg: dict[str, str], niveau: int, tol: float, laatste_blok: int, vanaf: int, workers: int
 ) -> None:
@@ -232,6 +318,13 @@ def _met_indexen(conn, cfg: dict[str, str], indexen: list[tuple[str, str]]) -> N
     is_flag=True,
     help="Niet eerst leegmaken (alleen zinvol samen met --vanaf-blok).",
 )
+@click.option(
+    "--bronhouder",
+    multiple=True,
+    help="Alleen deze bronhouder(s) herbouwen, bv. --bronhouder gm0995 --bronhouder ws0665. "
+         "Geen TRUNCATE: de rest van de tegellaag blijft staan. Dit is de vorm die in "
+         "een sync hoort (naast `refresh-subdiv -b`), niet de volledige herbouw.",
+)
 @click.option("--workers", type=int, default=6, help="Parallelle verbindingen.")
 @click.option(
     "--bron",
@@ -244,10 +337,23 @@ def main(
     steekproef: int | None,
     vanaf_blok: int,
     behoud: bool,
+    bronhouder: tuple[str, ...],
     workers: int,
     bron: str,
 ) -> None:
     cfg = BRONNEN[bron]
+
+    if bronhouder:
+        # Aparte, veel kortere route: geen ctid-chunking, geen TRUNCATE, geen
+        # index-herbouw. De indexen blijven staan omdat het om duizenden rijen
+        # gaat en niet om miljoenen -- ze weggooien en opnieuw bouwen zou hier
+        # veel duurder zijn dan de inserts zelf.
+        niveaus = {niveau: NIVEAUS[niveau]} if niveau else NIVEAUS
+        console.print(f"[bold]{cfg['doel']}[/bold] — {len(bronhouder)} bronhouder(s), "
+                      f"niveaus {list(niveaus)}")
+        bouw_bronhouders(cfg, niveaus, list(bronhouder))
+        return
+
     conn = get_conn()
     try:
         paginas = _paginas(conn, cfg)

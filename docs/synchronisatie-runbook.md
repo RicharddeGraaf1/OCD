@@ -287,37 +287,48 @@ de omvang zit in afgeleide objecten die je nooit over de lijn moet sturen.
 | **Herbouwen** | `p2p.locatie_subdiv` (12 GB lokaal, ST_Subdivide-afgeleide) | alleen voor de geraakte bronhouders |
 | **Herbouwen** | de drieslag-MV's (`naammatch_signaal`, `naammatch_signaal_intra`, `mv_regel_op_locatie`, `tekst_object_consistentie_mv`, `gio_locatie`, `gio_referentie_consistentie_mv`, `ala_punt`) | `refresh_drieslag.py` tegen prod |
 | **Herbouwen** | health + stats (`core.mv_bronhouder_health`, `core.mv_geo_health`, `v2a.ponsenkaart_gemeente_stats`) | idem |
-| **Herbouwen — ontbrak** | `p2p.locatie_generalisatie` (vector-tile-lagen, gelezen door `ocd-api/tiles.py` vanaf z11) | `vul_locatie_generalisatie.py`, **staat nog in geen enkele stap** — zie hieronder |
+| **Herbouwen** | `p2p.locatie_generalisatie` (vector-tile-lagen, gelezen door `ocd-api/tiles.py` voor z0–z10) | `vul_locatie_generalisatie.py --bronhouder <code…>` — zie hieronder |
 
-> ⚠️ **De vector-tile-generalisatie draait in geen enkele sync-stap.**
-> `ocd-api/tiles.py` leest `p2p.locatie_generalisatie` voor z0–z10, maar
-> `vul_locatie_generalisatie.py` staat nergens in dit runbook ingeroosterd.
-> Gemeten 2026-08-29 met `diff_lokaal_prod.py`: prod 19.537.747 rijen tegen
-> 20.197.520 lokaal.
+> **De vector-tile-generalisatie draait sinds 2026-09-01 mee in de sync.**
+> `ocd-api/tiles.py` leest `p2p.locatie_generalisatie` voor z0–z10. Tot die datum
+> stond `vul_locatie_generalisatie.py` in geen enkele stap, waardoor prod
+> **719.428 rijen** achterliep: nieuwe planvoorraad verscheen onder z11 niet in
+> de tegels, zonder dat er iets faalde.
 >
-> **Lokaal herbouwd op 2026-08-31**, en dat gaf meteen de maatvoering: 15,0 min
-> voor de drie niveaus (81 chunks over 6 verbindingen) plus 64 s indexbouw, op
-> 28 cores. Uitkomst 20.257.175 rijen. De doorvoer is ~6.000–7.500 rijen/s per
-> verbinding en schaalt met `--workers`.
+> `fase_post` doet hem nu per bronhouder, direct ná `locatie_subdiv` — die twee
+> horen bij elkaar, want de generalisatie is er rechtstreeks van afgeleid. Los
+> aanroepen kan ook:
 >
-> **Prod loopt daarmee 719.428 rijen achter** en dat is echte veroudering:
-> nieuwe planvoorraad die nooit is gegeneraliseerd en dus onder z11 niet
-> verschijnt.
+> ```bash
+> python scripts/vul_locatie_generalisatie.py --bronhouder gm0995 --bronhouder ws0665
+> ```
 >
-> **Herbouwen, niet meesturen** — zelfde afweging als bij `locatie_subdiv`
-> hierboven, en hier nog dwingender. De heap is **6,2 GB**; die over de proxy
-> duwen kost bij de gemeten replicatiesnelheid (~1,3 MB/s bij de p2p-locaties op
-> 28-08) uren, terwijl prod de bewerking zelf doet zonder één byte over de lijn.
-> Belangrijker nog is dat het **fout** zou zijn: prod heeft 7.746.299
-> `locatie_subdiv`-rijen tegen 7.756.430 lokaal, dus een gekopieerde
-> generalisatie is afgeleid van een andere bron dan die op prod staat.
+> **Per bronhouder, dus geen `TRUNCATE`.** Dat is niet alleen sneller maar ook de
+> reden dat dit op productie kán: een volledige herbouw laat de tegellaag leeg
+> zolang hij duurt, en dat is op prod een blanco kaart onder z11 voor bezoekers.
 >
-> **Maar draai het script daar niet zoals het nu is.** Hij doet een `TRUNCATE`
-> vooraf, en op prod betekent dat een lege tegellaag zolang de herbouw loopt —
-> voor bezoekers een blanco kaart onder z11, tientallen minuten lang. Twee
-> uitwegen: per `--niveau` draaien (dan is er telkens één zoomband leeg in plaats
-> van alle drie), of het script een schaduwtabel-met-swap geven zoals
-> `2026-08-06-categorie-naar-productie.py` dat doet. Die tweede is de goede.
+> | | gemeten 2026-09-01 |
+> |---|---|
+> | volledige herbouw (20,3 mln rijen, 3 niveaus) | 15,0 min + 64 s indexbouw |
+> | de tien bronhouders van de sync van 28-08 | **1,8 min** · 426.823 rijen |
+> | kleine bronhouder (24 rijen) | 0,1–0,4 s |
+>
+> **Draai eerst `scripts/2026-09-add-generalisatie-prefix-index.sql`.** Zonder die
+> `text_pattern_ops`-index kost elke bronhouder ~25 s vaste voet, ook eentje met
+> 24 rijen: de database draait op `en_US.utf8` en onder die collatie kan de
+> planner van `identificatie LIKE 'nl.imow-gm0995.%'` niet bewijzen dat het een
+> prefix is, dus scant hij de hele tabel. Mét de index is het 0,035 ms.
+>
+> Wat níét werkt, voor wie het wil verkorten: de bereik-truc
+> `>= 'nl.imow-gm0995.' AND < 'nl.imow-gm0995/'` geeft onder deze collatie het
+> **verkeerde antwoord** — gemeten 0 rijen waar er 8 zijn, want `en_US` weegt
+> leestekens licht. Snel en stil fout is de gevaarlijkste soort.
+>
+> **Delta-detectie op `bron_hash` is geprobeerd en afgevallen.** De bron hashen
+> kost 162 s en de vergelijking per niveau 195 s, dus drie niveaus kosten bijna
+> evenveel als de hele herbouw. Bovendien meldde die detectie 179.135
+> wijzigingen op een zojuist herbouwde tabel — precies het aantal rijen dat de
+> sub-pixelzeef weglaat. Scoping op bronhouder is simpeler én goedkoper.
 
 `locatie_subdiv` meesturen zou in z'n eentje meer dan de helft van het
 p2p-volume over de proxy duwen, voor geometrie die prod in seconden per

@@ -328,6 +328,15 @@ CREATE TABLE IF NOT EXISTS p2p.locatie_subdiv (
 );
 CREATE INDEX IF NOT EXISTS idx_locatie_subdiv_geom ON p2p.locatie_subdiv USING GIST(geometrie);
 CREATE INDEX IF NOT EXISTS idx_locatie_subdiv_id   ON p2p.locatie_subdiv (identificatie);
+-- Prefix-index voor de herbouw per bronhouder (vul_locatie_generalisatie.py
+-- --bronhouder). De gewone index hierboven kan dat niet: de database draait op
+-- en_US.utf8, en onder een niet-C-collatie kan de planner niet bewijzen dat
+-- `identificatie LIKE 'nl.imow-gm0995.%'` een prefix-bereik is -- hij valt terug
+-- op een volledige parallelle scan. Gemeten 2026-09-01: mét deze index 0,035 ms
+-- tegen 1,79 s zonder, en de tien bronhouders van een sync van 1,8 min tegen
+-- 5,9 min. Zie scripts/2026-09-add-generalisatie-prefix-index.sql.
+CREATE INDEX IF NOT EXISTS idx_locatie_subdiv_id_prefix
+    ON p2p.locatie_subdiv (identificatie COLLATE "C" text_pattern_ops);
 
 CREATE TABLE IF NOT EXISTS p2p.locatiegroep_lid (
     groep_identificatie TEXT NOT NULL REFERENCES p2p.locatie(identificatie) ON DELETE CASCADE,

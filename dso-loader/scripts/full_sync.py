@@ -579,6 +579,24 @@ def fase_post(run_start: datetime.datetime, gewijzigd: set[str] | None = None):
             conn.close()
             run.set(n_verwerkt=len(gewijzigd), n_fout=n_fout)
         log(f"locatie_subdiv gebundeld ververst: {len(gewijzigd)} bronhouders, {totaal} stukjes")
+
+        # De generalisatie hangt direct aan subdiv en hoort dus in dezelfde adem.
+        # Tot 2026-09-01 draaide `vul_locatie_generalisatie.py` in geen enkele
+        # sync-stap, waardoor ocd-api/tiles.py voor z0-z10 op een steeds oudere
+        # laag werkte: prod liep 719.428 rijen achter zonder dat iets faalde.
+        # Per bronhouder, dus geen TRUNCATE en geen lege tegellaag onderweg.
+        # Gemeten 01-09 op de tien bronhouders van de sync van 28-08: 1,8 min,
+        # tegen 16 min voor een volledige herbouw.
+        try:
+            sys.path.insert(0, str(ROOT / "scripts"))
+            from vul_locatie_generalisatie import BRONNEN, NIVEAUS, bouw_bronhouders
+            with load_run("locatie-generalisatie",
+                          scope=f"bronhouders:{len(gewijzigd)}") as run:
+                bouw_bronhouders(BRONNEN["ow"], NIVEAUS, sorted(gewijzigd))
+                run.set(n_verwerkt=len(gewijzigd))
+        except Exception as e:
+            fouten.append(f"locatie_generalisatie: {e}")
+            log(f"locatie_generalisatie MISLUKT: {str(e)[:100]}")
         rapporteer("locatie_subdiv (uitgesteld naar post)", [
             f"- {len(gewijzigd)} bronhouders herbouwd, {totaal} stukjes",
         ])
