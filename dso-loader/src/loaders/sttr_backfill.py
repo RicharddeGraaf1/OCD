@@ -237,7 +237,14 @@ def parse(limit: int | None = None, opnieuw: bool = False) -> dict:
                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,
                                    (SELECT id FROM i2a.dmn_element
                                      WHERE regelbestand_ns = %s AND dmn_id = %s))
-                           ON CONFLICT (sttr_id, uitv_dmn_id) DO NOTHING""",
+                           -- Het predicaat MOET mee: uq_uitv_sttr_dmn is een
+                           -- partiele unieke index, en Postgres herkent die
+                           -- alleen als de inferentie hetzelfde filter draagt.
+                           -- Zonder deze WHERE: "there is no unique or exclusion
+                           -- constraint matching the ON CONFLICT specification".
+                           ON CONFLICT (sttr_id, uitv_dmn_id)
+                             WHERE sttr_id IS NOT NULL AND uitv_dmn_id IS NOT NULL
+                           DO NOTHING""",
                         (rij["fsr"], r["sttr_id"], r["uitv_dmn_id"], r["regel_type"],
                          r["bereik"], r["gegevens_type"], r["nen3610_id"],
                          r["activiteit_urn"], rij["fsr"], r["input_dmn_id"]))
