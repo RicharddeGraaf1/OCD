@@ -389,68 +389,31 @@ def _parse_and_store_dmn(conn, cur, regelbestand_ns: str, xml_bytes: bytes):
 
 
 def _load_werkzaamheden(conn) -> dict:
-    """Load all werkzaamheden and their activiteitKoppelingen."""
-    console.print("  Loading werkzaamheden...")
+    """Laad werkzaamheden en hun activiteitKoppelingen.
 
-    all_werkzaamheden = []
-    page = 1
-    while True:
-        data = _api_get(cfg.RTR_BASE, "/werkzaamheden",
-                        {"pageSize": 200, "page": page})
-        items = data.get("_embedded", {}).get("werkzaamheden", [])
-        all_werkzaamheden.extend(items)
-        if not data.get("_links", {}).get("next"):
-            break
-        page += 1
+    HERSCHREVEN 2026-09-02 (gaps#G-136). De vorige versie liep door de
+    `activiteitKoppelingen` heen en deed
+    `UPDATE i2a.werkzaamheid SET activiteit_id = <de eerste die toevallig al in
+    p2p.activiteit stond>` gevolgd door `break`. Dat plette een M:N-relatie van
+    mediaan 356 koppelingen tot één willekeurige rij: 294 werkzaamheden wezen
+    naar 70 activiteiten, allemaal gemeentelijk, waarvan er 126 op dezelfde
+    `nl.imow-gm0160.activiteit.BouwwerkGebruiken` uitkwamen.
 
-    console.print(f"  Found {len(all_werkzaamheden)} werkzaamheden")
+    Het werk zit nu in `src.loaders.werkzaamheid_koppeling`, dat naar de echte
+    junctietabel `i2a.werkzaamheid_activiteit` schrijft, en dat de EXISTS-check
+    als kwaliteitsvlag bewaart in plaats van als koppelvoorwaarde te gebruiken.
+    Die loader is bovendien beleefd (1 req/s, serieel) en herstartbaar.
 
-    stats = {"werkzaamheden": 0, "koppelingen": 0}
+    `i2a.werkzaamheid.activiteit_id` wordt hier niet meer geschreven. De kolom
+    staat nog voor consumenten die er nog op leunen — zie gaps#G-140 voor de
+    productie-retrieval die dat doet.
+    """
+    from src.loaders.werkzaamheid_koppeling import laad
 
-    with conn.cursor() as cur:
-        for w in all_werkzaamheden:
-            urn = w["urn"]
-            naam = w.get("omschrijving", urn)
-            cur.execute(
-                """INSERT INTO i2a.werkzaamheid (urn, naam)
-                   VALUES (%s, %s)
-                   ON CONFLICT (urn) DO NOTHING""",
-                (urn, naam),
-            )
-            stats["werkzaamheden"] += 1
-
-    conn.commit()
-
-    # Load activiteitKoppelingen per werkzaamheid
-    console.print("  Loading activiteitKoppelingen...")
-    linked = 0
-    with conn.cursor() as cur:
-        for w in all_werkzaamheden:
-            urn = w["urn"]
-            try:
-                kdata = _api_get(cfg.RTR_BASE,
-                                 f"/werkzaamheden/{urn}/activiteitKoppelingen",
-                                 {"datum": _peildatum()})
-                koppelingen = kdata.get("_embedded", {}).get("activiteitKoppelingen", [])
-                for k in koppelingen:
-                    act_urn = k.get("urn", "")
-                    if act_urn:
-                        cur.execute(
-                            """UPDATE i2a.werkzaamheid SET activiteit_id = %s
-                               WHERE urn = %s
-                               AND EXISTS (SELECT 1 FROM p2p.activiteit WHERE identificatie = %s)""",
-                            (act_urn, urn, act_urn),
-                        )
-                        if cur.rowcount > 0:
-                            linked += 1
-                            break
-            except Exception:
-                pass
-
-    conn.commit()
-    stats["koppelingen"] = linked
-    console.print(f"  [green]{stats['werkzaamheden']} werkzaamheden, {linked} gekoppeld aan activiteiten[/green]")
-    return stats
+    # `laad()` opent zijn eigen verbinding; de meegegeven conn blijft ongemoeid.
+    stats = laad()
+    return {"werkzaamheden": stats["werkzaamheden"],
+            "koppelingen": stats["koppelingen"]}
 
 
 def load_imtr_for(organisatie_code: str, naam: str):

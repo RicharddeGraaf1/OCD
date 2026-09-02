@@ -66,6 +66,13 @@ PLAN = [
     ("i2a.werkzaamheid", None,
      "q.activiteit_id IS NULL OR EXISTS (SELECT 1 FROM p2p.activiteit a"
      " WHERE a.identificatie = q.activiteit_id)"),
+    # Junctietabel sinds 2026-09-02 (gaps#G-136). Bewust GEEN p2p-filter: we
+    # bewaren elke koppeling die de RTR geeft en noteren in `gezien_in_p2p` of
+    # we de activiteit terugvinden. Filteren zou hier precies de dataverlies
+    # herintroduceren die de oude loader had.
+    ("i2a.werkzaamheid_activiteit", None, None),
+    # i2a.sttr_bestand gaat BEWUST niet mee: ~0,37 GB ruwe XML die prod niet
+    # serveert. Hoort in de warme laag, niet in de hot-DB.
     ("i2a.aansluitpunt", None, None),
     ("i2a.aansluiting", None,
      "q.activiteit_id IS NULL OR EXISTS (SELECT 1 FROM p2p.activiteit a"

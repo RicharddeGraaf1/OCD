@@ -1078,5 +1078,59 @@ def convert_status():
         conn.close()
 
 
+@cli.command("laad-werkzaamheid-koppelingen")
+@click.option("--tempo", type=float, default=1.0, show_default=True,
+              help="Requests per seconde. Het gedocumenteerde budget is 50/s; "
+                   "1.0 is 2% daarvan.")
+@click.option("--s-nachts", "s_nachts", is_flag=True,
+              help="Weiger te draaien buiten het voorkeursvenster 22:00-06:00.")
+@click.option("--opnieuw", is_flag=True,
+              help="Negeer de checkpoints en haal alles opnieuw op.")
+@click.option("--limit", type=int, default=None,
+              help="Stop na N werkzaamheden (voor een proefrun).")
+def laad_werkzaamheid_koppelingen_cmd(tempo, s_nachts, opnieuw, limit):
+    """Laad de M:N werkzaamheid <-> activiteit uit de RTR (gaps#G-136).
+
+    ~293 werkzaamheden, mediaan ~356 koppelingen elk, ~650 calls. Serieel en
+    herstartbaar: elke afgeronde werkzaamheid wordt gecheckpoint, dus afbreken
+    kost niets. Stopt uit zichzelf bij herhaalde 503.
+    """
+    from src.loaders.werkzaamheid_koppeling import laad
+    laad(tempo=tempo, alleen_s_nachts=s_nachts, opnieuw=opnieuw, limit=limit)
+
+
+@cli.command("backfill-sttr-xml")
+@click.option("--tempo", type=float, default=1.0, show_default=True,
+              help="Requests per seconde (budget is 50/s; 1.0 is 2%).")
+@click.option("--overdag", is_flag=True,
+              help="Draai buiten het voorkeursvenster 22:00-06:00. Standaard weigert hij dat.")
+@click.option("--budget", type=int, default=None,
+              help="Stop na N nieuwe bestanden deze run.")
+def backfill_sttr_xml_cmd(tempo, overdag, budget):
+    """Haal de ruwe sttrBestanden op naar i2a.sttr_bestand (gaps#G-138).
+
+    ~52.500 bestanden, gzipped ~0,37 GB. De tabel is het checkpoint: afbreken
+    kost niets, een volgende run gaat verder. Stopt uit zichzelf bij herhaalde
+    503. Parsen gebeurt apart met `parse-sttr-xml` — zonder API-calls.
+    """
+    from src.loaders.sttr_backfill import haal_op
+    haal_op(tempo=tempo, alleen_s_nachts=not overdag, budget=budget)
+
+
+@cli.command("parse-sttr-xml")
+@click.option("--limit", type=int, default=None, help="Stop na N bestanden.")
+@click.option("--opnieuw", is_flag=True,
+              help="Herparse ook bestanden die al geparsed zijn.")
+def parse_sttr_xml_cmd(limit, opnieuw):
+    """Parse i2a.sttr_bestand naar i2a.uitvoeringsregel. Nul API-calls.
+
+    Vult regel_type (10 typen i.p.v. 2), bereik, gegevens_type, en de twee
+    bruggen: nen3610_id (geoVerwijzing -> Locatie) en activiteit_urn
+    (uitkomstHerbruikbareBeslissing -> Activiteit).
+    """
+    from src.loaders.sttr_backfill import parse
+    parse(limit=limit, opnieuw=opnieuw)
+
+
 if __name__ == "__main__":
     cli()
