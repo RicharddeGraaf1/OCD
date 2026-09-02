@@ -164,7 +164,13 @@ def overheden_voor(urn: str, response: Response):
 # --------------------------------------------------------- 3. de payload
 @router.get("/{urn}/{overheid}")
 def pagina(urn: str, overheid: str, response: Response,
-           begrijpelijk: bool = Query(True, description="Begrijpelijke variant meesturen.")):
+           begrijpelijk: bool = Query(True, description="Begrijpelijke variant meesturen."),
+           beslisgraaf: bool = Query(
+               False,
+               description="Volledige DMN-beslisgraaf meesturen. Standaard uit: "
+                           "gemeten kost hij een factor 14 aan payload (112 KB "
+                           "tegen 7,7 KB voor dakkapel/Utrecht) en de meeste "
+                           "afnemers tonen hem niet.")):
     """De volledige pagina: vragenbomen + de wetsartikelen eronder."""
     response.headers["Cache-Control"] = CACHE_HEADER
     with get_conn() as conn, conn.cursor() as cur:
@@ -210,12 +216,12 @@ def pagina(urn: str, overheid: str, response: Response,
                        t.aantal_decisions, t.aantal_regels,
                        jsonb_array_length(t.beslisgraaf->'nodes') AS knopen,
                        jsonb_array_length(t.beslisgraaf->'edges') AS randen,
-                       t.beslisgraaf
+                       CASE WHEN %s THEN t.beslisgraaf END AS beslisgraaf
                   FROM i2a.regelbeheerobject r
                   LEFT JOIN i2a.toepasbaar_regelbestand t
                     ON t.regelbeheerobject = r.functionele_structuur_ref
                  WHERE r.activiteit_id = %s
-                 ORDER BY 1""", (aid,))
+                 ORDER BY 1""", (beslisgraaf, aid))
             rbos = cur.fetchall()
 
             cur.execute("""
@@ -282,5 +288,8 @@ def pagina(urn: str, overheid: str, response: Response,
             "kwalificatie":
                 "89,4% van alle activiteit-kwalificaties is 'anders geduid'; "
                 "lees dit veld niet als betekenis.",
+            "beslisgraaf":
+                "Standaard weggelaten (scheelt een factor 14 aan payload); "
+                "vraag hem op met ?beslisgraaf=true.",
         },
     }
