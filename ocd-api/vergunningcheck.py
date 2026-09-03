@@ -13,6 +13,7 @@ Nul nieuwe API-calls: alles komt uit wat al geladen is.
       -> i2a.werkzaamheid_activiteit (91.207 koppelingen, per overheid)
         -> i2a.regelbeheerobject     (Conclusie / Indieningsvereisten / Maatregelen)
           -> i2a.toepasbaar_regelbestand.beslisgraaf  (nodes + edges + when/then)
+          -> i2a.uitvoeringsregel      (de vragen zelf: tekst, opties, volgorde)
         -> p2p.activiteit_locatieaanduiding -> juridische_regel -> tekst_element
           -> v2a.element_hertaling   (begrijpelijke variant per lid, 87,2%)
 
@@ -224,6 +225,22 @@ def pagina(urn: str, overheid: str, response: Response,
                  ORDER BY 1""", (beslisgraaf, aid))
             rbos = cur.fetchall()
 
+            # De vragen zoals de initiatiefnemer ze krijgt. Komen uit de
+            # STTR-XML die lokaal is opgeslagen (gaps#G-138); tot 2026-09-03
+            # bestond hier alleen de DMN-variabelenaam, en dat is geen vraag
+            # ("keuze dakvlak plaatsen dakraam UR"). Gesorteerd op
+            # inter:prioriteit — dat is de volgorde waarin het loket vraagt.
+            for rb in rbos:
+                cur.execute("""
+                    SELECT u.regel_type, u.label, u.toelichting, u.gegevens_type,
+                           u.opties, u.optie_type, u.prioriteit
+                      FROM i2a.uitvoeringsregel u
+                      JOIN i2a.sttr_bestand b ON b.sttr_id = u.sttr_id
+                     WHERE b.fsr = %s AND u.label IS NOT NULL
+                     ORDER BY u.prioriteit NULLS LAST, u.label
+                     LIMIT 200""", (rb["fsr"],))
+                rb["vragen"] = cur.fetchall()
+
             cur.execute("""
                 WITH tek AS (
                     SELECT DISTINCT jr.regeling_expression, jr.regeltekst_wid,
@@ -291,5 +308,8 @@ def pagina(urn: str, overheid: str, response: Response,
             "beslisgraaf":
                 "Standaard weggelaten (scheelt een factor 14 aan payload); "
                 "vraag hem op met ?beslisgraaf=true.",
+            "vragen":
+                "Leeg zolang het bijbehorende STTR-bestand nog niet is "
+                "opgehaald; de backfill loopt in nachtelijke porties.",
         },
     }

@@ -18,6 +18,7 @@ stopt bij herhaalde 503) en staat standaard op het voorkeursvenster
 from __future__ import annotations
 
 import gzip
+import re
 
 from lxml import etree
 from rich.console import Console
@@ -162,6 +163,31 @@ def _tekst(el, naam: str) -> str | None:
     return (k.text or "").strip() if k is not None and k.text else None
 
 
+# De bron escapet leestekens als markdown: "uitvoeren\." in plaats van
+# "uitvoeren.". Ongedaan maken, anders staat die backslash straks op het scherm.
+_ESCAPE = re.compile(r"\\([.\-+*_#()\[\]!>])")
+
+
+def _schoon(t: str | None) -> str | None:
+    if not t:
+        return None
+    return _ESCAPE.sub(r"\1", t).strip() or None
+
+
+def _diep(el, *namen: str):
+    """Afdalen langs local-names: _diep(u, 'vraag', 'vraagTekst')."""
+    for naam in namen:
+        if el is None:
+            return None
+        el = _kind(el, naam)
+    return el
+
+
+def _tekst_van(el) -> str | None:
+    """Alle tekst onder een element, CDATA meegerekend."""
+    return _schoon("".join(el.itertext())) if el is not None else None
+
+
 def _ontleed(xml: bytes, sttr_id: str) -> list[dict]:
     """Alle uitvoeringsregels uit één bestand, met type en bruggen."""
     try:
@@ -200,11 +226,34 @@ def _ontleed(xml: bytes, sttr_id: str) -> list[dict]:
             elif t == "vraag":
                 gtype = _tekst(k, "gegevensType")
             break
+
+        # De leesbare kant. Bij een Vraag is dat de vraagtekst, bij een Bijlage
+        # het type document dat gevraagd wordt; beide zijn wat de gebruiker ziet.
+        label = _tekst_van(_diep(u, "vraag", "vraagTekst"))             or _tekst_van(_diep(u, "bijlage", "bijlageType"))
+        toel = _tekst_van(_diep(u, "uitvoeringsregelToelichting", "toelichting"))
+        prio = _tekst(u, "prioriteit")
+
+        opties, optie_type = None, None
+        opt_el = _diep(u, "vraag", "opties")
+        if opt_el is not None:
+            optie_type = _tekst(opt_el, "optieType")
+            paren = []
+            for o in opt_el:
+                if _lok(o) != "optie":
+                    continue
+                tekst = _tekst_van(_kind(o, "optieText"))
+                if tekst:
+                    volg = _tekst(o, "sequenceId")
+                    paren.append((int(volg) if (volg or "").isdigit() else 999, tekst))
+            opties = [t for _, t in sorted(paren)] or None
         uit.append({
             "sttr_id": sttr_id, "uitv_dmn_id": uid, "regel_type": soort,
             "bereik": _tekst(u, "bereik"), "gegevens_type": gtype,
             "nen3610_id": nen, "activiteit_urn": act,
             "input_dmn_id": ref_naar_input.get(uid),
+            "label": label, "toelichting": toel, "opties": opties,
+            "optie_type": optie_type,
+            "prioriteit": int(prio) if (prio or "").isdigit() else None,
         })
     return uit
 
@@ -212,7 +261,8 @@ def _ontleed(xml: bytes, sttr_id: str) -> list[dict]:
 def parse(limit: int | None = None, opnieuw: bool = False) -> dict:
     """Lokale parse over i2a.sttr_bestand. Nul API-calls."""
     conn = get_conn()
-    stats = {"bestanden": 0, "regels": 0, "geo": 0, "herbruik": 0, "bereik": 0}
+    stats = {"bestanden": 0, "regels": 0, "geo": 0, "herbruik": 0, "bereik": 0,
+             "label": 0, "opties": 0}
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -233,8 +283,9 @@ def parse(limit: int | None = None, opnieuw: bool = False) -> dict:
                         """INSERT INTO i2a.uitvoeringsregel
                                (regelbestand_ns, sttr_id, uitv_dmn_id, regel_type,
                                 bereik, gegevens_type, nen3610_id, activiteit_urn,
+                                label, toelichting, opties, optie_type, prioriteit,
                                 dmn_element_id)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                                    (SELECT id FROM i2a.dmn_element
                                      WHERE regelbestand_ns = %s AND dmn_id = %s))
                            -- Het predicaat MOET mee: uq_uitv_sttr_dmn is een
@@ -247,7 +298,9 @@ def parse(limit: int | None = None, opnieuw: bool = False) -> dict:
                            DO NOTHING""",
                         (rij["fsr"], r["sttr_id"], r["uitv_dmn_id"], r["regel_type"],
                          r["bereik"], r["gegevens_type"], r["nen3610_id"],
-                         r["activiteit_urn"], rij["fsr"], r["input_dmn_id"]))
+                         r["activiteit_urn"], r["label"], r["toelichting"],
+                         r["opties"], r["optie_type"], r["prioriteit"],
+                         rij["fsr"], r["input_dmn_id"]))
                 cur.execute("UPDATE i2a.sttr_bestand SET geparsed_op = now() "
                             "WHERE sttr_id = %s", (rij["sttr_id"],))
             conn.commit()
@@ -256,11 +309,14 @@ def parse(limit: int | None = None, opnieuw: bool = False) -> dict:
             stats["geo"] += sum(1 for r in regels if r["nen3610_id"])
             stats["herbruik"] += sum(1 for r in regels if r["activiteit_urn"])
             stats["bereik"] += sum(1 for r in regels if r["bereik"])
+            stats["label"] += sum(1 for r in regels if r["label"])
+            stats["opties"] += sum(1 for r in regels if r["opties"])
             if i % 500 == 0:
                 console.print(f"    {i}/{len(rijen)} — {stats['regels']} regels")
     finally:
         conn.close()
     console.print(f"  [green]{stats['bestanden']} bestanden · {stats['regels']} regels "
                   f"· {stats['geo']} geoVerwijzing · {stats['herbruik']} herbruikbaar "
-                  f"· {stats['bereik']} met bereik[/green]")
+                  f"· {stats['bereik']} met bereik · {stats['label']} met tekst "
+                  f"· {stats['opties']} met antwoordopties[/green]")
     return stats
