@@ -276,8 +276,21 @@ def parse(limit: int | None = None, opnieuw: bool = False) -> dict:
         for i, rij in enumerate(rijen, 1):
             regels = _ontleed(gzip.decompress(rij["xml_gz"]), rij["sttr_id"])
             with conn.cursor() as cur:
+                # Twee opruimacties, en de tweede is niet vanzelfsprekend.
+                # (1) een eerdere parse van ditzelfde bestand;
+                # (2) de rijen die de OUDE loader voor deze namespace schreef.
+                #     Die dragen alleen een tweewaardig regel_type en verder
+                #     niets, en zonder deze regel staan ze naast de nieuwe:
+                #     gemeten 1.238.206 oude naast 118.754 nieuwe, voor 17.644
+                #     namespaces dubbel. Wie regels telt, telt dan dubbel.
+                # Veilig omdat een namespace vrijwel nooit meerdere bestanden
+                # host (3 van 17.644) en geen daarvan half geparsed is; anders
+                # zou een ongeparsed zusterbestand hier zijn rijen verliezen.
                 cur.execute("DELETE FROM i2a.uitvoeringsregel WHERE sttr_id = %s",
                             (rij["sttr_id"],))
+                cur.execute("DELETE FROM i2a.uitvoeringsregel "
+                            " WHERE regelbestand_ns = %s AND sttr_id IS NULL",
+                            (rij["fsr"],))
                 for r in regels:
                     cur.execute(
                         """INSERT INTO i2a.uitvoeringsregel

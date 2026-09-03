@@ -231,12 +231,16 @@ def pagina(urn: str, overheid: str, response: Response,
             # ("keuze dakvlak plaatsen dakraam UR"). Gesorteerd op
             # inter:prioriteit — dat is de volgorde waarin het loket vraagt.
             for rb in rbos:
+                # Rechtstreeks op regelbestand_ns, NIET via i2a.sttr_bestand.
+                # Die tabel is de lokale XML-opslag en staat op productie
+                # bewust leeg (0,37 GB die prod niet serveert), dus een join
+                # erlangs geeft daar altijd nul vragen terug — lokaal werkte
+                # het, op prod niet. regelbestand_ns is dezelfde fsr.
                 cur.execute("""
                     SELECT u.regel_type, u.label, u.toelichting, u.gegevens_type,
                            u.opties, u.optie_type, u.prioriteit
                       FROM i2a.uitvoeringsregel u
-                      JOIN i2a.sttr_bestand b ON b.sttr_id = u.sttr_id
-                     WHERE b.fsr = %s AND u.label IS NOT NULL
+                     WHERE u.regelbestand_ns = %s AND u.label IS NOT NULL
                      ORDER BY u.prioriteit NULLS LAST, u.label
                      LIMIT 200""", (rb["fsr"],))
                 rb["vragen"] = cur.fetchall()
