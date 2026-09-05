@@ -18,6 +18,7 @@ Na alle regelingen: handmatig draaien:
 Run:
   python scripts/backfill_alle_regelingen.py [--limit N] [--force] [--start-from FRBR]
 """
+import pathlib
 import argparse
 import os
 import sys
@@ -25,8 +26,7 @@ import time
 import traceback
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-sys.path.insert(0, ".")
-
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from src.config import cfg
 from src.db import get_conn
 from src.loaders.api_loader import (

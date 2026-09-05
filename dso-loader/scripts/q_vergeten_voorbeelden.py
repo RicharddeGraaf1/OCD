@@ -6,12 +6,13 @@ tekst-snippet, object-naam, en welke andere doelen die tekst wel heeft.
 
 Run: python scripts/q_vergeten_voorbeelden.py
 """
+import pathlib
 import os
 import sys
 import textwrap
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-sys.path.insert(0, ".")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.stdout.reconfigure(encoding="utf-8")
 
 from src.db import get_conn

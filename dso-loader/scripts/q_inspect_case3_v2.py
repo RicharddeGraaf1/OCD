@@ -1,7 +1,9 @@
 """Welk signaal (has_intioref / has_naammatch) drijft de classificatie?"""
+import pathlib
+import sys
 import os, sys
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-sys.path.insert(0, ".")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.stdout.reconfigure(encoding="utf-8")
 
 from src.db import get_conn

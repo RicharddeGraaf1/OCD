@@ -40,6 +40,7 @@ Die laatste synchroniseert een delta op `datum_publicatie >= watermark`, en de
 herclassificatie raakt de hele historie vanaf 2024 — die rijen zouden dus stil
 achterblijven. Vereist de tijdelijke Railway TCP-proxy (dashboard-only).
 """
+import pathlib
 import sys
 import re
 import argparse
@@ -53,7 +54,7 @@ try:
 except Exception:
     pass
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from src.db import get_conn
 from src.loaders.koop_vergunning import (
     classify_type_besluit_uit_tekst,

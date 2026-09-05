@@ -15,12 +15,21 @@ Run:
 
 Vereist: scripts/2026-05-add-tekst-inline-referentie.sql is gedraaid.
 """
+import pathlib
+import sys
 import argparse
 import os
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from rich.console import Console
 from rich.progress import track
+
+# Zonder deze twee regels werkt dit script alleen vanuit een aanroeper die
+# de repo-root al op sys.path heeft gezet (in de praktijk: full_sync.py).
+# Een directe aanroep viel om op `ModuleNotFoundError: No module named 'src'`
+# — zie vault G-125/G-129. Een `sys.path.insert(0, ".")` is geen alternatief:
+# dat hangt af van de map waar je toevallig staat.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from src.db import get_conn
 from src.loaders.inline_referentie import (

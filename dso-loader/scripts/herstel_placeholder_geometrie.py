@@ -19,6 +19,7 @@ Gebruik:
     python scripts/herstel_placeholder_geometrie.py
 """
 
+import pathlib
 import argparse
 import sys
 import os
@@ -30,6 +31,13 @@ if sys.stderr.encoding != "utf-8":
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from rich.console import Console
+
+# Zonder deze twee regels werkt dit script alleen vanuit een aanroeper die
+# de repo-root al op sys.path heeft gezet (in de praktijk: full_sync.py).
+# Een directe aanroep viel om op `ModuleNotFoundError: No module named 'src'`
+# — zie vault G-125/G-129. Een `sys.path.insert(0, ".")` is geen alternatief:
+# dat hangt af van de map waar je toevallig staat.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from src.db import get_conn
 from src.loaders.api_loader import (

@@ -15,13 +15,13 @@ Fix:
 
 Run: python scripts/retry_failed_gios.py
 """
+import pathlib
 import os
 import sys
 import time
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-sys.path.insert(0, ".")
-
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from pathlib import Path
 from src.config import cfg
 from src.db import get_conn

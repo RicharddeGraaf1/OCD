@@ -18,6 +18,7 @@ Gebruik:
     PYTHONPATH=. python scripts/herconverteer_buckets.py --dry-run    # toon plan
 """
 
+import pathlib
 import argparse
 import os
 import sys
@@ -32,6 +33,13 @@ if sys.stderr.encoding != "utf-8":
 
 from rich.console import Console
 from rich.table import Table
+
+# Zonder deze twee regels werkt dit script alleen vanuit een aanroeper die
+# de repo-root al op sys.path heeft gezet (in de praktijk: full_sync.py).
+# Een directe aanroep viel om op `ModuleNotFoundError: No module named 'src'`
+# — zie vault G-125/G-129. Een `sys.path.insert(0, ".")` is geen alternatief:
+# dat hangt af van de map waar je toevallig staat.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from src.db import get_conn
 from src.converter.stap1 import clear_gemeente, convert_bestemmingsplan

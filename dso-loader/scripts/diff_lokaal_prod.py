@@ -161,6 +161,32 @@ def vergelijk_geometrie(lok: dict, prod: dict) -> list[dict]:
     return rijen
 
 
+def migratie_verschil(prod_dsn: str) -> list[str]:
+    """Migraties die de ene kant wel kent en de andere niet.
+
+    Prod miste op 2026-09-04 alle drie de indexen uit
+    2026-09-add-generalisatie-prefix-index.sql en op 05-09 een kolom, en niets
+    meldde dat. Sinds 05-09 is er `core.migratie`; deze controle leest hem.
+    De 73 migraties van vóór dat ledger staan nergens geregistreerd en tellen
+    hier dus niet mee — dat is bewust: onbekend is geen ontbrekend.
+    """
+    def lees(dsn):
+        try:
+            with psycopg.connect(dsn, connect_timeout=20) as c, c.cursor() as cur:
+                cur.execute("""SELECT bestand FROM core.migratie""")
+                return {(r["bestand"] if isinstance(r, dict) else r[0])
+                        for r in cur.fetchall()}
+        except Exception:
+            return None            # tabel bestaat nog niet aan die kant
+
+    lok, pr = lees(lokale_dsn()), lees(prod_dsn)
+    if lok is None or pr is None:
+        return []
+    uit = [f"prod mist: {n}" for n in sorted(lok - pr)]
+    uit += [f"lokaal mist: {n}" for n in sorted(pr - lok)]
+    return uit
+
+
 def laad_verwachtingen() -> dict:
     if not VERWACHTINGEN.exists():
         return {}
@@ -246,6 +272,8 @@ def main() -> int:
             geom_afw = [{"bronhouder": "?", "soort": f"controle mislukt: {e}",
                          "lokaal": None, "prod": None}]
 
+    mig = migratie_verschil(prod_dsn)
+
     verwacht = laad_verwachtingen()
     rijen = []
     for tabel in sorted(set(lokaal) | set(prod)):
@@ -261,7 +289,7 @@ def main() -> int:
                           "geometrie_afwijkend": geom_afw,
                           "rijen": rijen if a.alles else afwijkend},
                          ensure_ascii=False, indent=2))
-        return 1 if (afwijkend or geom_afw) else 0
+        return 1 if (afwijkend or geom_afw or mig) else 0
 
     toon = rijen if a.alles else [r for r in rijen if r["status"] != "gelijk"]
     if toon:
@@ -282,6 +310,12 @@ def main() -> int:
             lok = "—" if g["lokaal"] is None else f"{g['lokaal']:,}"
             pr = "—" if g["prod"] is None else f"{g['prod']:,}"
             print(f"{g['bronhouder']:<14} {lok:>10} {pr:>10}  {g['soort']}")
+        print()
+
+    if mig:
+        print("MIGRATIES die maar aan één kant geregistreerd staan:")
+        for m in mig:
+            print(f"  {m}")
         print()
 
     gelijk = sum(1 for r in rijen if r["status"] == "gelijk")

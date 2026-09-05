@@ -14,6 +14,41 @@ afgeleid: spreekt het dit runbook tegen, dan is het overzicht verouderd.
 
 ---
 
+## 0. Hoe je een stap aanroept
+
+*Toegevoegd 2026-09-05. Klein, en toch drie keer misgegaan op één nacht.*
+
+**Nooit een pipe over het commando waarvan de exitcode telt.** De exitcode van een
+pipeline is die van het láátste onderdeel, en `tail` slaagt altijd. Tijdens de
+sync van 04-09 gaf `python scripts/… | tail -30` **exit 0** terwijl het script
+direct crashte op een `ModuleNotFoundError`; even later gaf `psql … | tail -12`
+exit 0 op een `command not found`. Beide keren stond de fout gewoon in de
+uitvoer, en beide keren zei de status "geslaagd". Doe dit:
+
+```bash
+python scripts/<naam>.py > /tmp/<naam>.log 2>&1; echo "exit=$?"
+tail -20 /tmp/<naam>.log
+```
+
+De uitvoer naar een bestand, de exitcode apart, en pas daarna kijken. In een
+shellscript hoort `set -o pipefail` bovenaan.
+
+**Geen kale `psql`.** Die staat in deze omgeving op geen enkele PATH — niet in
+bash, niet in PowerShell (`Get-Command psql` vindt niets). Dat het toch werkt
+komt doordat de routes het zelf oplossen: de PowerShell-scripts gebruiken een
+expliciet `$PgBin`-pad, `instructieregels.nl` draait zijn SQL via
+`docker exec -i dso-postgis psql …`. Voor losse SQL vanuit dit runbook is er
+`scripts/refresh_health_mvs.py`; wat daar niet in past, doe je via psycopg of via
+`docker exec`.
+
+**Een script in `scripts/` draait vanuit elke map.** Sinds 05-09 zet elk script
+zijn eigen repo-root op `sys.path`, dus `python scripts/<naam>.py` werkt ook
+buiten `dso-loader/`. Loopt er toch eentje om op `No module named 'src'`, dan
+mist die de bootstrap — voeg hem toe in plaats van het commando aan te passen.
+
+---
+
+
 ## 1. Principes
 
 1. **Preview vóór elke schrijfactie.** Geen enkele fase gaat draaien zonder dat
@@ -404,12 +439,9 @@ OCD_DB_URL="$PROD_DB_URL" python -m src.cli refresh-subdiv -b gm0160   # per cod
 # dan de MV's
 OCD_DB_URL="$PROD_DB_URL" python scripts/refresh_drieslag.py
 # health-MV's: zet parallellisme UIT in dezelfde sessie
-psql "$PROD_DB_URL" \
-  -c "SET max_parallel_workers_per_gather = 0" \
-  -c "SET max_parallel_maintenance_workers = 0" \
-  -c "REFRESH MATERIALIZED VIEW core.mv_bronhouder_health" \
-  -c "REFRESH MATERIALIZED VIEW core.mv_geo_health" \
-  -c "REFRESH MATERIALIZED VIEW v2a.ponsenkaart_gemeente_stats"
+# health-MV's — parallellisme staat in het script zelf uit (kleine /dev/shm op
+# Railway). Geen kale `psql`: die staat op geen enkele PATH, zie leerpunt 7.
+python scripts/refresh_health_mvs.py --target prod
 ```
 
 `get_conn()` zet dat parallellisme bij een prod-DSN zelf uit, maar wie
@@ -734,7 +766,7 @@ tabel. Wat dat kost, gemeten op `tier1_screen.py` (stap 6b):
 | ná `ANALYZE` (81 s) + herstart | **2,36** |
 
 ```bash
-psql "$OCD_DB_URL" -c "SET max_parallel_maintenance_workers = 0"                    -c "ANALYZE v2a.tekst_embedding"
+python scripts/refresh_health_mvs.py --alleen-analyze
 ```
 
 **De herstart hoort erbij.** `ANALYZE` alleen hielp niet: psycopg3 prepareert een

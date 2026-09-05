@@ -34,13 +34,14 @@ Draaien:
     python scripts/herstel_gio_koppeling.py --ja --limiet 10
 """
 
+import pathlib
 import argparse
 import os
 import sys
 import time
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-sys.path.insert(0, ".")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, "src")
 
 from src.db import get_conn                                     # noqa: E402

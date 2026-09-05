@@ -10,12 +10,21 @@ UNIQUE index die in 2026-05-add-naammatch-signaal.sql is aangemaakt.
 Run:
   python scripts/refresh_naammatch_signaal.py
 """
+import pathlib
+import sys
 import os
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from time import time
 
 from rich.console import Console
+
+# Zonder deze twee regels werkt dit script alleen vanuit een aanroeper die
+# de repo-root al op sys.path heeft gezet (in de praktijk: full_sync.py).
+# Een directe aanroep viel om op `ModuleNotFoundError: No module named 'src'`
+# — zie vault G-125/G-129. Een `sys.path.insert(0, ".")` is geen alternatief:
+# dat hangt af van de map waar je toevallig staat.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from src.db import get_conn
 

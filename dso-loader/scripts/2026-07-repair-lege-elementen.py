@@ -21,11 +21,11 @@ Werkwijze per geraakte regeling:
 
 Run:  python scripts/2026-07-repair-lege-elementen.py [--dry-run]
 """
+import pathlib
 import sys
 import time
 
-sys.path.insert(0, ".")
-
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import httpx
 
 from src.config import cfg

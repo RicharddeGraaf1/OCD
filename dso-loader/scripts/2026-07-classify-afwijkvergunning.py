@@ -20,6 +20,7 @@ Gebruik:
   python scripts/2026-07-classify-afwijkvergunning.py --apply      # ALTER + UPDATE + index
 Idempotent: --apply mag herhaald worden.
 """
+import pathlib
 import sys
 import argparse
 
@@ -28,7 +29,7 @@ try:
 except Exception:
     pass
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from src.config import cfg
 import psycopg
 from psycopg.rows import dict_row

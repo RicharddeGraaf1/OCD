@@ -9,12 +9,21 @@ expression op te halen, dan UPDATE in p2p.regeling.
 
 Geen annotaties / tekst herladen — alleen metadata.
 """
+import pathlib
+import sys
 import os
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from datetime import datetime
 from rich.console import Console
 from rich.progress import track
+
+# Zonder deze twee regels werkt dit script alleen vanuit een aanroeper die
+# de repo-root al op sys.path heeft gezet (in de praktijk: full_sync.py).
+# Een directe aanroep viel om op `ModuleNotFoundError: No module named 'src'`
+# — zie vault G-125/G-129. Een `sys.path.insert(0, ".")` is geen alternatief:
+# dat hangt af van de map waar je toevallig staat.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from src.config import cfg
 from src.db import get_conn
