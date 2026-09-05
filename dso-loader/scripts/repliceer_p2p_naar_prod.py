@@ -234,6 +234,15 @@ CREATE TEMP TABLE scope_hoofdlijn ON COMMIT DROP AS
 """
 
 
+# Tabellen met een surrogaatsleutel én een unieke natuurlijke sleutel. Zie de
+# uitleg bij het DELETE-blok in kopieer(): een expressie die lokaal is herladen
+# heeft daar andere identity-id's dan op prod, en dan botst de INSERT op de
+# natuurlijke index in plaats van op de primaire sleutel.
+NATUURLIJKE_SLEUTELS: dict[str, list[tuple[str, ...]]] = {
+    "p2p.tekst_element": [("regeling_expression", "eid")],
+}
+
+
 # ── kopieerplan ──────────────────────────────────────────────────────
 # (tabel, SELECT-filter). FK-volgorde: ouders vóór kinderen. De self-FK's
 # (activiteit.bovenliggende, tekst_element.parent_id) worden op diepte
@@ -521,6 +530,32 @@ def main() -> None:
         idents = identity_kolommen(pc, tabel)
         overriding = " OVERRIDING SYSTEM VALUE" if any(altijd for _, altijd in idents) else ""
         order_by = f" ORDER BY {ord_expr}" if ord_expr else ""
+
+        # Rijen die aan de prod-kant al bestaan onder dezelfde NATUURLIJKE
+        # sleutel maar met een ander identity-id: overslaan, niet forceren.
+        #
+        # Waarom dit nodig is. `tekst_element.id` is GENERATED ALWAYS en wordt
+        # met OVERRIDING SYSTEM VALUE meegekopieerd, zodat prod-verwijzingen
+        # (tekst_inline_referentie, v2a.tekst_embedding) blijven kloppen. Maar
+        # als een expressie lokaal ooit is herladen, kreeg hij daar nieuwe id's
+        # terwijl prod de oude hield. Dan botst de INSERT niet op de primaire
+        # sleutel maar op de unieke index over (regeling_expression, eid), en
+        # klapt de hele replicatie.
+        #
+        # Gemeten 2026-09-05 over 92 expressies: 9.513 tekst_elementen aan beide
+        # kanten, 0 ontbrekend, en 991 met een ander id over 6 expressies. Prod
+        # heeft die tekst dus al; alleen de surrogaatsleutel verschilt, en die is
+        # aan elke kant intern consistent. Overzetten zou niets toevoegen en de
+        # verwijzingen op prod juist stukmaken.
+        for natuurlijk in NATUURLIJKE_SLEUTELS.get(tabel, []):
+            kols_nat = ", ".join(f'"{k}"' for k in natuurlijk)
+            pc.execute(f"DELETE FROM {stg} s USING {tabel} t "
+                       f"WHERE ({', '.join(f's."{k}"' for k in natuurlijk)}) "
+                       f"    = ({', '.join(f't."{k}"' for k in natuurlijk)}) "
+                       f"  AND s.id IS DISTINCT FROM t.id")
+            if pc.rowcount:
+                print(f"      {pc.rowcount:,} rij(en) overgeslagen: bestaan al op prod "
+                      f"onder ({', '.join(natuurlijk)}) met een ander id")
 
         pk = pk_kolommen(pc, tabel)
         niet_pk = [k for k in kol_lijst if k not in pk]
