@@ -16,20 +16,36 @@ verwacht:
 
   p2p.locatie:
     min: 0
-    max: 200
+    max: 0
     reden: >-
-      Ongerefereerde locaties. De replicatie bouwt zijn scope vanaf de geladen
-      regelingen omlaag, dus een locatie waar geen enkele regeling naar wijst is
-      onbereikbaar. Stand 2026-08-29 na de backfill: 44 (was 47; de drie met een
-      pons zijn alsnog overgezet, want pons voedt ponsenkaart.nl). Zie
-      docs/locaties-niet-op-prod-2026-08-29.txt.
+      HOORT NUL TE ZIJN. Hier stond tot 2026-09-05 een marge van 200 met als
+      reden: "ongerefereerde locaties -- de replicatie bouwt zijn scope vanaf de
+      geladen regelingen omlaag, dus een locatie waar geen enkele regeling naar
+      wijst is onbereikbaar". Het eerste deel klopt, de conclusie eronder niet.
+      Die veronderstelde dat zo'n locatie toch niet getoond wordt, en dat is
+      onjuist: p2p.locatie_subdiv wordt per bronhouder over ALLE
+      polygoonlocaties gebouwd, p2p.locatie_generalisatie is daarvan afgeleid,
+      en ocd-api/tiles.py leest dat. Een ongerefereerde locatie met geometrie
+      staat dus gewoon op de kaart.
+      Wat dat kostte, gemeten op 2026-09-05: 115 ongerefereerde pv28-locaties
+      (72 Gebied, 43 Gebiedengroep, alle met geometrie) waren goed voor 72.262
+      subdiv-stukjes -- zichtbaar ontbrekende kaartinhoud in Zuid-Holland.
+      Ze zijn alsnog overgezet en p2p.locatie hoort sindsdien integraal gelijk
+      te zijn. Een verschil is voortaan een gat en geen eigenschap. Zie vault
+      G-141 en docs/locaties-niet-op-prod-2026-08-29.txt (dat bestand beschrijft
+      de oude, achterhaalde redenering).
 
   p2p.locatie_basisgeo:
     min: 0
     max: 1500
     reden: >-
-      Geometrie-koppelingen van diezelfde ongerefereerde locaties. Stand
-      2026-08-29: 330. Schaalt met p2p.locatie hierboven.
+      WEZEN, geen ontbrekende koppelingen. Deze tabel heeft GEEN foreign keys,
+      en lokaal wijzen 397.549 van de 1.541.412 rijen (26%) naar een locatie die
+      niet bestaat -- gemeten 2026-09-05. Wat prod "mist" hoort bij die
+      weespopulatie: de backfill weigert ze terecht, want een ontbrekende ouder
+      is een ander probleem en hoort niet stilzwijgend meegekopieerd te worden.
+      Stand 2026-09-05: 416. Zolang p2p.locatie zelf op 0 staat is een verschil
+      hier dus lokale datakwaliteit en geen prod-gat.
 
   p2pwijziging.tekst_element:
     min: 0
@@ -72,8 +88,8 @@ verwacht:
   # ── afgeleide geometrie: op prod herbouwd, niet gekopieerd ────────────────
 
   p2p.locatie_subdiv:
-    min: -50000
-    max: 50000
+    min: -20000
+    max: 20000
     reden: >-
       ST_Subdivide-afgeleide, per bronhouder herbouwd op prod (runbook stap 3).
       Alleen de bronhouders met nieuwe regelingen worden herbouwd, dus prod
@@ -81,16 +97,32 @@ verwacht:
       (0,13%). Loopt dit op, dan is een landelijke refresh-subdiv aan de orde.
 
   p2p.locatie_generalisatie:
-    min: -50000
-    max: 800000
+    min: -20000
+    max: 20000
     reden: >-
       Vector-tile-generalisatie (vul_locatie_generalisatie.py), gelezen door
-      ocd-api/tiles.py voor z0-z10. LET OP -- ruime marge naar boven omdat het
-      script in GEEN ENKELE sync-stap draait. Lokaal herbouwd op 2026-08-31
-      (20.257.175 rijen, 16 min); prod staat nog op de stand van voor die
-      herbouw en loopt 719.428 rijen achter. Zodra prod is herbouwd hoort deze
-      marge naar iets als [-50000, 50000]. De ondergrens is nu al strak: prod
-      hoort nooit meer rijen te hebben dan lokaal.
+      ocd-api/tiles.py voor z0-z10. De marge stond tot 2026-09-05 op
+      [-50000, +800000] omdat prod de lokale herbouw van 31-08 nooit had
+      gekregen en 1.124.556 rijen achterliep. Die achterstand is weggewerkt
+      (`--inhaal`), dus de marge is aangehaald.
+      Wat er nu nog in valt is PostGIS-VERSIERUIS, geen gat: lokaal draait
+      3.5/PG16, prod 3.7/PG17, en ST_Subdivide/ST_Simplify splitsen daar net
+      anders. Gemeten 2026-09-05 over 52 bronhouders onder de herbouw-drempel:
+      samen 1.543 rijen, gemiddeld 30 per bronhouder. Herkenbaar aan het teken --
+      die ruis is TWEEZIJDIG (prod staat er soms boven), een echt gat is altijd
+      eenzijdig.
+      BELANGRIJK: deze ruis is NIET weg te herbouwen, en dat is nagemeten. Negen
+      bronhouders boven de drempel zijn op 2026-09-05 herbouwd en gaven alle
+      negen exact hetzelfde aantal terug (gm0392 130.531, pv28 610.388, ...),
+      waarna de inhaalmodus ze opnieuw voorstelde. De ruis zit in twee lagen:
+      bij gm0392/gm0473/gm1926 verschilt `locatie_subdiv` er al (gm0392 56.815
+      lokaal tegen 55.367 op prod, op IDENTIEKE invoergeometrie), en bij
+      gm0177/gm0532/gm0765/gm0848/gm1525 is subdiv juist gelijk terwijl de
+      generalisatie 3 tot 18 rijen scheelt -- daar splitst de generalisatiestap
+      zelf anders. `--inhaal` meet daarom achteraf na en meldt welke bronhouders
+      niet veranderd zijn; die horen hier thuis en niet in een volgende ronde.
+      Definitief oplossen kan alleen door lokaal en prod op dezelfde
+      PostGIS-versie te brengen.
       NB de 14.560 locaties die helemaal geen generalisatie hebben zijn GEEN
       gat -- die zijn sub-pixel op het fijnste niveau (bounding box <= 3,36 m in
       beide richtingen) en worden bewust weggelaten.

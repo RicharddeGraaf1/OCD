@@ -170,6 +170,20 @@ def preview_vth() -> dict:
     stand = cur.fetchone()
     cur.execute("SELECT count(*) n FROM vth.vergunningkennisgeving WHERE inhoud_geladen_at IS NULL")
     te_verrijken = cur.fetchone()["n"]
+    # Tempo uit de laatste drie geslaagde verrijkingsruns in plaats van een
+    # constante. De preview rekende met 4/s; gemeten werd 1,7/s (run 11) en
+    # 0,9/s (run 12). Zie de meting hieronder in print_vth().
+    cur.execute("""
+        SELECT n_verwerkt, extract(epoch FROM (finished_at - started_at)) AS sec
+          FROM core.load_run
+         WHERE bron = 'koop-sru-vergunningen' AND status = 'ok'
+           AND n_verwerkt > 0 AND finished_at IS NOT NULL
+           AND extract(epoch FROM (finished_at - started_at)) > 60
+         ORDER BY started_at DESC LIMIT 3""")
+    runs = cur.fetchall()
+    tempo = None
+    if runs:
+        tempo = sum(r["n_verwerkt"] for r in runs) / sum(r["sec"] for r in runs)
     conn.close()
 
     vandaag = datetime.date.today()
@@ -187,7 +201,7 @@ def preview_vth() -> dict:
         dagen.append((d.isoformat(), totaal))
         d += datetime.timedelta(days=1)
     return {"laatste_dag": laatste, "stand": stand, "dagen": dagen,
-            "te_verrijken": te_verrijken}
+            "te_verrijken": te_verrijken, "tempo": tempo, "n_runs": len(runs)}
 
 
 def print_vth(v: dict):
@@ -198,8 +212,21 @@ def print_vth(v: dict):
     print(f"  TE LADEN: {len(v['dagen'])} open dag(en), samen {tot} kennisgevingen")
     for dag, n in v["dagen"]:
         print(f"    {dag}: {n}")
-    print(f"  nog te verrijken (inhoud_geladen_at IS NULL): {v['te_verrijken']} "
-          f"(~{v['te_verrijken'] / 4 / 60:.0f} min bij 4/s)")
+    # De verrijking moet ALLES doen wat de load erbij zet, niet alleen de
+    # bestaande achterstand. Hier stond tot 2026-09-05 alleen `te_verrijken`
+    # met een vaste 4/s, en dat gaf op run 12 "~0 min" voor een stap die
+    # 122,0 minuten duurde — de duurste van de hele sync. De achterstand was 25;
+    # de werkelijke werkvoorraad was de 6.293 die de load erbij zette, en die
+    # stond één regel hoger in dezelfde preview.
+    werkvoorraad = tot + v["te_verrijken"] if isinstance(tot, int) else v["te_verrijken"]
+    tempo = v.get("tempo")
+    if tempo:
+        schatting = (f"~{werkvoorraad / tempo / 60:.0f} min bij {tempo:.1f}/s "
+                     f"(tempo uit de laatste {v['n_runs']} run(s))")
+    else:
+        schatting = "duur onbekend — nog geen gemeten tempo in core.load_run"
+    print(f"  TE VERRIJKEN: {werkvoorraad} "
+          f"({v['te_verrijken']} achterstand + {tot} uit deze load) — {schatting}")
 
 
 # ── i2a ──────────────────────────────────────────────────────────────

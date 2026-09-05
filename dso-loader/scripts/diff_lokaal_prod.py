@@ -104,6 +104,63 @@ def tel_alles(dsn: str, schemas: list[str], label: str,
 
 
 
+# ── Inhoudscontrole ───────────────────────────────────────────────────────
+# Tellen is niet genoeg. Op 2026-09-05 bleken acht locaties dezelfde sleutel te
+# dragen met een ANDERE geometrie (gm0392 zes, gm0376 twee), samen goed voor
+# 4.493 subdiv-stukjes. Voor een telling zijn die tabellen gelijk. Oorzaak: de
+# replicatie upsert alleen locaties die in scope vallen, dus een geometrie die
+# wijzigt terwijl haar locatie buiten scope ligt, blijft op prod voor altijd de
+# oude. Zie vault G-142.
+#
+# Waarom per bronhouder en niet per rij: 321.096 geometrieën aan beide kanten
+# vergelijken is een kwartier en levert een lijst die niemand leest. Eén hash per
+# bronhouder is 382 regels, en pas als er één afwijkt hoef je de rijen erbij te
+# halen. Gemeten: ~40 s per kant.
+#
+# Bewust alleen `p2p.locatie.geometrie`: daar is drift aangetoond en daar werkt
+# hij door in subdiv -> generalisatie -> tiles.py. Uitbreiden pas als deze
+# controle zich bewezen heeft.
+GEOM_HASH_SQL = r"""
+    SELECT substring(identificatie from 'nl\.imow-([a-z0-9]+)\.') AS bh,
+           count(*)                                                 AS n,
+           md5(string_agg(md5(ST_AsBinary(geometrie)), '' ORDER BY identificatie)) AS h
+      FROM p2p.locatie
+     WHERE geometrie IS NOT NULL
+     GROUP BY 1
+"""
+
+
+def geometrie_vingerafdruk(dsn: str, label: str, stil: bool) -> dict[str, tuple[int, str]]:
+    """Eén hash per bronhouder over de locatiegeometrie."""
+    with psycopg.connect(dsn, connect_timeout=20) as conn, conn.cursor() as cur:
+        cur.execute("SET statement_timeout = '30min'")
+        cur.execute(GEOM_HASH_SQL)
+        uit = {r[0]: (r[1], r[2]) for r in cur.fetchall() if r[0]}
+    if not stil:
+        print(f"  [{label}] geometrie-vingerafdruk over {len(uit)} bronhouders")
+    return uit
+
+
+def vergelijk_geometrie(lok: dict, prod: dict) -> list[dict]:
+    """Bronhouders waar de geometrie-inhoud verschilt bij gelijk aantal rijen.
+
+    Een verschil in aantal is al zichtbaar in de tabeltelling; hier gaat het om
+    wat die telling juist NIET ziet.
+    """
+    rijen = []
+    for bh in sorted(set(lok) | set(prod)):
+        l, p = lok.get(bh), prod.get(bh)
+        if l is None or p is None:
+            rijen.append({"bronhouder": bh, "soort": "alleen aan één kant",
+                          "lokaal": l[0] if l else None, "prod": p[0] if p else None})
+        elif l[1] != p[1]:
+            rijen.append({"bronhouder": bh,
+                          "soort": "zelfde aantal, ANDERE geometrie" if l[0] == p[0]
+                                   else "ander aantal én andere inhoud",
+                          "lokaal": l[0], "prod": p[0]})
+    return rijen
+
+
 def laad_verwachtingen() -> dict:
     if not VERWACHTINGEN.exists():
         return {}
@@ -153,6 +210,8 @@ def main() -> int:
     ap.add_argument("--alles", action="store_true", help="toon ook de gelijke tabellen")
     ap.add_argument("--json", action="store_true", help="machineleesbare uitvoer")
     ap.add_argument("--schema", action="append", help="beperk tot deze schema's")
+    ap.add_argument("--geen-inhoud", action="store_true",
+                    help="sla de geometrie-inhoudscontrole over (alleen tellen, ~40 s sneller)")
     a = ap.parse_args()
 
     prod_dsn = os.getenv("PROD_DB_URL")
@@ -172,6 +231,21 @@ def main() -> int:
         print(f"kon niet meten: {e}", file=sys.stderr)
         return 2
 
+    # Inhoudscontrole naast de telling. Draait standaard mee: een telling die
+    # klopt terwijl de inhoud verschilt is precies het geval dat we op 2026-09-05
+    # gemist zouden hebben.
+    geom_afw: list[dict] = []
+    if not a.geen_inhoud:
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                g_lok = pool.submit(geometrie_vingerafdruk, lokale_dsn(), "lokaal", a.json)
+                g_prod = pool.submit(geometrie_vingerafdruk, prod_dsn, "prod", a.json)
+                geom_afw = vergelijk_geometrie(g_lok.result(), g_prod.result())
+        except Exception as e:
+            print(f"geometrie-controle mislukt: {e}", file=sys.stderr)
+            geom_afw = [{"bronhouder": "?", "soort": f"controle mislukt: {e}",
+                         "lokaal": None, "prod": None}]
+
     verwacht = laad_verwachtingen()
     rijen = []
     for tabel in sorted(set(lokaal) | set(prod)):
@@ -184,9 +258,10 @@ def main() -> int:
 
     if a.json:
         print(json.dumps({"tabellen": len(rijen), "afwijkend": len(afwijkend),
+                          "geometrie_afwijkend": geom_afw,
                           "rijen": rijen if a.alles else afwijkend},
                          ensure_ascii=False, indent=2))
-        return 1 if afwijkend else 0
+        return 1 if (afwijkend or geom_afw) else 0
 
     toon = rijen if a.alles else [r for r in rijen if r["status"] != "gelijk"]
     if toon:
@@ -200,15 +275,31 @@ def main() -> int:
                 print(f"{'':<40} {'':>12} {'':>12}  ↳ {r['toelichting']}")
         print()
 
+    if geom_afw:
+        print(f"{'bronhouder':<14} {'lokaal':>10} {'prod':>10}  geometrie")
+        print("-" * 62)
+        for g in geom_afw:
+            lok = "—" if g["lokaal"] is None else f"{g['lokaal']:,}"
+            pr = "—" if g["prod"] is None else f"{g['prod']:,}"
+            print(f"{g['bronhouder']:<14} {lok:>10} {pr:>10}  {g['soort']}")
+        print()
+
     gelijk = sum(1 for r in rijen if r["status"] == "gelijk")
     verw = sum(1 for r in rijen if r["status"] == "verwacht")
     print(f"{len(rijen)} tabellen · {gelijk} gelijk · {verw} verwacht verschil · "
           f"{len(afwijkend)} AFWIJKEND")
+    if not a.geen_inhoud:
+        print(f"geometrie-inhoud: {len(geom_afw)} bronhouder(s) met een verschil "
+              f"dat een telling niet ziet")
     if afwijkend:
         print("\nEen afwijking is niet automatisch een fout, maar wél iets om te verklaren.")
         print("Klopt hij en hoort hij er te zijn, zet hem dan met reden in "
               f"{VERWACHTINGEN.name}.")
-    return 1 if afwijkend else 0
+    if geom_afw and not afwijkend:
+        print()
+        print("De tellingen kloppen, maar de INHOUD verschilt. Dat is de klasse "
+              "die alleen een vingerafdruk vindt — zie vault G-142.")
+    return 1 if (afwijkend or geom_afw) else 0
 
 
 if __name__ == "__main__":

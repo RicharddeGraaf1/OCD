@@ -46,6 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 import click
+import psycopg
 from rich.console import Console
 
 from src.db import get_conn
@@ -182,6 +183,59 @@ SELECT identificatie, %(niveau)s, g, bron_hash
   ) s
  WHERE g IS NOT NULL AND NOT ST_IsEmpty(g)
 """
+
+
+def inhaal_kandidaten(cfg: dict[str, str], prod_dsn: str,
+                      drempel_abs: int, drempel_pct: float) -> list[str]:
+    """Bronhouders waar prod echt achterloopt — niet die waar het ruis is.
+
+    Waarom een drempel. Op 2026-09-05 liep prod 1.124.556 rijen achter en werden
+    99 bronhouders herbouwd op aflopend verschil. De eerste ~20 waren volstrekt
+    terecht (ws0655 stond op 307 rijen tegen 578.935 lokaal), maar vanaf ongeveer
+    #50 werd het herbouwen van 0,3-1,35 miljoen rijen om **enkele tientallen**
+    rijen te corrigeren die geen gat zijn maar **PostGIS-versieruis**: lokaal
+    draait 3.5/PG16, prod 3.7/PG17, en ST_Subdivide/ST_Simplify splitsen daar net
+    anders. De run is toen afgekapt; de hermeting gaf +4.362 op een oorspronkelijk
+    verschil van 1.124.556 — 99,6% gesloten met een derde van het werk over.
+
+    Ruis herken je aan het teken: hij is tweezijdig, prod staat er soms bóven
+    (ws0653 +68, pv23 +39). Een echt gat is altijd eenzijdig.
+    """
+    # `bh` en `n` expliciet benoemd: get_conn() levert dict-rijen en een directe
+    # psycopg-verbinding tuples, dus we lezen op naam noch op index maar zetten
+    # beide vormen om.
+    q = (r"select substring(identificatie from 'nl\.imow-([a-z0-9]+)\.') as bh, "
+         f"count(*) as n from {cfg['doel']} group by 1")
+    kant = {}
+    for naam, dsn in (("lokaal", None), ("prod", prod_dsn)):
+        conn = get_conn() if dsn is None else psycopg.connect(dsn, connect_timeout=20)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET statement_timeout = '60min'")
+                cur.execute(q)
+                paren = [(r["bh"], r["n"]) if isinstance(r, dict) else (r[0], r[1])
+                         for r in cur.fetchall()]
+                kant[naam] = {bh: n for bh, n in paren if bh}
+        finally:
+            if dsn is not None:
+                conn.close()
+
+    uit, overgeslagen, ruis = [], 0, 0
+    for bh in sorted(set(kant["lokaal"]) | set(kant["prod"])):
+        l, pr = kant["lokaal"].get(bh, 0), kant["prod"].get(bh, 0)
+        verschil = l - pr
+        if verschil == 0:
+            continue
+        groot_genoeg = abs(verschil) >= drempel_abs or (l and abs(verschil) / l >= drempel_pct)
+        if groot_genoeg:
+            uit.append(bh)
+        else:
+            overgeslagen += 1
+            ruis += abs(verschil)
+    console.print(f"  {len(uit)} bronhouder(s) boven de drempel "
+                  f"(>= {drempel_abs:,} rijen of >= {drempel_pct:.0%}); "
+                  f"{overgeslagen} overgeslagen, samen {ruis:,} rijen ruis")
+    return uit
 
 
 def bouw_bronhouders(cfg: dict[str, str], niveaus: dict[int, float],
@@ -325,6 +379,17 @@ def _met_indexen(conn, cfg: dict[str, str], indexen: list[tuple[str, str]]) -> N
          "Geen TRUNCATE: de rest van de tegellaag blijft staan. Dit is de vorm die in "
          "een sync hoort (naast `refresh-subdiv -b`), niet de volledige herbouw.",
 )
+@click.option(
+    "--inhaal", is_flag=True,
+    help="Bepaal zelf welke bronhouders achterlopen op prod en herbouw alleen die. "
+         "Voor de inhaalslag na een periode zonder herbouw; vergt PROD_DB_URL.",
+)
+@click.option("--drempel", type=int, default=500,
+              help="Inhaalmodus: minimaal verschil in rijen om te herbouwen (default 500).")
+@click.option("--drempel-pct", type=float, default=0.01,
+              help="Inhaalmodus: of minimaal dit aandeel van de bronhouder (default 1%).")
+@click.option("--toon", is_flag=True,
+              help="Inhaalmodus: toon alleen wat er herbouwd zou worden.")
 @click.option("--workers", type=int, default=6, help="Parallelle verbindingen.")
 @click.option(
     "--bron",
@@ -337,11 +402,55 @@ def main(
     steekproef: int | None,
     vanaf_blok: int,
     behoud: bool,
+    inhaal: bool,
+    drempel: int,
+    drempel_pct: float,
+    toon: bool,
     bronhouder: tuple[str, ...],
     workers: int,
     bron: str,
 ) -> None:
     cfg = BRONNEN[bron]
+
+    if inhaal:
+        prod = os.getenv("PROD_DB_URL")
+        if not prod:
+            console.print("[red]PROD_DB_URL ontbreekt — inhaalmodus vergt prod[/red]")
+            raise SystemExit(2)
+        console.print(f"[bold]{cfg['doel']}[/bold] — inhaalmodus, prod vergelijken")
+        kandidaten = inhaal_kandidaten(cfg, prod, drempel, drempel_pct)
+        if not kandidaten:
+            console.print("[green]niets te doen — prod loopt nergens noemenswaardig achter[/green]")
+            return
+        if toon:
+            console.print("zou herbouwen: " + " ".join(kandidaten))
+            return
+        niveaus = {niveau: NIVEAUS[niveau]} if niveau else NIVEAUS
+        bouw_bronhouders(cfg, niveaus, kandidaten)
+
+        # Nameten, en wél hierom: een deel van het verschil is NIET te herbouwen.
+        # De generalisatie is afgeleid van locatie_subdiv, en die verschilt zelf
+        # al tussen de servers doordat ST_Subdivide op PostGIS 3.5 (lokaal) net
+        # anders splitst dan op 3.7 (prod) -- óók op identieke invoergeometrie.
+        # Prod herbouwen uit prod's eigen subdiv reproduceert dat verschil dus
+        # per definitie. Zonder deze nameting stelt de inhaalmodus elke run
+        # dezelfde bronhouders voor, en dan is hij ruis in plaats van signaal.
+        #
+        # Gemeten 2026-09-05: negen bronhouders boven de drempel herbouwden alle
+        # negen naar exact hetzelfde aantal (gm0392 130.531, pv28 610.388, ...)
+        # en werden bij de hermeting opnieuw voorgesteld.
+        rest = inhaal_kandidaten(cfg, prod, drempel, drempel_pct)
+        hardnekkig = [b for b in rest if b in kandidaten]
+        if hardnekkig:
+            console.print(
+                f"[yellow]{len(hardnekkig)} bronhouder(s) veranderden niet door de "
+                f"herbouw: {' '.join(hardnekkig)}[/yellow]")
+            console.print(
+                "[dim]Dat is versiegebonden verschil in de subdiv-laag eronder, geen "
+                "gat — herbouwen lost het niet op. Zet ze in diff_verwachtingen.yml "
+                "of hef het verschil op door lokaal en prod op dezelfde "
+                "PostGIS-versie te brengen.[/dim]")
+        return
 
     if bronhouder:
         # Aparte, veel kortere route: geen ctid-chunking, geen TRUNCATE, geen
