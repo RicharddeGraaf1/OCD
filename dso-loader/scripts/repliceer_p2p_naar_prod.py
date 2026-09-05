@@ -158,7 +158,39 @@ INSERT INTO scope_loc
 -- ruis, geen schade; te krap zou wél een gat op prod achterlaten.
 CREATE TEMP TABLE scope_td ON COMMIT DROP AS
     SELECT identificatie, locatie_id FROM p2p.tekstdeel
-     WHERE locatie_id IN (SELECT identificatie FROM scope_loc);
+     WHERE locatie_id IN (SELECT identificatie FROM scope_loc)
+        -- Directe route, sinds 2026-09-05. Zonder deze tak begint ELKE tak van
+        -- de scope bij `juridische_regel`, en een omgevingsvisie of programma
+        -- heeft die niet — hun inhoud hangt uitsluitend aan divisieannotaties.
+        -- De tak hierboven is bovendien circulair: een tekstdeel komt alleen mee
+        -- als zijn locatie al in scope zit, en die locatie komt binnen via een
+        -- gebiedsaanwijzing die zelf een juridische regel nodig heeft.
+        --
+        -- Gemeten op de sync van 2026-09-04, Zuid-Holland (visie + programma +
+        -- verordening in één run): 258 locaties, 158 gebiedsaanwijzingen en 349
+        -- tekstdelen kwamen nooit op prod, terwijl de replicatie exit 0 gaf.
+        -- Het Zuid-Hollandse Programma heeft 333 tekstdelen en 0 juridische
+        -- regels; via de oude tak vond de scope er daarvan nul.
+        --
+        -- `p2p.tekstdeel.regeling_expression` is daarvoor toegevoegd (vault
+        -- G-141). Hij is voor 82,8% van de bestaande voorraad gevuld uit de
+        -- ZIP-cache; een NULL betekent "herkomst onbekend" en valt hier dus
+        -- buiten — dat is bewust, want gokken is hier erger dan missen.
+        OR regeling_expression IN (SELECT frbr_expression FROM scope_expr);
+
+-- De tekstdelen uit die tweede tak dragen hun eigen locatie, en die moet mee —
+-- anders faalt de FK aan de prod-kant. (De eerste tak kon dit niet nodig hebben:
+-- daar was de locatie per definitie al in scope.)
+INSERT INTO scope_loc
+    SELECT DISTINCT td.locatie_id FROM scope_td td
+     WHERE td.locatie_id IS NOT NULL
+       AND td.locatie_id NOT IN (SELECT identificatie FROM scope_loc);
+
+-- En is zo'n locatie een groep, dan moeten zijn leden er weer bij.
+INSERT INTO scope_loc
+    SELECT DISTINCT lg.lid_identificatie FROM p2p.locatiegroep_lid lg
+     WHERE lg.groep_identificatie IN (SELECT identificatie FROM scope_loc)
+       AND lg.lid_identificatie NOT IN (SELECT identificatie FROM scope_loc);
 
 -- Gebiedsaanwijzingen komen langs twéé routes binnen: via de juridische regel
 -- (scope_ga hierboven) en via het tekstdeel. Die tweede route kwam er op
