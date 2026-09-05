@@ -223,6 +223,10 @@ def herstel_statistieken_na_herstart() -> int:
     hier geen minuut aan verliest.
     """
     conn = get_conn()
+    # Vóór de eerste query: psycopg3 opent bij de eerste `execute` een impliciete
+    # transactie, en daarna weigert `autocommit` te wisselen (INTRANS). ANALYZE
+    # moet buiten een transactie draaien, dus zetten we het hier al.
+    conn.autocommit = True
     cur = conn.cursor()
     try:
         n_leeg = q1(cur, """
@@ -234,7 +238,6 @@ def herstel_statistieken_na_herstart() -> int:
         start = q1(cur, "SELECT pg_postmaster_start_time() n")
         log(f"Statistieken grotendeels leeg ({n_leeg}/{n_totaal} tabellen, "
             f"postmaster sinds {start:%Y-%m-%d %H:%M}) — hete tabellen analyseren")
-        conn.autocommit = True
         cur.execute("SET max_parallel_maintenance_workers = 0")
         gedaan = 0
         for tabel in HETE_TABELLEN:

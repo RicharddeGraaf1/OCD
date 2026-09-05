@@ -101,6 +101,13 @@ waarop de hertaling aan de brontekst hangt; een afwijkend teken maakt de regel
 onbruikbaar. Het aantal regels moet gelijk zijn aan het aantal objecten in de
 invoer.
 
+Doe dit werk ZELF. Start geen subagents en besteed niets uit: dat loopt vast
+op de concurrency-limiet en levert een lege uitvoer op (gemeten 2026-09-04:
+3 van de 10 agents deden dit en schreven niets weg).
+
+Werk in porties van ongeveer 40 teksten en schrijf na elke portie weg, zodat
+een onderbreking nooit het hele batchresultaat kost.
+
 Rapporteer als eindantwoord alleen het aantal verwerkte teksten en het pad —
 niet de hertalingen zelf.
 """

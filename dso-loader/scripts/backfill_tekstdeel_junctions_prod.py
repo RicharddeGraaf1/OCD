@@ -67,6 +67,12 @@ KETEN = [
     ("p2p.tekstdeel_gebiedsaanwijzing", ["tekstdeel_id", "gebiedsaanwijzing_id"],
      [("tekstdeel_id", "p2p.tekstdeel", "identificatie"),
       ("gebiedsaanwijzing_id", "p2p.gebiedsaanwijzing", "identificatie")]),
+    # `hoofdlijn` stond hier alleen als ouder genoemd en werd zelf nooit
+    # gekopieerd -- dezelfde omissie als eerder bij `p2p.kaart`. Gevolg: de 224
+    # ontbrekende `tekstdeel_hoofdlijn`-rijen bleven twee ronden lang hangen op
+    # "ouder ontbreekt", met 14 hoofdlijnen als enige blokkade. Gemeten tijdens
+    # de sync van 2026-09-04. Geen FK's en geen locatie-anker, dus zonder ouders.
+    ("p2p.hoofdlijn", ["identificatie"], []),
     ("p2p.tekstdeel_hoofdlijn", ["tekstdeel_id", "hoofdlijn_id"],
      [("tekstdeel_id", "p2p.tekstdeel", "identificatie"),
       ("hoofdlijn_id", "p2p.hoofdlijn", "identificatie")]),

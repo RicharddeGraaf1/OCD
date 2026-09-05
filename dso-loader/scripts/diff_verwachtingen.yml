@@ -168,6 +168,24 @@ verwacht:
     max: 50000
     reden: Zelfde reden als i2a.uitvoeringsregel -- geen push-script.
 
+  i2a.sttr_bestand:
+    min: -100000
+    max: 100000
+    reden: >-
+      Lokale opslag van de STTR-XML (0,37 GB) waar prod niets mee doet. De
+      vragenlijst in ocd-api/vergunningcheck.py joint bewust NIET langs deze
+      tabel maar rechtstreeks op i2a.uitvoeringsregel.regelbestand_ns -- juist
+      omdat hij op prod leeg is. Prod op 0 is dus de bedoeling, niet een gat.
+      Stand 2026-09-04: 18.000 lokaal, 0 op prod.
+
+  i2a.werkzaamheid_koppel_run:
+    min: -10000
+    max: 10000
+    reden: >-
+      Runboekhouding van de werkzaamheid-junctiebouw (02-09), lokale
+      werktabel. Prod krijgt de uitkomst, niet het bouwlogboek -- zelfde
+      afbakening als v2a.embed_state. Stand 2026-09-04: 293 lokaal, 0 op prod.
+
   # ── vth-werktabellen die de prod-API niet leest ───────────────────────────
 
   vth.omgevingsvergunning_dso:
