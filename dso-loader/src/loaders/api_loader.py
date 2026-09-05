@@ -743,7 +743,8 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
 
 # ── Annotaties (vrijetekststructuur) ─────────────────────────────────
 
-def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
+def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str,
+                           expression_id: str | None = None):
     """Load divisieannotaties (vrijetekststructuur) via Presenteren API."""
     encoded = _encode_regeling_uri(regeling_uri)
     data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen/{encoded}/divisieannotaties",
@@ -821,10 +822,22 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str):
                 themas = [t.get("waarde", t) if isinstance(t, dict) else t for t in td["themas"]]
 
             cur.execute(
-                """INSERT INTO p2p.tekstdeel (identificatie, divisie_wid, thema, locatie_id)
-                   VALUES (%s, %s, %s, %s)
-                   ON CONFLICT (identificatie) DO NOTHING""",
-                (td["identificatie"], td.get("divisietekstRef", ""), themas, loc_id),
+                # `regeling_expression` hoort hier net zo goed als in het
+                # ZIP-pad. Op 2026-09-05 is die kolom toegevoegd (vault G-141)
+                # maar alléén in ow_loader; deze route liet hem leeg, waardoor
+                # 66 zojuist herstelde regelingen alsnog als "zonder annotatie"
+                # bleven tellen. DO UPDATE en geen DO NOTHING, zodat een
+                # herlading de herkomst bijwerkt in plaats van hem te bevriezen
+                # op de expressie waarin het tekstdeel toevallig het eerst is
+                # gezien.
+                """INSERT INTO p2p.tekstdeel
+                     (identificatie, divisie_wid, thema, locatie_id, regeling_expression)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (identificatie) DO UPDATE SET
+                     regeling_expression = COALESCE(EXCLUDED.regeling_expression,
+                                                    p2p.tekstdeel.regeling_expression)""",
+                (td["identificatie"], td.get("divisietekstRef", ""), themas, loc_id,
+                 expression_id),
             )
             stats["tekstdelen"] += 1
 
@@ -1077,7 +1090,7 @@ def herlaad_annotaties(expr_ids: list[str]) -> int:
                           f"({doc_type}, {bh})")
             try:
                 if doc_type in VRIJETEKST_TYPES:
-                    load_divisieannotaties(conn, work, bh)
+                    load_divisieannotaties(conn, work, bh, expr)
                 else:
                     load_regeltekstannotaties(conn, work, bh, expr)
                 conn.commit()
@@ -1202,8 +1215,30 @@ def load_via_api(overheid_code: str, naam: str,
                         f"{stats['kaarten']} kaarten, "
                         f"{stats['locaties']} locaties "
                         f"({stats['geometrieen']} met geometrie)")
+                    # De routering hierboven gaat op documentTYPE, maar de
+                    # STRUCTUUR verschilt per document. Een Projectbesluit staat
+                    # in ARTIKELSTRUCTUUR_TYPES en is dat meestal ook, maar
+                    # sommige zijn vrijetekst: hun OW-ZIP bevat uitsluitend
+                    # tekstdelen.xml en geen enkel regelbestand. Die kregen dus
+                    # de verkeerde behandeling en hielden nul annotaties over.
+                    #
+                    # Gemeten 2026-09-05: 21 vigerende projectbesluiten met tekst
+                    # en zonder één annotatie; PBCUB (Cuijk) leverde er via deze
+                    # route alsnog 21 tekstdelen en 5 locaties met geometrie op.
+                    #
+                    # Bewust een terugval op de UITKOMST en niet een uitbreiding
+                    # van de typelijst: dan hoeft niemand vooraf te weten welke
+                    # documenten hybride zijn, en vangt hij ook de soorten die we
+                    # nog niet zijn tegengekomen.
+                    if not stats["regels"] and not stats["activiteiten"]:
+                        extra = load_divisieannotaties(conn, regeling_uri, bronhouder_code, expression_id)
+                        if extra["tekstdelen"]:
+                            console.print(
+                                f"    [yellow]0 regels — vrijetekst-terugval gaf "
+                                f"{extra['tekstdelen']} tekstdelen, {extra['ga']} GA's, "
+                                f"{extra['locaties']} locaties[/yellow]")
                 elif doc_type in VRIJETEKST_TYPES:
-                    stats = load_divisieannotaties(conn, regeling_uri, bronhouder_code)
+                    stats = load_divisieannotaties(conn, regeling_uri, bronhouder_code, expression_id)
                     console.print(
                         f"    Annotaties: {stats['tekstdelen']} tekstdelen, "
                         f"{stats['ga']} GA's, {stats['kaarten']} kaarten, "
