@@ -584,13 +584,20 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                     if not themas_val and td.get("thema"):
                         themas_val = [td["thema"]]
                     cur.execute(
+                        # `regeling_expression` WEL bijwerken bij een
+                        # herlading, de rest niet. Met een kale DO NOTHING zou
+                        # een tekstdeel voor altijd naar de expressie blijven
+                        # wijzen waarin hij toevallig het eerst gezien is —
+                        # dezelfde val als bij `citeertitel` op 2026-08-10.
                         """INSERT INTO p2p.tekstdeel
-                           (identificatie, divisie_wid, thema, locatie_id)
-                           VALUES (%s, %s, %s, %s)
-                           ON CONFLICT (identificatie) DO NOTHING""",
+                           (identificatie, divisie_wid, thema, locatie_id,
+                            regeling_expression)
+                           VALUES (%s, %s, %s, %s, %s)
+                           ON CONFLICT (identificatie) DO UPDATE SET
+                               regeling_expression = EXCLUDED.regeling_expression""",
                         (td["identificatie"], td["divisie_wid"],
                          themas_val if themas_val else None,
-                         loc_id),
+                         loc_id, expression_id),
                     )
                     td_count += 1
                 except Exception:

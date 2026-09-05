@@ -392,6 +392,22 @@ def bepaal_sinds() -> str:
     return sinds
 
 
+def _annotatie_regels() -> list[str]:
+    """Rapportregels voor regelingen waarvan de annotatielaag is omgevallen.
+
+    Zo'n regeling telt als "ok" — de tekst is geladen — terwijl er geen enkele
+    juridische regel, activiteit of norm bij zit. Op 2026-09-04 overkwam dat de
+    Zuid-Hollandse Omgevingsverordening en het sync-rapport meldde 0 fouten.
+    """
+    gevallen = getattr(p2p, "ANNOTATIE_FOUTEN", [])
+    if not gevallen:
+        return ["- annotatielagen omgevallen: 0"]
+    regels = [f"- annotatielagen omgevallen: {len(gevallen)} "
+              f"(tekst geladen, annotaties niet — deze regelingen staan zonder regels in de DB)"]
+    regels += [f"  - {expr}: {boodschap}" for expr, boodschap in gevallen[:10]]
+    return regels
+
+
 def fase_p2p(bronhouders, sinds: str | None = None, full: bool = False,
              gewijzigd: set[str] | None = None) -> dict[str, str]:
     """Harvest de Ow-regelingen. Rekenwerk (subdiv) gaat naar de post-fase.
@@ -438,6 +454,12 @@ def fase_p2p(bronhouders, sinds: str | None = None, full: bool = False,
         run.markeer_bronhouder(*[k for k, v in resultaten.items() if v == "ok"])
     for k, v in err.items():
         fouten.append(f"p2p {k}: {v}")
+    # Een regeling kan "ok" zijn en tóch zijn hele annotatielaag hebben verloren:
+    # tekst geladen, geen enkele juridische regel. Dat gebeurde op 2026-09-04 met
+    # de Zuid-Hollandse Omgevingsverordening, en de sync meldde 0 fouten. De
+    # loader houdt zulke gevallen nu bij; hier komen ze in het rapport terecht.
+    for expr, boodschap in getattr(p2p, "ANNOTATIE_FOUTEN", []):
+        fouten.append(f"p2p annotaties {expr}: {boodschap}")
     if full:
         detail = f"- {ok}/{len(resultaten)} bronhouders ok"
     else:
@@ -446,7 +468,7 @@ def fase_p2p(bronhouders, sinds: str | None = None, full: bool = False,
     rapporteer("p2p (Ow-regelingen)", [
         detail,
         f"- fouten: {len(err)}" + (f" — {', '.join(list(err)[:15])}" if err else ""),
-    ])
+    ] + _annotatie_regels())
     return resultaten
 
 

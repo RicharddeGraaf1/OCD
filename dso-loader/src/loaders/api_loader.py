@@ -20,6 +20,11 @@ from rich.console import Console
 
 from src.canonieke_bronhouders import upsert_bronhouder
 from src.config import cfg
+
+# Regelingen waarvan de annotatielaag is omgevallen. `full_sync.fase_p2p` leest
+# deze lijst en zet hem in het sync-rapport; zonder dat blijft zo'n mislukking
+# een gekleurde regel in de uitvoer die niemand terugziet.
+ANNOTATIE_FOUTEN: list[tuple[str, str]] = []
 from src.db import get_conn
 from src.http_retry import met_retry
 from src.rate_limiter import limiter
@@ -403,6 +408,45 @@ def load_documentstructuur(conn, regeling_uri: str, expression_id: str):
 
 # ── Annotaties (artikelstructuur) ────────────────────────────────────
 
+# Waardelijst-labels die de Presenteren-API in `waardeInRegeltekst` zet. Het
+# veld heet als een boolean en de kolom IS er een, maar de API levert een
+# waardelijst-label: gemeten 2026-09-05 op de Zuid-Hollandse Omgevingsverordening
+# 12x null en 1x de string "waarde staat in regeltekst".
+#
+# Die ene rij kostte de HELE annotatie-load van die verordening: de INSERT klapte
+# op `invalid input syntax for type boolean`, en de `except` om het annotatieblok
+# brak daarmee alles af. Gevolg: de vigerende ZHOV stond op 2.578 tekstelementen
+# en 0 juridische regels, terwijl de verdrongen versie er 914 had — en de sync
+# meldde "0 fouten". Zie vault G-144.
+_WIR_WAAR = {"waarde staat in regeltekst"}
+_WIR_ONWAAR: set[str] = set()   # nog geen tegenhanger waargenomen
+
+
+def _waarde_in_regeltekst(waarde):
+    """Maak van `waardeInRegeltekst` een boolean of None — nooit een exception.
+
+    Accepteert de vormen die de API in de praktijk levert: een echte boolean,
+    None, een waardelijst-object (`{"waarde": ...}`, zoals `type`/`eenheid`/
+    `groep` verderop) en een kaal label. Een onbekend label wordt None én
+    gemeld, zodat een nieuwe waardelijst-waarde zichtbaar wordt in plaats van
+    een hele regeling te kosten.
+    """
+    if waarde is None or isinstance(waarde, bool):
+        return waarde
+    if isinstance(waarde, dict):
+        waarde = waarde.get("waarde")
+        if waarde is None or isinstance(waarde, bool):
+            return waarde
+    tekst = str(waarde).strip().lower()
+    if tekst in _WIR_WAAR:
+        return True
+    if tekst in _WIR_ONWAAR:
+        return False
+    console.print(f"    [yellow]onbekende waardeInRegeltekst: {waarde!r} "
+                  f"— als NULL opgeslagen[/yellow]")
+    return None
+
+
 def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
                               expression_id: str | None = None):
     """Load regeltekstannotaties (artikelstructuur) via Presenteren API."""
@@ -652,7 +696,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
                             (norm["identificatie"], nw_loc,
                              nw.get("kwalitatieveWaarde"),
                              nw.get("kwantitatieveWaarde"),
-                             nw.get("waardeInRegeltekst")),
+                             _waarde_in_regeltekst(nw.get("waardeInRegeltekst"))),
                         )
                         stats["normwaarden"] += cur.rowcount
 
@@ -1169,7 +1213,14 @@ def load_via_api(overheid_code: str, naam: str,
                     console.print(f"    [yellow]Unknown type {doc_type}, trying artikelstructuur[/yellow]")
                     stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code, expression_id)
             except Exception as e:
+                # Niet alleen printen. Deze `except` dekt de hele annotatielaag
+                # van een regeling — juridische regels, activiteiten, normen,
+                # gebiedsaanwijzingen — en tot 2026-09-05 kwam een mislukking
+                # hier nergens in de foutentelling terecht. De sync meldde dan
+                # "0 fouten" terwijl een provinciale omgevingsverordening zonder
+                # één regel in de database stond. Zelfde soort stilte als G-98.
                 console.print(f"    [red]Annotaties failed: {e}[/red]")
+                ANNOTATIE_FOUTEN.append((expression_id or regeling_uri, str(e)[:200]))
 
         # Afgeleide subdiv-tabel alléén bijwerken als er ook echt iets geladen
         # is. De ST_Subdivide-herbouw is zwaar (duizenden stukjes per bronhouder);

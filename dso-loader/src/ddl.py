@@ -448,8 +448,27 @@ CREATE TABLE IF NOT EXISTS p2p.tekstdeel (
     identificatie       TEXT PRIMARY KEY,
     divisie_wid         TEXT NOT NULL,
     thema               TEXT[] NULL,
-    locatie_id          TEXT NULL REFERENCES p2p.locatie(identificatie)
+    locatie_id          TEXT NULL REFERENCES p2p.locatie(identificatie),
+    -- De regeling waaruit dit tekstdeel is geladen. Bewust GEEN FK: net als bij
+    -- de andere IMOW-objecten mag een expressie verdwijnen zonder het object
+    -- mee te nemen, en een NULL betekent hier "herkomst onbekend" (oudere
+    -- voorraad van vóór 2026-09-05).
+    --
+    -- Waarom deze kolom bestaat: zonder hem is `p2p.tekstdeel` de enige weg
+    -- waarlangs de inhoud van een omgevingsvisie of programma aan een regeling
+    -- hangt, en die weg was er niet. `repliceer_p2p_naar_prod.py` bouwt zijn
+    -- scope vanaf `juridische_regel` omlaag; visies en programma's hebben die
+    -- niet, en daardoor bereikte de replicatie hun tekstdelen, hun
+    -- gebiedsaanwijzingen en hun locaties nooit. Zie vault G-141.
+    --
+    -- `divisie_wid` is hiervoor GEEN alternatief: die joint 0 keer op
+    -- `tekst_element.wid` (gemeten over 27.817 rijen) en draagt in 73% van de
+    -- gevallen simpelweg dezelfde UUID als `identificatie`.
+    regeling_expression TEXT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_tekstdeel_regeling_expression
+    ON p2p.tekstdeel (regeling_expression);
 
 CREATE TABLE IF NOT EXISTS p2p.hoofdlijn (
     identificatie       TEXT PRIMARY KEY,
