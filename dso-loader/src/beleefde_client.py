@@ -60,12 +60,31 @@ class DienstWijktAf(RuntimeError):
     """De dienst gaf herhaald 503 — de run stopt uit zichzelf."""
 
 
+class ObjectWijktAf(RuntimeError):
+    """Dít ene object bleef 503 geven, terwijl de dienst overeind lijkt.
+
+    Onderscheiden van `DienstWijktAf` omdat de twee tegengesteld gedrag
+    vragen. Een dienst die wijkt: wegblijven. Een object dat wijkt:
+    overslaan en doorlopen — anders sterft elke volgende run op hetzelfde
+    kapotte bestand en komen we de lijst nooit door.
+    """
+
+    def __init__(self, url: str):
+        super().__init__(f"503 bleef staan na een lange pauze: {url}")
+        self.url = url
+
+
 @dataclass
 class Beleefd:
     """Serieel, traag, en stopt liever dan dat hij doordrukt.
 
     tempo            requests per seconde (1.0 = 2% van het budget)
-    max_503          aantal 503'en binnen `venster_503` voordat we afbreken
+    max_503          aantal *verschillende objecten* dat binnen `venster_503`
+                     definitief 503 mag geven voordat we de dienst als wijkend
+                     beschouwen. Eén object dat blijft hangen is een kapot
+                     bestand, geen storing.
+    max_hersteld     aantal 503'en dat binnen het venster vanzelf herstelde
+                     voordat we het tóch als degradatie lezen
     pauze_503        seconden pauzeren na een 503 voordat we het nog één keer
                      proberen
     alleen_s_nachts  weiger te draaien buiten 22:00-06:00 lokale tijd
@@ -73,6 +92,7 @@ class Beleefd:
 
     tempo: float = 1.0
     max_503: int = 2
+    max_hersteld: int = 5
     pauze_503: float = 120.0
     venster_503: float = 900.0
     timeout: float = 60.0
@@ -80,7 +100,9 @@ class Beleefd:
 
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
     _laatste: float = field(default=0.0, init=False, repr=False)
-    _503s: list[float] = field(default_factory=list, init=False, repr=False)
+    _mislukt: list[float] = field(default_factory=list, init=False, repr=False)
+    _hersteld: list[float] = field(default_factory=list, init=False, repr=False)
+    overgeslagen_urls: list[str] = field(default_factory=list, init=False)
     calls: int = field(default=0, init=False)
 
     # -- levenscyclus ---------------------------------------------------
@@ -119,16 +141,35 @@ class Beleefd:
             time.sleep(doel - nu)
         self._laatste = time.monotonic()
 
-    def _noteer_503(self) -> None:
+    @staticmethod
+    def _snoei(reeks: list[float], venster: float) -> list[float]:
         nu = time.monotonic()
-        self._503s = [t for t in self._503s if nu - t < self.venster_503]
-        self._503s.append(nu)
-        if len(self._503s) >= self.max_503:
+        return [t for t in reeks if nu - t < venster]
+
+    def _noteer_hersteld(self) -> None:
+        """Een 503 die na de pauze vanzelf goed ging."""
+        self._hersteld = self._snoei(self._hersteld, self.venster_503)
+        self._hersteld.append(time.monotonic())
+        if len(self._hersteld) >= self.max_hersteld:
             raise DienstWijktAf(
-                f"{len(self._503s)}x 503 binnen {self.venster_503 / 60:.0f} min. "
-                "De DSO geeft bij overbelasting 503 en geen 429, dus we kunnen "
-                "'te snel' niet van 'kapot' onderscheiden. Run afgebroken; "
-                "later hervatten (het werk is gecheckpoint)."
+                f"{len(self._hersteld)} losse 503'en binnen "
+                f"{self.venster_503 / 60:.0f} min. Ze herstelden elk wel, maar "
+                "zo vaak is geen hik meer. Run afgebroken; later hervatten."
+            )
+
+    def _noteer_mislukt(self, url: str) -> None:
+        """Een object dat ook na de lange pauze 503 bleef geven."""
+        self._mislukt = self._snoei(self._mislukt, self.venster_503)
+        self._mislukt.append(time.monotonic())
+        self.overgeslagen_urls.append(url)
+        if len(self._mislukt) >= self.max_503:
+            raise DienstWijktAf(
+                f"{len(self._mislukt)} verschillende objecten gaven binnen "
+                f"{self.venster_503 / 60:.0f} min definitief 503. Dat is geen "
+                "kapot bestand meer maar de dienst zelf. De DSO geeft bij "
+                "overbelasting 503 en geen 429, dus we kunnen 'te snel' niet "
+                "van 'kapot' onderscheiden — bij die twijfel wijken we. "
+                "Later hervatten (het werk is gecheckpoint)."
             )
 
     # -- de enige call --------------------------------------------------
@@ -149,9 +190,10 @@ class Beleefd:
                 continue
 
             if r.status_code == 503:
-                self._noteer_503()  # gooit DienstWijktAf bij herhaling
                 if poging == 2:
-                    raise DienstWijktAf("503 bleef staan na een lange pauze.")
+                    # Kan DienstWijktAf gooien als méér objecten dit doen.
+                    self._noteer_mislukt(url)
+                    raise ObjectWijktAf(url)
                 console.print(f"    [yellow]503 — {self.pauze_503:.0f}s pauzeren "
                               f"voor één laatste poging[/yellow]")
                 time.sleep(self.pauze_503)
@@ -163,6 +205,8 @@ class Beleefd:
                 raise DienstWijktAf(
                     "429 ontvangen — ondubbelzinnig te snel. Run afgebroken."
                 )
+            if poging == 2:
+                self._noteer_hersteld()
             return r
         raise AssertionError("onbereikbaar")  # pragma: no cover
 

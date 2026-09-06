@@ -154,6 +154,36 @@ def _rtr_organisatiecode(bronhouder_code: str) -> str:
     return re.sub(r"^[a-z]+", "", bronhouder_code)
 
 
+# De bestuurslaag die bij de weggestreepte prefix hoort. Zonder deze parameter
+# is een kale code dubbelzinnig: `0664` bestaat als gemeente EN als waterschap.
+_ORG_TYPE = {"gm": "GM", "ws": "WS", "pv": "PV", "mnre": "MNRE"}
+
+
+def _rtr_organisatietype(bronhouder_code: str) -> str:
+    """De bestuurslaag, want de kale organisatiecode is niet uniek.
+
+    Gemeten 2026-09-06 tegen de live RTR op `0664`:
+
+    | bevraging | resultaat |
+    |---|---|
+    | `organisatieCode=0664` | 148 activiteiten, organisatieType **GM** |
+    | `+ organisatieType=WS` | 58 activiteiten, OIN 00000001855566036000 |
+    | `+ organisatieType=ONZINWAARDE` | 0 activiteiten |
+
+    Die derde regel is de controle: de RTR negeert `typering=` en `_sort=`
+    stilzwijgend (vault gaps#G-138), dus zonder onzinwaarde bewijst een
+    plausibel ogend antwoord niets. Hier zakt het naar 0, dus het filter
+    wordt echt toegepast.
+
+    Zonder deze parameter kreeg `ws0664` de regelbestanden van gm0664 en
+    bleven die van het waterschap ongeladen. Landelijk botsen precies twee
+    codes -- 0654 en 0664 -- en precies die twee waterschappen hadden nul
+    rijen in `i2a.toepasbaar_regelbestand`. Zie vault gaps#G-141.
+    """
+    m = re.match(r"^[a-z]+", bronhouder_code or "")
+    return _ORG_TYPE.get(m.group(0), "") if m else ""
+
+
 def _load_rtr_activiteiten(conn, organisatie_code: str, naam: str) -> tuple[int, str]:
     """Load RTR activiteiten for a bestuursorgaan via organisatieCode.
 
@@ -164,13 +194,17 @@ def _load_rtr_activiteiten(conn, organisatie_code: str, naam: str) -> tuple[int,
     """
     console.print(f"  Loading RTR activiteiten for {naam} (peildatum {_peildatum()})...")
     rtr_code = _rtr_organisatiecode(organisatie_code)
+    rtr_type = _rtr_organisatietype(organisatie_code)
 
     all_acts = []
     page = 1
     while True:
+        bo = {"organisatieCode": rtr_code}
+        if rtr_type:
+            bo["organisatieType"] = rtr_type
         data = _api_post(cfg.RTR_BASE, "/activiteiten/_zoek", {
             "datum": _peildatum(),
-            "bestuursorgaan": {"organisatieCode": rtr_code},
+            "bestuursorgaan": bo,
             "pageSize": 200,
             "page": page,
         })

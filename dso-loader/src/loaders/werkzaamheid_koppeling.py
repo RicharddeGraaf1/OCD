@@ -20,7 +20,7 @@ import re
 
 from rich.console import Console
 
-from src.beleefde_client import Beleefd, DienstWijktAf
+from src.beleefde_client import Beleefd, DienstWijktAf, ObjectWijktAf
 from src.config import cfg
 from src.db import get_conn
 
@@ -130,7 +130,15 @@ def laad(tempo: float = 1.0, alleen_s_nachts: bool = False,
 
             for i, w in enumerate(todo, 1):
                 urn = w["urn"]
-                urns, paginas = _koppelingen(c, urn, datum)
+                try:
+                    urns, paginas = _koppelingen(c, urn, datum)
+                except ObjectWijktAf:
+                    # Deze ene werkzaamheid blijft 503 geven. Niet
+                    # checkpointen, zodat een volgende run hem nog eens
+                    # probeert; wél doorlopen met de rest.
+                    console.print(f"    [yellow]503 blijft staan op {urn} "
+                                  f"— overgeslagen[/yellow]")
+                    continue
                 with conn.cursor() as cur:
                     if opnieuw:
                         cur.execute("DELETE FROM i2a.werkzaamheid_activiteit "

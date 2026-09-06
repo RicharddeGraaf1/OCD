@@ -23,7 +23,7 @@ import re
 from lxml import etree
 from rich.console import Console
 
-from src.beleefde_client import Beleefd, DienstWijktAf
+from src.beleefde_client import Beleefd, DienstWijktAf, ObjectWijktAf
 from src.config import cfg
 from src.db import get_conn
 
@@ -65,6 +65,24 @@ def _items(payload: dict) -> list[dict]:
     return emb.get("toepasbareRegelsList") or emb.get("toepasbareRegels") or []
 
 
+MAX_POGINGEN = 3  # daarna slaan we een bestand blijvend over
+
+
+def _noteer_mislukt(conn, sid: str, it: dict, code: int) -> None:
+    """Leg vast dat de RTR dit sttrBestand niet kon leveren."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO i2a.sttr_bestand_mislukt
+                   (sttr_id, fsr, oin, pogingen, laatste_code)
+               VALUES (%s,%s,%s,1,%s)
+               ON CONFLICT (sttr_id) DO UPDATE
+                   SET pogingen = i2a.sttr_bestand_mislukt.pogingen + 1,
+                       laatste_code = EXCLUDED.laatste_code,
+                       laatst_op = now()""",
+            (sid, it.get("functioneleStructuurRef"), it.get("oin"), code))
+    conn.commit()
+
+
 def haal_op(tempo: float = 1.0, alleen_s_nachts: bool = True,
             budget: int | None = None) -> dict:
     """Download ontbrekende sttrBestanden naar i2a.sttr_bestand.
@@ -73,12 +91,20 @@ def haal_op(tempo: float = 1.0, alleen_s_nachts: bool = True,
     checkpoint, dus een volgende run pakt de rest.
     """
     conn = get_conn()
-    stats = {"nieuw": 0, "overgeslagen": 0, "bytes": 0, "calls": 0}
+    stats = {"nieuw": 0, "overgeslagen": 0, "opgegeven": 0, "mislukt": 0,
+             "bytes": 0, "calls": 0}
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT sttr_id FROM i2a.sttr_bestand")
             binnen = {r["sttr_id"] for r in cur.fetchall()}
-        console.print(f"  {len(binnen)} bestanden al binnen")
+            # Bestanden die de RTR drie keer niet kon leveren slaan we over.
+            # Zonder dat sterft elke run op hetzelfde kapotte bestand.
+            cur.execute("SELECT sttr_id FROM i2a.sttr_bestand_mislukt "
+                        "WHERE pogingen >= %s", (MAX_POGINGEN,))
+            opgegeven = {r["sttr_id"] for r in cur.fetchall()}
+        console.print(f"  {len(binnen)} bestanden al binnen"
+                      + (f", {len(opgegeven)} opgegeven na {MAX_POGINGEN}x 503"
+                         if opgegeven else ""))
 
         with Beleefd(tempo=tempo, alleen_s_nachts=alleen_s_nachts) as c:
             page = 1
@@ -99,6 +125,9 @@ def haal_op(tempo: float = 1.0, alleen_s_nachts: bool = True,
                     if sid in binnen:
                         stats["overgeslagen"] += 1
                         continue
+                    if sid in opgegeven:
+                        stats["opgegeven"] += 1
+                        continue
                     if budget and stats["nieuw"] >= budget:
                         console.print(f"  [yellow]Budget van {budget} bereikt — "
                                       f"gestopt. Volgende run gaat verder.[/yellow]")
@@ -106,8 +135,20 @@ def haal_op(tempo: float = 1.0, alleen_s_nachts: bool = True,
                         stats["calls"] = c.calls
                         return stats
 
-                    q = c.get(f"{cfg.STTR_BASE}/toepasbareRegels/{sid}/sttrBestand")
+                    try:
+                        q = c.get(
+                            f"{cfg.STTR_BASE}/toepasbareRegels/{sid}/sttrBestand")
+                    except ObjectWijktAf:
+                        # Eén stuk bestand. Noteren en door — de dienst zelf
+                        # is overeind; bij méér van deze grijpt Beleefd in.
+                        _noteer_mislukt(conn, sid, it, 503)
+                        stats["mislukt"] += 1
+                        console.print(f"    [yellow]503 blijft staan op {sid} "
+                                      f"— overgeslagen[/yellow]")
+                        continue
                     if q.status_code != 200:
+                        _noteer_mislukt(conn, sid, it, q.status_code)
+                        stats["mislukt"] += 1
                         continue
                     rauw = q.content
                     with conn.cursor() as cur:
@@ -140,6 +181,9 @@ def haal_op(tempo: float = 1.0, alleen_s_nachts: bool = True,
         conn.close()
     console.print(f"  [green]{stats['nieuw']} nieuw · {stats['overgeslagen']} al binnen "
                   f"· {stats['calls']} calls[/green]")
+    if stats["mislukt"] or stats["opgegeven"]:
+        console.print(f"  [yellow]{stats['mislukt']} niet geleverd deze run · "
+                      f"{stats['opgegeven']} eerder opgegeven[/yellow]")
     return stats
 
 
@@ -262,7 +306,7 @@ def parse(limit: int | None = None, opnieuw: bool = False) -> dict:
     """Lokale parse over i2a.sttr_bestand. Nul API-calls."""
     conn = get_conn()
     stats = {"bestanden": 0, "regels": 0, "geo": 0, "herbruik": 0, "bereik": 0,
-             "label": 0, "opties": 0}
+             "label": 0, "opties": 0, "wacht_op_ns": 0}
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -271,7 +315,27 @@ def parse(limit: int | None = None, opnieuw: bool = False) -> dict:
                 + "ORDER BY sttr_id" + (" LIMIT %s" if limit else ""),
                 (limit,) if limit else ())
             rijen = cur.fetchall()
+            # uitvoeringsregel.regelbestand_ns heeft een FK naar
+            # toepasbaar_regelbestand. Die tabel wordt door de imtr_loader
+            # gevuld en kan achterlopen op de RTR-lijst die de backfill volgt.
+            # Gemeten 2026-09-06: 107 namespaces binnengehaald die daar nog
+            # niet in staan, alle uit ws0664 (68) en ws0654 (39). We slaan die
+            # bestanden over in plaats van een stub-rij in andermans tabel te
+            # schrijven -- en we zetten geparsed_op NIET, zodat ze vanzelf
+            # meelopen zodra de imtr_loader die namespaces kent.
+            cur.execute("SELECT namespace FROM i2a.toepasbaar_regelbestand")
+            bekend = {r["namespace"] for r in cur.fetchall()}
+
+        wacht_op_ns = [r for r in rijen if r["fsr"] not in bekend]
+        rijen = [r for r in rijen if r["fsr"] in bekend]
         console.print(f"  {len(rijen)} bestanden te parsen")
+        stats["wacht_op_ns"] = len(wacht_op_ns)
+        if wacht_op_ns:
+            ns = {r["fsr"] for r in wacht_op_ns}
+            console.print(
+                f"  [yellow]{len(wacht_op_ns)} overgeslagen: hun namespace "
+                f"({len(ns)} stuks) staat nog niet in toepasbaar_regelbestand. "
+                f"Draai de imtr_loader en parse opnieuw.[/yellow]")
 
         for i, rij in enumerate(rijen, 1):
             regels = _ontleed(gzip.decompress(rij["xml_gz"]), rij["sttr_id"])
