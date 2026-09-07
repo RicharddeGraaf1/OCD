@@ -1117,6 +1117,24 @@ def backfill_sttr_xml_cmd(tempo, overdag, budget):
     haal_op(tempo=tempo, alleen_s_nachts=not overdag, budget=budget)
 
 
+@cli.command("backfill-rtr-activiteiten")
+@click.option("--overdag", is_flag=True,
+              help="Draai buiten het voorkeursvenster 22:00-06:00.")
+@click.option("--tempo", type=float, default=1.0, show_default=True,
+              help="Bronhouders per seconde.")
+@click.option("--limit", type=int, default=None, help="Stop na N bronhouders.")
+def backfill_rtr_activiteiten_cmd(overdag, tempo, limit):
+    """Vul i2a.rtr_activiteit: de registratiegegevens per activiteit.
+
+    Alleen de lijst-fase, geen DMN-downloads. Levert wat p2p.activiteit niet
+    heeft: OIN en bestuursorgaan, begin- en einddatum, verfijnbaar, en de
+    locaties waarop de registratie geldt. Stopt uit zichzelf als het venster
+    sluit; de tabel is het checkpoint.
+    """
+    from src.loaders.imtr_loader import backfill_rtr_activiteiten
+    backfill_rtr_activiteiten(alleen_s_nachts=not overdag, tempo=tempo, limit=limit)
+
+
 @cli.command("parse-sttr-xml")
 @click.option("--limit", type=int, default=None, help="Stop na N bestanden.")
 @click.option("--opnieuw", is_flag=True,

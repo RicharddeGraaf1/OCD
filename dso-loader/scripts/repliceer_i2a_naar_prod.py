@@ -71,6 +71,10 @@ PLAN = [
     # we de activiteit terugvinden. Filteren zou hier precies de dataverlies
     # herintroduceren die de oude loader had.
     ("i2a.werkzaamheid_activiteit", None, None),
+    # Registratiegegevens uit de RTR. Hoort hier en niet bij p2p: het is de
+    # activiteit zoals het register hem publiceert, niet zoals hij in de
+    # omgevingsdocumenten geannoteerd staat.
+    ("i2a.rtr_activiteit", None, None),
     # i2a.sttr_bestand gaat BEWUST niet mee: ~0,37 GB ruwe XML die prod niet
     # serveert. Hoort in de warme laag, niet in de hot-DB.
     ("i2a.aansluitpunt", None, None),

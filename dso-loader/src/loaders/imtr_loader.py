@@ -58,12 +58,14 @@ import re
 from datetime import date
 
 import httpx
+import time
 from rich.console import Console
 
 from src.config import cfg
 from src.db import get_conn
 from src.http_retry import met_retry
 from src.rate_limiter import limiter
+from psycopg.types.json import Json
 
 console = Console()
 
@@ -226,6 +228,38 @@ def _load_rtr_activiteiten(conn, organisatie_code: str, naam: str) -> tuple[int,
     count = 0
     with conn.cursor() as cur:
         for act in all_acts:
+            # De registratiegegevens zelf -- wat de RTR over deze activiteit
+            # publiceert, los van hoe hij in de omgevingsdocumenten geannoteerd
+            # staat. Komt gratis mee in deze lijst-call.
+            bo = act.get("bestuursorgaan", {}) or {}
+            cur.execute(
+                """INSERT INTO i2a.rtr_activiteit
+                       (urn, omschrijving, oin, organisatie_type,
+                        organisatie_code, bestuurslaag, begin_datum, eind_datum,
+                        verfijnbaar, locaties, aantal_rbo, opgehaald_op)
+                   VALUES (%s,%s,%s,%s,%s,%s,
+                           to_date(nullif(%s,''),'DD-MM-YYYY'),
+                           to_date(nullif(%s,''),'DD-MM-YYYY'),
+                           %s,%s,%s, now())
+                   ON CONFLICT (urn) DO UPDATE SET
+                       omschrijving = EXCLUDED.omschrijving,
+                       oin = EXCLUDED.oin,
+                       organisatie_type = EXCLUDED.organisatie_type,
+                       organisatie_code = EXCLUDED.organisatie_code,
+                       bestuurslaag = EXCLUDED.bestuurslaag,
+                       begin_datum = EXCLUDED.begin_datum,
+                       eind_datum = EXCLUDED.eind_datum,
+                       verfijnbaar = EXCLUDED.verfijnbaar,
+                       locaties = EXCLUDED.locaties,
+                       aantal_rbo = EXCLUDED.aantal_rbo,
+                       opgehaald_op = now()""",
+                (act.get("urn"), act.get("omschrijving"), bo.get("oin"),
+                 bo.get("organisatieType"), bo.get("organisatieCode"),
+                 bo.get("bestuurslaag"), act.get("beginDatum"),
+                 act.get("eindDatum"), act.get("verfijnbaar"),
+                 Json(act.get("locaties") or []),
+                 len(act.get("regelBeheerObjecten") or [])))
+
             omschrijving = act.get("omschrijving", "")
             for rbo in act.get("regelBeheerObjecten", []):
                 fsr = rbo.get("functioneleStructuurRef", "")
@@ -479,3 +513,62 @@ def load_imtr():
         console.print("[bold green]IMTR loading complete![/bold green]")
     finally:
         conn.close()
+
+
+def backfill_rtr_activiteiten(alleen_s_nachts: bool = True,
+                              tempo: float = 1.0,
+                              limit: int | None = None) -> dict:
+    """Vul i2a.rtr_activiteit voor alle bronhouders — alleen de lijst-fase.
+
+    Dit is bewust NIET `load_imtr_for`: die haalt per regelbestand ook de
+    DMN-XML op, en dat is het dure deel (~50.000 downloads). Hier gaat het
+    alleen om de registratiegegevens, die gratis in de lijst-call meekomen.
+
+    Kosten: `/activiteiten/_zoek` capt stil op **20 items per pagina**, ook al
+    vraag je er 200 — gemeten 2026-09-07 op vijf bestuursorganen (Utrecht meldt
+    100 totaal en levert er 20). Bij ~36.000 activiteiten over 511 bronhouders
+    is dat ~1.900 pagina-calls, niet de ~370 die pageSize=200 zou suggereren.
+    """
+    from src.beleefde_client import in_voorkeursvenster
+
+    if alleen_s_nachts and not in_voorkeursvenster():
+        console.print("[yellow]Buiten het voorkeursvenster 22:00-06:00. "
+                      "Gebruik --overdag als je dit bewust nu wilt.[/yellow]")
+        return {"bronhouders": 0, "activiteiten": 0}
+
+    conn = get_conn()
+    stats = {"bronhouders": 0, "activiteiten": 0, "overgeslagen": 0}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT overheidscode, naam FROM core.bronhouder "
+                        "ORDER BY overheidscode" + (" LIMIT %s" if limit else ""),
+                        (limit,) if limit else ())
+            bh = cur.fetchall()
+        console.print(f"  {len(bh)} bronhouders")
+
+        for i, r in enumerate(bh, 1):
+            if alleen_s_nachts and not in_voorkeursvenster():
+                console.print("[yellow]Venster gesloten — gestopt. "
+                              "De tabel is het checkpoint.[/yellow]")
+                break
+            try:
+                _load_rtr_activiteiten(conn, r["overheidscode"], r["naam"])
+                stats["bronhouders"] += 1
+            except Exception as e:
+                console.print(f"  [yellow]{r['overheidscode']}: {e}[/yellow]")
+                stats["overgeslagen"] += 1
+            time.sleep(max(0.0, 1.0 / tempo - 0.5))
+            if i % 25 == 0:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT count(*) n FROM i2a.rtr_activiteit")
+                    n = cur.fetchone()["n"]
+                console.print(f"    {i}/{len(bh)} bronhouders — {n} activiteiten")
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) n FROM i2a.rtr_activiteit")
+            stats["activiteiten"] = cur.fetchone()["n"]
+    finally:
+        conn.close()
+    console.print(f"  [green]{stats['bronhouders']} bronhouders · "
+                  f"{stats['activiteiten']} activiteiten in i2a.rtr_activiteit[/green]")
+    return stats

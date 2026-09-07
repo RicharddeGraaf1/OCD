@@ -289,12 +289,59 @@ def pagina(urn: str, overheid: str, response: Response,
                                 "heuristiek_onderdeel": onderdeel,
                                 "heuristiek_bewijs": bewijs})
 
+            # ── het registertabblad ───────────────────────────────────
+            # Wat de RTR over deze activiteit publiceert, los van hoe hij in
+            # de omgevingsdocumenten geannoteerd staat. Kan ontbreken: het
+            # zoek-endpoint levert per bestuursorgaan maar 20 activiteiten en
+            # negeert `page`, dus deze tabel wordt langs een andere weg
+            # gevuld. Ontbreekt hij, dan hoort het scherm dat te zeggen in
+            # plaats van iets te verzinnen.
+            cur.execute("""
+                SELECT oin, organisatie_type, organisatie_code, bestuurslaag,
+                       begin_datum, eind_datum, verfijnbaar, locaties,
+                       aantal_rbo, opgehaald_op
+                  FROM i2a.rtr_activiteit WHERE urn = %s""", (aid,))
+            reg = cur.fetchone()
+
+            # De plek in de landelijke functionele structuur: de keten omhoog.
+            cur.execute("""
+                WITH RECURSIVE keten AS (
+                    SELECT identificatie, naam, bovenliggende, is_tophaak, 0 AS diepte
+                      FROM p2p.activiteit WHERE identificatie = %s
+                    UNION ALL
+                    SELECT a.identificatie, a.naam, a.bovenliggende, a.is_tophaak,
+                           k.diepte + 1
+                      FROM p2p.activiteit a
+                      JOIN keten k ON a.identificatie = k.bovenliggende
+                     WHERE k.diepte < 12)
+                SELECT identificatie, naam, is_tophaak, diepte
+                  FROM keten ORDER BY diepte DESC""", (aid,))
+            keten = cur.fetchall()
+
+            registratie = None
+            if reg or keten:
+                # De tegenspraak die het scherm niet mag gladstrijken: het
+                # register kan nul regelbeheerobjecten noemen terwijl er wel
+                # regelbestanden naar deze activiteit verwijzen.
+                gevonden = len(rbos)
+                genoemd = reg["aantal_rbo"] if reg else None
+                registratie = {
+                    **(dict(reg) if reg else {}),
+                    "bekend": reg is not None,
+                    "keten": keten,
+                    "rbo_genoemd_in_register": genoemd,
+                    "rbo_gevonden_in_regelbestanden": gevonden,
+                    "rbo_spreekt_elkaar_tegen": (
+                        genoemd is not None and genoemd != gevonden),
+                }
+
             uit.append({
                 "activiteit_urn": aid,
                 "activiteit_naam": act["naam"],
                 "in_p2p": act["gezien_in_p2p"],
                 "regelbeheerobjecten": rbos,
                 "regelteksten": teksten,
+                "registratie": registratie,
             })
 
     return {
