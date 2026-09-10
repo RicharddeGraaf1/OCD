@@ -589,15 +589,29 @@ def _load_from_zip(conn, zip_path: Path, regeling_info: dict):
                         # een tekstdeel voor altijd naar de expressie blijven
                         # wijzen waarin hij toevallig het eerst gezien is —
                         # dezelfde val als bij `citeertitel` op 2026-08-10.
+                        # `idealisatie` en `divisie_soort` kwamen er op
+                        # 2026-09-10 bij. De parser leverde de idealisatie al
+                        # aan; er was alleen geen kolom om hem in te zetten.
+                        # Zie docs/vrijetekst-gaten-plan.md V-1 en V-2.
                         """INSERT INTO p2p.tekstdeel
                            (identificatie, divisie_wid, thema, locatie_id,
-                            regeling_expression)
-                           VALUES (%s, %s, %s, %s, %s)
+                            regeling_expression, idealisatie, divisie_soort)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s)
                            ON CONFLICT (identificatie) DO UPDATE SET
-                               regeling_expression = EXCLUDED.regeling_expression""",
+                               regeling_expression = EXCLUDED.regeling_expression,
+                               idealisatie   = COALESCE(EXCLUDED.idealisatie,
+                                                        p2p.tekstdeel.idealisatie),
+                               divisie_soort = COALESCE(EXCLUDED.divisie_soort,
+                                                        p2p.tekstdeel.divisie_soort)""",
                         (td["identificatie"], td["divisie_wid"],
                          themas_val if themas_val else None,
-                         loc_id, expression_id),
+                         loc_id, expression_id,
+                         td.get("idealisatie"),
+                         # De parser zet de href van DivisietekstRef of
+                         # DivisieRef in `divisie_wid`; de IMOW-identificatie
+                         # verraadt welke van de twee het was.
+                         "divisie" if ".divisie." in (td.get("divisie_wid") or "")
+                         else "divisietekst"),
                     )
                     td_count += 1
                 except Exception:

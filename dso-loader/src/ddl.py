@@ -463,9 +463,34 @@ CREATE TABLE IF NOT EXISTS p2p.tekstdeel (
     --
     -- `divisie_wid` is hiervoor GEEN alternatief: die joint 0 keer op
     -- `tekst_element.wid` (gemeten over 27.817 rijen) en draagt in 73% van de
-    -- gevallen simpelweg dezelfde UUID als `identificatie`.
+    -- gevallen simpelweg dezelfde UUID als `identificatie`. De echte wId staat
+    -- sinds 2026-09-10 in `p2p.divisie`; join daarlangs.
+    regeling_expression TEXT NULL,
+    -- exact | indicatief, per tekstdeel. Zie 2026-09-add-vrijetekst-annotatiedetails.sql.
+    idealisatie         TEXT NULL REFERENCES core.idealisatie(code),
+    -- Annoteert dit tekstdeel een `divisietekst` of alleen een `divisie`?
+    -- De API-route las tot 2026-09-10 alleen `divisietekstRef`, waardoor 2.934
+    -- divisie-annotaties een lege `divisie_wid` kregen en op een kapotte
+    -- verwijzing leken.
+    divisie_soort       TEXT NULL
+);
+
+ALTER TABLE p2p.tekstdeel
+    ADD COLUMN IF NOT EXISTS idealisatie TEXT NULL REFERENCES core.idealisatie(code);
+ALTER TABLE p2p.tekstdeel
+    ADD COLUMN IF NOT EXISTS divisie_soort TEXT NULL;
+
+-- De IMOW-divisie(tekst) met zijn STOP-wId: de brug die `divisie_wid` niet kon
+-- slaan. Maakt `tekstdeel -> divisie -> tekst_element` sluitend.
+CREATE TABLE IF NOT EXISTS p2p.divisie (
+    identificatie       TEXT PRIMARY KEY,
+    wid                 TEXT NOT NULL,
+    soort               TEXT NOT NULL,
     regeling_expression TEXT NULL
 );
+
+CREATE INDEX IF NOT EXISTS divisie_wid_idx ON p2p.divisie (wid);
+CREATE INDEX IF NOT EXISTS divisie_expr_idx ON p2p.divisie (regeling_expression);
 
 CREATE INDEX IF NOT EXISTS idx_tekstdeel_regeling_expression
     ON p2p.tekstdeel (regeling_expression);

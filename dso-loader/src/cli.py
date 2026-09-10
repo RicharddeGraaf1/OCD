@@ -94,6 +94,88 @@ def herlaad_annotaties_stale_cmd(limit):
     console.print(f"[green]{n} regeling(en) opnieuw geannoteerd[/green]")
 
 
+@cli.command("herlaad-vrijetekst")
+@click.option("--limit", type=int, default=None, help="Max aantal regelingen (default: alle).")
+@click.option("--alleen-onvolledig", is_flag=True,
+              help="Alleen regelingen waarvan tekstdelen nog geen idealisatie of "
+                   "divisie_soort hebben, of waarvan de wId-brug ontbreekt.")
+def herlaad_vrijetekst_cmd(limit, alleen_onvolledig):
+    """Herlaad de divisieannotaties van omgevingsvisies en programma's.
+
+    `herlaad-annotaties-stale` bereikt deze documenten niet: die selecteert via
+    `p2p.juridische_regel`, en vrijetekstdocumenten hebben daar geen rijen.
+
+    Nodig na 2026-09-10, toen `idealisatie`, `divisie_soort` en `p2p.divisie`
+    (de wId-brug) erbij kwamen — bestaande voorraad heeft die velden nog niet.
+    Zie docs/vrijetekst-gaten-plan.md.
+    """
+    from src.loaders.api_loader import herlaad_annotaties
+    from src.run_log import load_run
+
+    filter_sql = ""
+    if alleen_onvolledig:
+        filter_sql = """
+              AND (
+                EXISTS (SELECT 1 FROM p2p.tekstdeel td
+                         WHERE td.regeling_expression = r.frbr_expression
+                           AND (td.idealisatie IS NULL OR td.divisie_soort IS NULL))
+                OR NOT EXISTS (SELECT 1 FROM p2p.divisie d
+                                WHERE d.regeling_expression = r.frbr_expression)
+              )"""
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT r.frbr_expression
+                FROM p2p.regeling r
+                WHERE r.regelingmodel = 'RegelingVrijetekst'
+                  AND NOT r.inactief
+                  {filter_sql}
+                ORDER BY r.frbr_expression
+            """)
+            exprs = [row["frbr_expression"] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+    if limit:
+        exprs = exprs[:limit]
+    console.print(f"[bold]{len(exprs)} vrijetekstregeling(en) te herladen[/bold]")
+    if not exprs:
+        console.print("[green]niets te doen[/green]")
+        return
+
+    with load_run("ozon-regelingen", scope=f"herlaad-vrijetekst ({len(exprs)})") as run:
+        n = herlaad_annotaties(exprs)
+        run.set(n_verwerkt=n)
+    console.print(f"[green]{n} regeling(en) opnieuw geannoteerd[/green]")
+
+    # Meteen laten zien of de gaten dicht zijn; anders merk je het pas als een
+    # meting er weer overheen loopt.
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT count(*) FILTER (WHERE td.idealisatie IS NULL)   AS zonder_idealisatie,
+                       count(*) FILTER (WHERE td.divisie_soort IS NULL) AS zonder_soort,
+                       count(*) FILTER (WHERE coalesce(td.divisie_wid,'') = '') AS lege_divisie_wid,
+                       count(*) AS tekstdelen
+                FROM p2p.tekstdeel td
+                JOIN p2p.regeling r ON r.frbr_expression = td.regeling_expression
+                WHERE r.regelingmodel = 'RegelingVrijetekst' AND NOT r.inactief
+            """)
+            h = cur.fetchone()
+            cur.execute("SELECT count(*) AS n FROM p2p.divisie")
+            d = cur.fetchone()
+    finally:
+        conn.close()
+    console.print(
+        f"  tekstdelen: {h['tekstdelen']} | zonder idealisatie: {h['zonder_idealisatie']} "
+        f"| zonder soort: {h['zonder_soort']} | lege divisie_wid: {h['lege_divisie_wid']} "
+        f"| p2p.divisie: {d['n']}"
+    )
+
+
 @cli.command("setup-mer")
 def setup_mer_cmd():
     """Apply het mer-schema (MER milieueffectrapportage). Idempotent."""

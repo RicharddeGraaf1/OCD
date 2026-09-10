@@ -136,7 +136,7 @@ python scripts/preview_sync.py --i2a          # optioneel, ~342 calls
 |---|---|
 | `TE LADEN` ≈ 0 terwijl er weken verstreken zijn | verdacht — dít was G-98. Controleer met `--sinds` leeg (volledige lijst) |
 | `VERDRONGEN > 0` | stap 2 is verplicht, anders staan oude en nieuwe versies naast elkaar in de retrieval |
-| `VERDWENEN > 0` | noteren, niet automatisch opruimen (G-91) — voorbereidingsbesluiten vervallen van rechtswege, dat is geen intrekking |
+| `VERDWENEN > 0` | stap 2b draaien (sinds 2026-09-09). Die markeert alleen wat aantoonbaar vervallen is; van rechtswege vervallen voorbereidingsbesluiten vallen daar ook onder, want ze gelden niet meer |
 
 Leg de preview-uitkomst vast (kopieer hem in het sync-rapport of de vault-log).
 Zonder die vastlegging kun je achteraf niet zien of de sync geladen heeft wat
@@ -294,6 +294,54 @@ precies de works over die je net wilde bijwerken.
 
 Fysiek opruimen is een aparte, bewuste operatie:
 `prune_verouderde_versies.py` (dry-run default, `--apply` om te doen).
+
+### Stap 2b — Vervallen regelingen markeren
+
+*Toegevoegd 2026-09-09. Sluit G-91: de sync was tot dan puur additief en liet een
+regeling die het DSO niet meer toont gewoon als vigerend staan.*
+
+```bash
+python scripts/markeer_vervallen_regelingen.py                 # droogloop
+python scripts/markeer_vervallen_regelingen.py --uitvoeren     # markeren
+```
+
+Stap 2 haalt oude *versies* van een bestaande regeling weg; deze stap haalt
+regelingen weg die als geheel niet meer gelden. Werkwijze: de volledige
+`/regelingen`-lijst (~10 calls) tegen onze vigerende works, en voor elke
+kandidaat `/voorkomens` als bewijs. Dat endpoint blijft antwoorden voor
+regelingen die uit de lijst zijn verdwenen — juist daarom is het bruikbaar.
+
+Het oordeel kent vier uitkomsten en alleen de eerste wordt aangeraakt:
+
+| Oordeel | Betekenis | Actie |
+|---|---|---|
+| `vervallen` | geen voorkomen geldig vandaag, geen toekomstig voorkomen, laatste `eind_geldigheid` in het verleden | `inactief='ingetrokken'` |
+| `toekomstig` | er is een voorkomen dat later begint | niets |
+| `nog-geldig` | wél een geldig voorkomen terwijl het work uit de lijst ontbreekt | niets — **onderzoeken** |
+| `onbekend` | geen voorkomens gevonden | niets |
+
+**Waarom niet op de 404 van `/regelingen/{work}`**: die geeft óók 404 voor works
+die de API niet los teruggeeft (programma's, tijdelijkdelen) — dezelfde reden
+waarom `markeer_verouderde_expressies.py` een versie-parse-fallback heeft.
+
+**Twee kleppen.** Het script weigert te werken als de DSO-lijst minder dan 500
+works oplevert, en weigert te markeren boven 100 kandidaten (`--max`,
+`--forceer` om door te zetten). Een plotselinge piek betekent eerder een half
+opgehaalde lijst dan honderden intrekkingen. De `nog-geldig`-categorie is
+daarbij het echte vangnet: bij een onvolledige lijst komen de gemiste
+regelingen daar terecht en worden ze dus niet gemarkeerd.
+
+Eerste uitvoering (2026-09-09): 1.992 vigerende works lokaal tegen 1.982 in de
+lijst, 12 kandidaten, alle 12 vervallen — tien voorbeschermingsregels, het
+programma pv23 `2_25` en de Omgevingsvisie Limburg, met einddatums tussen
+2025-12-06 en 2026-08-25. Samen 597 tekstelementen, 120 juridische regels en 429
+embeddings uit de retrieval.
+
+Prod volgt bij stap 3: de replicatie trekt de inactief-vlaggen expliciet gelijk.
+
+**Fysiek opruimen is apart en onomkeerbaar**:
+`prune_verouderde_versies.py --reden ingetrokken` (droogloop-default). Let op dat
+die over *alle* ingetrokken expressies loopt, niet alleen die van vandaag.
 
 ### Stap 3 — p2p-gegevens naar prod
 
@@ -482,6 +530,50 @@ Tel aan beide kanten per tabel, gefilterd op dezelfde expressie-set. Gemeten
 
 Doe deze telling **na** de replicatie en niet ertussendoor: een tussenstand
 telt via `juridische_regel` en geeft dan misleidende cijfers.
+
+### Stap 3b — Vrijetekst-annotaties controleren *(sinds 2026-09-10)*
+
+Omgevingsvisies en programma's lopen buiten `juridische_regel` om en vielen
+daardoor buiten elke bestaande controle. Drie velden werden stilzwijgend niet
+geladen tot 2026-09-10; zie `docs/vrijetekst-gaten-plan.md`.
+
+```bash
+psql-achtig: SELECT * FROM core.v_vrijetekst_health;
+```
+
+Of via de loader:
+
+```bash
+cd dso-loader && python -c "import sys;sys.path.insert(0,'.');from src.db import get_conn;c=get_conn();cur=c.cursor();cur.execute('select * from core.v_vrijetekst_health');print(dict(cur.fetchone()))"
+```
+
+**Wat moet kloppen:**
+
+| kolom | verwacht | betekenis bij afwijking |
+|---|---|---|
+| `zonder_divisieref` | 0 | de loader leest `divisieRef` niet meer, of de bron levert een nieuw veld |
+| `zonder_idealisatie` | 0 | idealisatie wordt niet meer meegeschreven |
+| `zonder_soort` | 0 | idem voor `divisie_soort` |
+| `zonder_wid_brug` | 0 | `p2p.divisie` niet gevuld → annotatie is niet aan zijn tekst te koppelen |
+| `wid_brug_sluitend` | ≈ `divisie_rijen` | OW- en STOP-kant lopen uit de pas |
+
+Staan er getallen boven nul, dan herstel je dat met:
+
+```bash
+cd dso-loader && python -m src.cli herlaad-vrijetekst --alleen-onvolledig
+```
+
+Dat commando bestaat apart omdat `herlaad-annotaties-stale` via
+`p2p.juridische_regel` selecteert; vrijetekstdocumenten hebben daar geen rijen
+en werden door die route dus nooit geraakt.
+
+**Waarom dit een eigen stap is en geen voetnoot.** Een niet-geladen annotatie is
+in de database niet te onderscheiden van een annotatie die er nooit was. Het
+verschil wordt pas zichtbaar als iemand de data tegen de annotatierichtlijn
+houdt — en dan lijkt het een fout van het bevoegd gezag terwijl het de onze is.
+`op_divisieniveau` en `indicatief` zijn geen foutsignalen maar
+inhoudelijke tellingen: een sprong daarin zegt iets over de voorraad, niet over
+de loader.
 
 ### Stap 4 — vth naar prod
 
@@ -1635,6 +1727,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 | Wro/IMRO2006 (`load-wro-imro2006`) | los, ~24 min | landelijke PDOK-herparse, niet in de sync |
 | MER-register (stap 6d) | elke sync | harvest (~5 min incrementeel) + `load-mer` lokaal + `load_to_ocd.py` naar prod; site via `publish.py`. Stond hier als "los, seconden" — dat gold alleen voor `load-mer`, waardoor de harvest en de site vijf weken stilstonden |
 | `core.gemeentegrens` | 1×/jaar | gemeente-herindelingen |
+| Vervallen regelingen markeren (stap 2b) | elke sync | droogloop eerst; `markeer_vervallen_regelingen.py` |
 | Prune verouderde versies | op indicatie | dry-run eerst |
 | Wijzigingsspoor opruimen (stap 10) | maandelijks, of als `p2pwijziging` hard groeit | `ruim_wijzigingsspoor_op.py`; droogloop eerst, vangnet daarna opruimen |
 

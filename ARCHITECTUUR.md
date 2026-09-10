@@ -366,6 +366,31 @@ Zie `docs/toepasbare-regel-checker.md`.
 
 ---
 
+## Vrijetekst-annotaties: een eigen bewakingslaag
+
+Omgevingsvisies en programma's (`regelingmodel = 'RegelingVrijetekst'`) hangen
+niet aan `p2p.juridische_regel`. Elke controle en elk remediatie-commando dat
+via die tabel selecteert, raakt ze dus niet — dat gold tot 2026-09-10 voor de
+hele health-laag en voor `herlaad-annotaties-stale`.
+
+Wat er nu vastligt:
+
+| Voorziening | Waar | Waarvoor |
+|---|---|---|
+| `p2p.tekstdeel.idealisatie` | kolom | exact of indicatief, per tekstdeel |
+| `p2p.tekstdeel.divisie_soort` | kolom | annoteert dit tekstdeel een divisietekst of een divisie |
+| `p2p.divisie` | tabel | IMOW-identificatie ↔ STOP-`wId`; maakt `tekstdeel → divisie → tekst_element` sluitend |
+| `core.v_vrijetekst_health` | view | de vier signalen die na elke sync 0 horen te zijn |
+| `herlaad-vrijetekst` | CLI | gerichte herlading, ook `--alleen-onvolledig` |
+| Runbook stap 3b | `docs/synchronisatie-runbook.md` | verplichte controle in de p2p-fase |
+
+**Waarom dit is afgedwongen en niet opgeschreven.** Een annotatie die de loader
+laat vallen ziet er in de database precies zo uit als een annotatie die nooit
+bestond. Zonder een view die het verschil telt, wordt zo'n verlies pas zichtbaar
+als iemand de data tegen de annotatierichtlijn houdt — en dan leest het als een
+tekortkoming van het bevoegd gezag terwijl het van ons is. De achtergrond en het
+gatenregister staan in `docs/vrijetekst-gaten-plan.md`.
+
 ## Databaseconfiguratie
 
 Niet-standaard instellingen op `dso-postgis`. Ze staan in

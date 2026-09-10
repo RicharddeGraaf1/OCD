@@ -454,9 +454,7 @@ def load_regeltekstannotaties(conn, regeling_uri: str, bronhouder: str,
     data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen/{encoded}/regeltekstannotaties",
                 params={"locatieSelectie": "primair"})
 
-    stats = {"activiteiten": 0, "regels": 0, "ala": 0, "ga": 0,
-             "locaties": 0, "geometrieen": 0, "normen": 0, "normwaarden": 0,
-             "kaarten": 0, "kaartlagen": 0}
+    stats = dict(LEGE_REGELTEKST_STATS)
 
     # ── Build regeltekst ID → STOP wId mapping ──
     rt_to_wid = {}
@@ -753,7 +751,10 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str,
     stats = {"tekstdelen": 0, "locaties": 0, "geometrieen": 0, "ga": 0,
              "hoofdlijnen": 0, "kaarten": 0, "kaartlagen": 0,
              "td_hoofdlijn": 0, "td_gebiedsaanwijzing": 0,
-             "td_ref_zonder_doel": 0}
+             "td_ref_zonder_doel": 0,
+             # Sinds 2026-09-10: signalen die zichtbaar maken of de loader nog
+             # velden laat vallen. Zie docs/vrijetekst-gaten-plan.md.
+             "divisies": 0, "td_zonder_divisieref": 0, "td_indicatief": 0}
 
     with conn.cursor() as cur:
         # ── Locaties ──
@@ -821,6 +822,31 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str,
             if td.get("themas"):
                 themas = [t.get("waarde", t) if isinstance(t, dict) else t for t in td["themas"]]
 
+            # Een tekstdeel hangt aan een divisietekst OF aan een divisie. Tot
+            # 2026-09-10 werd alleen `divisietekstRef` gelezen, waardoor 2.934
+            # divisie-annotaties een lege `divisie_wid` kregen en niet meer te
+            # onderscheiden waren van een kapotte verwijzing. Annoteren op
+            # divisieniveau is toegestaan maar wordt afgeraden, dus juist die
+            # gevallen wil je kunnen tellen. Zie docs/vrijetekst-gaten-plan.md V-2.
+            divisie_ref = td.get("divisietekstRef")
+            divisie_soort = "divisietekst"
+            if not divisie_ref:
+                divisie_ref = td.get("divisieRef")
+                divisie_soort = "divisie" if divisie_ref else None
+            if not divisie_ref:
+                divisie_ref = ""
+                stats["td_zonder_divisieref"] += 1
+
+            # {"code": "...", "waarde": "indicatief"} -> "indicatief". De
+            # standaard laat het veld weg als de idealisatie exact is.
+            ideal = td.get("idealisatie")
+            if isinstance(ideal, dict):
+                idealisatie = (ideal.get("waarde") or "").lower() or None
+            elif isinstance(ideal, str):
+                idealisatie = ideal.split("/")[-1].lower() or None
+            else:
+                idealisatie = "exact"
+
             cur.execute(
                 # `regeling_expression` hoort hier net zo goed als in het
                 # ZIP-pad. Op 2026-09-05 is die kolom toegevoegd (vault G-141)
@@ -830,16 +856,55 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str,
                 # herlading de herkomst bijwerkt in plaats van hem te bevriezen
                 # op de expressie waarin het tekstdeel toevallig het eerst is
                 # gezien.
+                #
+                # `divisie_wid`, `divisie_soort` en `idealisatie` worden bij een
+                # herlading WEL overschreven: die kwamen er pas op 2026-09-10 bij
+                # en moeten hun waarde krijgen bij het herladen van bestaande
+                # voorraad. COALESCE op de nieuwe waarde, zodat een respons die
+                # het veld niet levert een eerder geladen waarde niet wist.
                 """INSERT INTO p2p.tekstdeel
-                     (identificatie, divisie_wid, thema, locatie_id, regeling_expression)
-                   VALUES (%s, %s, %s, %s, %s)
+                     (identificatie, divisie_wid, thema, locatie_id,
+                      regeling_expression, idealisatie, divisie_soort)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (identificatie) DO UPDATE SET
                      regeling_expression = COALESCE(EXCLUDED.regeling_expression,
-                                                    p2p.tekstdeel.regeling_expression)""",
-                (td["identificatie"], td.get("divisietekstRef", ""), themas, loc_id,
-                 expression_id),
+                                                    p2p.tekstdeel.regeling_expression),
+                     divisie_wid   = COALESCE(NULLIF(EXCLUDED.divisie_wid, ''),
+                                              p2p.tekstdeel.divisie_wid),
+                     divisie_soort = COALESCE(EXCLUDED.divisie_soort,
+                                              p2p.tekstdeel.divisie_soort),
+                     idealisatie   = COALESCE(EXCLUDED.idealisatie,
+                                              p2p.tekstdeel.idealisatie)""",
+                (td["identificatie"], divisie_ref, themas, loc_id,
+                 expression_id, idealisatie, divisie_soort),
             )
             stats["tekstdelen"] += 1
+            if idealisatie == "indicatief":
+                stats["td_indicatief"] += 1
+
+        # ── Divisies en divisieteksten: de brug naar de STOP-tekst ──
+        # Deze twee collecties stonden al in de respons maar werden weggegooid.
+        # Ze dragen per IMOW-object het `wId` van het tekstelement, en dat is de
+        # enige koppeling tussen een annotatie en de tekst waar hij bij hoort.
+        # Zonder deze tabel kun je alleen tellen hoevéél divisieteksten
+        # geannoteerd zijn, niet welke. Zie docs/vrijetekst-gaten-plan.md V-3.
+        for soort, sleutel in (("divisie", "divisies"), ("divisietekst", "divisieteksten")):
+            for div in data.get(sleutel, []):
+                wid = div.get("wId")
+                if not div.get("identificatie") or not wid:
+                    continue
+                cur.execute(
+                    """INSERT INTO p2p.divisie
+                         (identificatie, wid, soort, regeling_expression)
+                       VALUES (%s, %s, %s, %s)
+                       ON CONFLICT (identificatie) DO UPDATE SET
+                         wid = EXCLUDED.wid,
+                         soort = EXCLUDED.soort,
+                         regeling_expression = COALESCE(EXCLUDED.regeling_expression,
+                                                        p2p.divisie.regeling_expression)""",
+                    (div["identificatie"], wid, soort, expression_id),
+                )
+                stats["divisies"] += 1
 
         # ── Hoofdlijnen ──
         for hl in data.get("hoofdlijnen", []):
@@ -976,6 +1041,40 @@ def _upsert_locatie_met_kinderen(cur, loc: dict, default_type: str) -> None:
     )
 
 
+def _route_uit_links(data: dict) -> str | None:
+    """Lees uit de HAL-links van een regeling welke annotatieroute klopt.
+
+    `GET /regelingen/{id}` levert `_links.annotaties` en die wijst naar
+    `divisieannotaties` óf `regeltekstannotaties`. Dat is de enige autoritatieve,
+    structuurgestuurde bron: het documenttype voorspelt de structuur níet
+    (G-145 — alle 27 vigerende projectbesluiten zijn vrijetekst terwijl
+    `Projectbesluit` in ARTIKELSTRUCTUUR_TYPES staat).
+
+    Retourneert 'divisie', 'regeltekst', of None als de link ontbreekt.
+    """
+    href = ((data.get("_links") or {}).get("annotaties") or {}).get("href", "") or ""
+    if "divisieannotaties" in href:
+        return "divisie"
+    if "regeltekstannotaties" in href:
+        return "regeltekst"
+    return None
+
+
+def bepaal_annotatie_route(regeling_uri: str) -> str | None:
+    """De annotatieroute via een losse detail-call (voor herstelpaden).
+
+    In de gewone laadstroom komt de route gratis mee uit `load_regeling_expand`;
+    deze variant is voor code die die stap niet doet, zoals
+    `herlaad_annotaties`. Faalt de call, dan None — de aanroeper valt dan terug
+    op het documenttype.
+    """
+    try:
+        data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen/{_encode_regeling_uri(regeling_uri)}")
+        return _route_uit_links(data)
+    except Exception:
+        return None
+
+
 def load_regeling_expand(conn, regeling_uri: str, expression_id: str):
     """Load pons and regelingsgebied via GET /regelingen/{id}?_expand=true.
 
@@ -986,12 +1085,18 @@ def load_regeling_expand(conn, regeling_uri: str, expression_id: str):
     de POINT(0,0)-placeholder omdat noch `geometrieIdentificatie` noch
     `_embedded.omvat[]` populated zijn. Zie analyse [[Ponsenkaart.nl
     databehoefte uit OCD]] en gap G-73.
+
+    Levert naast `regelingsgebied` en `pons` ook `annotatie_route`: dezelfde
+    respons draagt de HAL-link die zegt wélke annotatieroute klopt, en die was
+    tot 2026-09-09 weggegooid. De annotatiestap hierna gebruikt hem, en het
+    kost dus geen extra call. Zie `_route_uit_links` en G-145.
     """
     encoded = _encode_regeling_uri(regeling_uri)
     data = _get(f"{cfg.PRESENTEREN_BASE}/regelingen/{encoded}",
                 params={"_expand": "true", "locatieSelectie": "primair"})
 
-    stats = {"regelingsgebied": False, "pons": False}
+    stats = {"regelingsgebied": False, "pons": False,
+             "annotatie_route": _route_uit_links(data)}
     embedded = data.get("_embedded", {})
 
     with conn.cursor() as cur:
@@ -1047,6 +1152,15 @@ VRIJETEKST_TYPES = {
     "Omgevingsvisie", "Programma", "Instructie", "Natura 2000-besluit",
 }
 
+# Nultelling van de artikelstructuur-route. Bestaat als constante zodat de
+# 400-terugval ("ondersteunt geen Regeltekst-objecten") dezelfde sleutels
+# oplevert als een echte run, en de teller-print eronder niet omvalt.
+LEGE_REGELTEKST_STATS = {
+    "activiteiten": 0, "regels": 0, "ala": 0, "ga": 0,
+    "locaties": 0, "geometrieen": 0, "normen": 0, "normwaarden": 0,
+    "kaarten": 0, "kaartlagen": 0,
+}
+
 REGELINGMODEL_MAP = {
     "Omgevingsplan": "RegelingCompact",
     "Omgevingsverordening": "RegelingCompact",
@@ -1059,7 +1173,12 @@ REGELINGMODEL_MAP = {
     "Voorbeschermingsregels": "RegelingTijdelijkdeel",
     "Voorbeschermingsregels Omgevingsplan": "RegelingTijdelijkdeel",
     "Voorbeschermingsregels Omgevingsverordening": "RegelingTijdelijkdeel",
-    "Projectbesluit": "RegelingCompact",
+    # Vrijetekst, niet compact: het TPOD beschrijft het projectbesluit als
+    # vrijetekst-regeling met de projectbeschrijving, met optioneel een apart
+    # regelingdeel in artikelstructuur — dat is in OCD het eigen documenttype
+    # "Omgevingsplanregels Projectbesluit". Empirisch bevestigd 2026-09-08:
+    # alle 27 vigerende projectbesluiten in het DSO zijn vrijetekst (G-148).
+    "Projectbesluit": "RegelingVrijetekst",
     "Reactieve interventie": "RegelingCompact",
     "Natura 2000-besluit": "RegelingVrijetekst",
 }
@@ -1089,10 +1208,27 @@ def herlaad_annotaties(expr_ids: list[str]) -> int:
             console.print(f"  [bold]Herannoteren:[/bold] {expr.split('/')[-1]} "
                           f"({doc_type}, {bh})")
             try:
-                if doc_type in VRIJETEKST_TYPES:
+                # Zelfde routekeuze als de laadstroom, maar met een eigen
+                # detail-call: dit pad doet geen expand-stap. Eén call per
+                # regeling extra, en dat is een remediatiepad. Vóór 2026-09-09
+                # koos deze functie op documenttype en liep hij dus op elk
+                # vrijetekst-projectbesluit stuk met een 400 — dezelfde bug als
+                # in de laadstroom (G-145).
+                route = bepaal_annotatie_route(work)
+                if route is None:
+                    route = "divisie" if doc_type in VRIJETEKST_TYPES else "regeltekst"
+                if route == "divisie":
                     load_divisieannotaties(conn, work, bh, expr)
                 else:
-                    load_regeltekstannotaties(conn, work, bh, expr)
+                    try:
+                        stats = load_regeltekstannotaties(conn, work, bh, expr)
+                        leeg = not stats["regels"] and not stats["activiteiten"]
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code != 400:
+                            raise
+                        leeg = True
+                    if leeg:
+                        load_divisieannotaties(conn, work, bh, expr)
                 conn.commit()
                 n += 1
             except Exception as e:
@@ -1191,6 +1327,10 @@ def load_via_api(overheid_code: str, naam: str,
                 console.print(f"    [red]Documentstructuur failed: {e}[/red]")
 
             # ── Pons + Regelingsgebied ──
+            # Vóór de try, want de annotatiestap leest hier de route uit: bij
+            # een mislukte expand-call moet dat een lege dict zijn, geen
+            # NameError.
+            expand_stats: dict = {}
             try:
                 expand_stats = load_regeling_expand(conn, regeling_uri, expression_id)
                 parts = []
@@ -1204,9 +1344,30 @@ def load_via_api(overheid_code: str, naam: str,
                 console.print(f"    [dim]Expand failed: {e}[/dim]")
 
             # ── Annotaties ──
+            # De route komt uit de HAL-link van de regeling zelf (opgehaald in
+            # de expand-stap hierboven, dus zonder extra call). Het
+            # documenttype is nog slechts de terugval voor het geval die call
+            # faalde: het voorspelt de structuur aantoonbaar niet. Zie G-145.
+            route = expand_stats.get("annotatie_route")
+            if route is None:
+                route = "regeltekst" if doc_type in ARTIKELSTRUCTUUR_TYPES else "divisie"
             try:
-                if doc_type in ARTIKELSTRUCTUUR_TYPES:
-                    stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code, expression_id)
+                if route == "regeltekst":
+                    try:
+                        stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code, expression_id)
+                        leeg = not stats["regels"] and not stats["activiteiten"]
+                    except httpx.HTTPStatusError as e:
+                        # "Deze regeling ondersteunt geen Regeltekst-objecten."
+                        # De API zegt dit met een 400, niet met een leeg
+                        # antwoord — en 4xx wordt niet geretried, dus zonder
+                        # deze vangst raist de call en werd de terugval
+                        # hieronder nooit bereikt. Precies de reden dat de
+                        # G-145-fix van 2026-09-05 dode code was.
+                        if e.response.status_code != 400:
+                            raise
+                        console.print("    [dim]geen Regeltekst-objecten (400) — "
+                                      "vrijetekst-terugval[/dim]")
+                        stats, leeg = dict(LEGE_REGELTEKST_STATS), True
                     console.print(
                         f"    Annotaties: {stats['regels']} regels, "
                         f"{stats['activiteiten']} activiteiten, {stats['ala']} ALA's, "
@@ -1230,23 +1391,20 @@ def load_via_api(overheid_code: str, naam: str,
                     # van de typelijst: dan hoeft niemand vooraf te weten welke
                     # documenten hybride zijn, en vangt hij ook de soorten die we
                     # nog niet zijn tegengekomen.
-                    if not stats["regels"] and not stats["activiteiten"]:
+                    if leeg:
                         extra = load_divisieannotaties(conn, regeling_uri, bronhouder_code, expression_id)
                         if extra["tekstdelen"]:
                             console.print(
                                 f"    [yellow]0 regels — vrijetekst-terugval gaf "
                                 f"{extra['tekstdelen']} tekstdelen, {extra['ga']} GA's, "
                                 f"{extra['locaties']} locaties[/yellow]")
-                elif doc_type in VRIJETEKST_TYPES:
+                else:
                     stats = load_divisieannotaties(conn, regeling_uri, bronhouder_code, expression_id)
                     console.print(
                         f"    Annotaties: {stats['tekstdelen']} tekstdelen, "
                         f"{stats['ga']} GA's, {stats['kaarten']} kaarten, "
                         f"{stats['locaties']} locaties "
                         f"({stats['geometrieen']} met geometrie)")
-                else:
-                    console.print(f"    [yellow]Unknown type {doc_type}, trying artikelstructuur[/yellow]")
-                    stats = load_regeltekstannotaties(conn, regeling_uri, bronhouder_code, expression_id)
             except Exception as e:
                 # Niet alleen printen. Deze `except` dekt de hele annotatielaag
                 # van een regeling — juridische regels, activiteiten, normen,
