@@ -754,7 +754,8 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str,
              "td_ref_zonder_doel": 0,
              # Sinds 2026-09-10: signalen die zichtbaar maken of de loader nog
              # velden laat vallen. Zie docs/vrijetekst-gaten-plan.md.
-             "divisies": 0, "td_zonder_divisieref": 0, "td_indicatief": 0}
+             "divisies": 0, "td_zonder_divisieref": 0, "td_indicatief": 0,
+             "td_opgeruimd": 0}
 
     with conn.cursor() as cur:
         # ── Locaties ──
@@ -881,6 +882,25 @@ def load_divisieannotaties(conn, regeling_uri: str, bronhouder: str,
             stats["tekstdelen"] += 1
             if idealisatie == "indicatief":
                 stats["td_indicatief"] += 1
+
+        # ── Verweesde tekstdelen opruimen ──
+        # De loader deed tot 2026-09-10 alleen upserts en verwijderde nooit. Een
+        # tekstdeel dat de bronhouder intrekt bleef daardoor voor altijd staan:
+        # Zuid-Holland had er elf, die als "annotatie zonder idealisatie" bleven
+        # tellen omdat een herlading ze nooit meer aanraakt.
+        #
+        # Alleen opruimen als de respons daadwerkelijk tekstdelen bevatte. Een
+        # lege respons kan ook een storing zijn, en dan zou dit de hele
+        # annotatie-voorraad van een regeling wissen.
+        gezien = [td["identificatie"] for td in data.get("tekstdelen", [])]
+        if gezien and expression_id:
+            cur.execute(
+                """DELETE FROM p2p.tekstdeel
+                    WHERE regeling_expression = %s
+                      AND identificatie <> ALL(%s)""",
+                (expression_id, gezien),
+            )
+            stats["td_opgeruimd"] = cur.rowcount
 
         # ── Divisies en divisieteksten: de brug naar de STOP-tekst ──
         # Deze twee collecties stonden al in de respons maar werden weggegooid.

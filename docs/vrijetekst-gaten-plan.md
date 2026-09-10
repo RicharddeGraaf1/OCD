@@ -33,6 +33,7 @@ terwijl het een fout van ons is.
 | **V-8** | geen gerichte herlaadroute voor vrijetekst | `herlaad-annotaties-stale` loopt via `juridische_regel` | te herstellen |
 | **V-9** | `gebiedsaanwijzing.symboolcodes` wordt niet opgeslagen | loaderverlies | gemarkeerd, lage prioriteit |
 | **V-10** | `kaart.nummer` en `kaart.uitsnede` worden niet opgeslagen | loaderverlies | gemarkeerd, lage prioriteit |
+| **V-11** | ingetrokken tekstdelen blijven staan | de loader upsert alleen en verwijdert nooit | hersteld |
 
 ---
 
@@ -139,6 +140,27 @@ symbolisatie.
 
 Alle andere velden in de respons (`locaties`, `hoofdlijnen`, `tekstdelen`)
 worden na dit herstel volledig geladen.
+
+### V-11 — ingetrokken tekstdelen blijven eeuwig staan
+
+Gevonden tijdens de verificatie van het herstel zelf: na het herladen van alle
+565 regelingen hielden elf tekstdelen een lege `idealisatie`, terwijl de rest
+netjes gevuld was. Alle elf hoorden bij Zuid-Holland.
+
+De verklaring: die tekstdelen bestaan niet meer. De omgevingsvisie levert er nu
+61 waar wij er 64 hadden, het omgevingsprogramma 134 tegen onze 142. Zuid-Holland
+heeft ze ingetrokken, maar de loader deed uitsluitend upserts — een rij die de
+bron niet meer noemt wordt nooit meer aangeraakt en verdwijnt dus nooit.
+
+Dat is verraderlijker dan het lijkt. Zulke rijen tellen mee in elke dekkingsgraad
+en in elke health-controle, en ze zijn niet te onderscheiden van rijen die de
+loader per ongeluk oversloeg. Precies daarom vielen ze hier op: het nieuwe
+`idealisatie`-veld bleef bij hen leeg omdat een herlading ze niet meer bereikt.
+
+Herstel: `load_divisieannotaties` verwijdert na afloop de tekstdelen van deze
+expressie die niet in de respons voorkwamen. Alleen wanneer de respons
+daadwerkelijk tekstdelen bevatte — een lege respons kan ook een storing zijn, en
+dan zou de opruiming de hele annotatievoorraad van een regeling wissen.
 
 ### V-6 — `locatie.bron` is overal NULL
 

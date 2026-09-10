@@ -557,6 +557,13 @@ cd dso-loader && python -c "import sys;sys.path.insert(0,'.');from src.db import
 | `zonder_wid_brug` | 0 | `p2p.divisie` niet gevuld → annotatie is niet aan zijn tekst te koppelen |
 | `wid_brug_sluitend` | ≈ `divisie_rijen` | OW- en STOP-kant lopen uit de pas |
 
+Twee kolommen zijn **tellingen, geen foutsignalen**:
+
+| kolom | betekenis |
+|---|---|
+| `zonder_annotaties` | documenten met nul annotaties. Die kunnen per definitie geen wId-brug hebben; het is een inhoudelijk feit over de voorraad, niet een loaderfout. Stond op 35 bij de meting van 2026-09-10. |
+| `op_divisieniveau` en `indicatief` | inhoudelijke tellingen over de voorraad. Een sprong zegt iets over wat bronhouders publiceren, niet over de loader. |
+
 Staan er getallen boven nul, dan herstel je dat met:
 
 ```bash

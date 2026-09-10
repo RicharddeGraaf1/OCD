@@ -42,9 +42,17 @@ SELECT
     td.op_divisieniveau,
     td.indicatief,
     (SELECT count(*) FROM p2p.divisie)                                   AS divisie_rijen,
+    -- Alleen regelingen die annotaties hébben kunnen een brug missen. Een
+    -- document zonder enig tekstdeel levert ook geen divisies op; dat is geen
+    -- loaderfout maar een leeg document, en die worden apart geteld.
     (SELECT count(*) FROM actief a
-      WHERE NOT EXISTS (SELECT 1 FROM p2p.divisie d
+      WHERE EXISTS (SELECT 1 FROM p2p.tekstdeel td
+                     WHERE td.regeling_expression = a.frbr_expression)
+        AND NOT EXISTS (SELECT 1 FROM p2p.divisie d
                          WHERE d.regeling_expression = a.frbr_expression)) AS zonder_wid_brug,
+    (SELECT count(*) FROM actief a
+      WHERE NOT EXISTS (SELECT 1 FROM p2p.tekstdeel td
+                         WHERE td.regeling_expression = a.frbr_expression)) AS zonder_annotaties,
     -- Hoeveel van de wId-brug landt daadwerkelijk op een tekstelement? Een
     -- lager getal dan `divisie_rijen` betekent dat de OW- en STOP-kant uit de
     -- pas lopen (bijvoorbeeld na een expressiewissel).
