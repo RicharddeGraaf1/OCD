@@ -60,6 +60,43 @@ CACHE_HEADER = "public, max-age=3600, s-maxage=86400"
 # dezelfde activiteit. Deze cues zijn afgeleid uit twee doorgerekende
 # voorbeelden (gm0345 boom kappen, gm0344 dakkapel) waarin de artikelen zich wél
 # langs die lijn ordenden. Het veld heet daarom `heuristiek_onderdeel` en draagt
+# Verwijzing naar een wetsartikel zoals de bronhouder die in een DMN-knoopnaam
+# schrijft: "Op 5 Artikel 22.264 Lid 2", "BBL Artikel 2.15f".
+#
+# Verankerd op de regelingcode, en dat is niet cosmetisch. Een knoopnaam bevat
+# vaak ook kruisverwijzingen binnen de geciteerde wettekst zelf -- "die is
+# aangewezen in artikel 3.208 Op Artikel 22.240 Lid 2". Wie de eerste 'artikel
+# N' pakt, pakt de verkeerde. De vindplaats staat achter de code.
+#
+# Gemeten 2026-09-10 over 3.028 verwijzingen: Op 2.942, BBL 48, Ow 36, BAL 2.
+# Alleen Op wordt hier opgelost; de landelijke regelingen delen in
+# p2p.regeling een dubbelzinnige citeertitel ("Besluit van 3 juli 2018,
+# houdende regels...") en vragen eerst een betrouwbare identificatie.
+_ARTIKELVERWIJZING = re.compile(
+    r"\b(Op|Ow|BBL|BAL|Wv)(?:\s+\d+)?\s+(?:Artikel|Art\.?)\s*"
+    r"(\d+[a-z]?(?:\.\d+[a-z]?)*)",
+    re.IGNORECASE)
+
+
+def _sorteersleutel(nummer: str) -> tuple:
+    """22.9 hoort voor 22.10, dus numeriek per segment en niet alfabetisch."""
+    deel = []
+    for stuk in (nummer or "").split("."):
+        cijfers = re.match(r"\d+", stuk)
+        deel.append((int(cijfers.group()) if cijfers else 0, stuk))
+    return tuple(deel)
+
+
+def _genoemde_nummers(namen) -> dict[str, set[str]]:
+    """Artikelnummers die de vragenboom zelf noemt, per regelbestand."""
+    uit: dict[str, set[str]] = {}
+    for r in namen:
+        for code, nummer in _ARTIKELVERWIJZING.findall(r["naam"] or ""):
+            if code.upper() == "OP":
+                uit.setdefault(r["regelbestand_ns"], set()).add(nummer)
+    return uit
+
+
 # het bewijs mee, zodat de UI het als hint kan tonen en niet als feit.
 _CUES: list[tuple[str, re.Pattern[str]]] = [
     ("indieningsvereisten",
@@ -350,12 +387,66 @@ def pagina(urn: str, overheid: str, response: Response,
                         genoemd is not None and genoemd != gevonden),
                 }
 
+            # ── artikelen die de vragenboom ZELF noemt ────────────────
+            # De relatie loopt activiteit -> artikel, en de annotatie hangt
+            # algemene bepalingen (maatwerkvoorschriften, meet- en
+            # rekenbepalingen, toepassingsbereik) op een BREDE activiteit --
+            # MilieubelastendeAct, GeluidProdAct, BouwwerkBouwen. Een
+            # specifieke vragenboom gebruikt ze wel, maar de relatie kan er
+            # niet bij: de twee lagen kiezen een ander anker.
+            #
+            # Gemeten 2026-09-10 over 398 verwijzingen: 52,0 van elke honderd
+            # verwijzingen uit een knoopnaam is geannoteerd op een ANDERE
+            # activiteit, 42,5 levert de relatie al, en slechts 0,5 draagt
+            # helemaal geen annotatie. Het is dus geen gat in de annotatie
+            # maar een ankerverschil. Over 400 activiteiten wint 36,8 van
+            # elke honderd hier mediaan 3 artikelen die anders onzichtbaar
+            # blijven.
+            #
+            # Dit is GEEN heuristiek: de bronhouder heeft de verwijzing zelf
+            # in de knoopnaam gezet. Daarom staat er ook bij welke boom hem
+            # noemt, in plaats van een vermoeden over het onderdeel.
+            genoemd = []
+            if rbos:
+                cur.execute(
+                    """SELECT regelbestand_ns, naam
+                         FROM i2a.dmn_element
+                        WHERE regelbestand_ns = ANY(%s)
+                          AND element_type = 'Decision'""",
+                    ([r["fsr"] for r in rbos],))
+                per_ns = _genoemde_nummers(cur.fetchall())
+                alle = set().union(*per_ns.values()) if per_ns else set()
+                al_getoond = {t["artikel"] for t in teksten if t["artikel"]}
+                zoek = sorted(alle - al_getoond)
+                if zoek:
+                    typering_van = {r["fsr"]: r["typering"] for r in rbos}
+                    cur.execute("""
+                        SELECT te.nummer, te.opschrift, te.wid, te.eid,
+                               te.inhoud_plain AS tekst, reg.citeertitel AS regeling,
+                               reg.frbr_expression AS expression
+                          FROM p2p.tekst_element te
+                          JOIN p2p.regeling reg
+                            ON reg.frbr_expression = te.regeling_expression
+                         WHERE NOT reg.inactief
+                           AND reg.citeertitel ILIKE %s
+                           AND reg.frbr_expression LIKE %s
+                           AND te.element_type = 'Artikel'
+                           AND te.nummer = ANY(%s)""",
+                                ("%omgevingsplan%", f"%{overheid}%", zoek))
+                    for t in cur.fetchall():
+                        bomen = sorted({typering_van.get(ns, "Overig")
+                                        for ns, nrs in per_ns.items()
+                                        if t["nummer"] in nrs})
+                        genoemd.append({**t, "genoemd_door": bomen})
+                    genoemd.sort(key=lambda x: _sorteersleutel(x["nummer"]))
+
             uit.append({
                 "activiteit_urn": aid,
                 "activiteit_naam": act["naam"],
                 "in_p2p": act["gezien_in_p2p"],
                 "regelbeheerobjecten": rbos,
                 "regelteksten": teksten,
+                "genoemde_artikelen": genoemd,
                 "registratie": registratie,
             })
 
