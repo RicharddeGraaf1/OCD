@@ -219,3 +219,49 @@ de health-controle in de verificatiestap.
 | `p2p.tekstdeel` met lege `divisie_wid` | 0; de 2.934 krijgen `divisie_soort = 'divisie'` |
 | `p2p.divisie` | ± 7.800 rijen (divisies + divisieteksten van 565 regelingen) |
 | keten `tekstdeel → divisie → tekst_element` | sluitend voor de geladen regelingen |
+
+
+---
+
+## Uitvoering — 2026-09-10, 22:00–22:55
+
+Herstel uitgevoerd en geverifieerd. Alle 565 actieve vrijetekstregelingen zijn
+opnieuw geannoteerd via `herlaad-vrijetekst`, gevolgd door een tweede ronde met
+`--alleen-onvolledig` voor de achterblijvers.
+
+### Eindstand van de signalen
+
+| | vóór | na |
+|---|---|---|
+| annotaties zonder divisieverwijzing | 2.934 | **0** |
+| tekstdelen zonder idealisatie | 28.819 | **0** |
+| tekstdelen zonder divisiesoort | 28.819 | **0** |
+| regelingen zonder wId-brug | 564 | **0** |
+| rijen in `p2p.divisie` | 1 | **28.825** |
+| keten annotatie → divisie → tekstelement | niet mogelijk | **28.852 van 28.852 (100%)** |
+
+### Wat er zichtbaar werd
+
+- **2.934 annotaties op divisieniveau.** Exact het aantal dat eerder als lege
+  verwijzing in de data stond — een sluitende bevestiging van de diagnose.
+- **2.253 tekstdelen met een indicatieve begrenzing**, in 56 documenten.
+  Die informatie bestond tot vandaag nergens in onze database.
+- **35 documenten met nul annotaties.** Die kunnen per definitie geen wId-brug
+  hebben; ze worden nu apart geteld als `zonder_annotaties` in plaats van als
+  fout.
+
+### Twee bijstellingen tijdens de uitvoering
+
+1. **V-11 kwam pas boven door het herstel zelf.** Elf tekstdelen hielden een
+   lege idealisatie omdat ze niet meer in de bron voorkomen. Zonder het nieuwe
+   veld was dat nooit opgevallen — een ingetrokken rij is in de database niet te
+   onderscheiden van een rij die de loader oversloeg.
+2. **De verwachting dat `zonder_wid_brug` nul moet zijn was te grof.** Voor een
+   document zonder annotaties klopt die niet. De view en het runbook maken nu
+   onderscheid tussen foutsignalen en inhoudelijke tellingen.
+
+### Doorwerking naar annotatieconformiteit.nl
+
+Van de 29 richtlijnen zijn er nog vier onmeetbaar (R15, R21, R28, R29), tegen
+twaalf ervoor. R8 ging van 502 documenten ongetoetst naar nul. R4 en R10 meten
+sinds de brug per divisietekst in plaats van via twee tellingen naast elkaar.
