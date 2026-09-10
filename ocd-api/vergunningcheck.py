@@ -257,9 +257,24 @@ def pagina(urn: str, overheid: str, response: Response,
                        AND NOT reg.inactief
                      WHERE ala.activiteit_id = %s)
                 SELECT reg.citeertitel AS regeling, reg.frbr_expression AS expression,
-                       COALESCE(par.nummer, te.nummer) AS artikel,
-                       COALESCE(par.opschrift, te.opschrift) AS opschrift,
-                       te.element_type AS niveau, te.nummer AS lid,
+                       -- NIET COALESCE(par.nummer, te.nummer): de ouder heeft
+                       -- OOK een nummer als het geannoteerde element zelf een
+                       -- Artikel is, en dat is dan een Paragraaf-, Afdeling- of
+                       -- Hoofdstuknummer. Gemeten 2026-09-10: ruim een kwart
+                       -- van de annotaties (105.776 van 395.855) zit op
+                       -- Artikel-niveau, en die kregen daardoor het verkeerde
+                       -- nummer -- 101.632 getoonde regelteksten. Concreet werd
+                       -- 'artikel 1.10' getoond als 'artikel 1.4.2'.
+                       -- (Geen procentteken in dit commentaar: psycopg leest
+                       --  dat als placeholder en laat de query vallen.)
+                       -- Alleen bij een Lid is de ouder het artikel.
+                       CASE WHEN te.element_type = 'Lid'
+                            THEN par.nummer ELSE te.nummer END AS artikel,
+                       CASE WHEN te.element_type = 'Lid'
+                            THEN par.opschrift ELSE te.opschrift END AS opschrift,
+                       te.element_type AS niveau,
+                       CASE WHEN te.element_type = 'Lid'
+                            THEN te.nummer END AS lid,
                        te.wid, te.eid, te.inhoud_plain AS tekst,
                        tek.kwalificatie, h.begrijpelijk
                   FROM tek
