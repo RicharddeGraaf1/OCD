@@ -31,6 +31,8 @@ terwijl het een fout van ons is.
 | **V-6** | `locatie.bron` is overal NULL | herkomst niet vastgelegd | lage prioriteit |
 | **V-7** | health-laag kent geen vrijetekstsignaal | `mv_bronhouder_health` meet alleen artikelstructuur | te herstellen |
 | **V-8** | geen gerichte herlaadroute voor vrijetekst | `herlaad-annotaties-stale` loopt via `juridische_regel` | te herstellen |
+| **V-9** | `gebiedsaanwijzing.symboolcodes` wordt niet opgeslagen | loaderverlies | gemarkeerd, lage prioriteit |
+| **V-10** | `kaart.nummer` en `kaart.uitsnede` worden niet opgeslagen | loaderverlies | gemarkeerd, lage prioriteit |
 
 ---
 
@@ -118,6 +120,25 @@ De tabel is aangemaakt maar wordt door geen enkele loader gevuld; er is ook geen
 kolom voor de wijzigingsmethode (renvooi / integrale tekstvervanging / intrekken
 & vervangen). Buiten de scope van dit plan, wel gemarkeerd: het blokkeert elke
 toets op hoe een document gewijzigd is.
+
+### V-9 en V-10 — kleinere velden die dezelfde respons wél levert
+
+Na het herstel van V-1 tot V-3 is de rest van de `divisieannotaties`-respons
+nagelopen. Twee velden worden nog steeds niet bewaard:
+
+| Bron | Veld | Opslag nu |
+|---|---|---|
+| `gebiedsaanwijzingen[]` | `symboolcodes` | `p2p.gebiedsaanwijzing` kent alleen identificatie, type, naam, groep, locatie |
+| `kaarten[]` | `nummer`, `uitsnede` | `p2p.kaart` kent alleen identificatie en naam |
+
+Geen van beide blokkeert op dit moment een richtlijn, vandaar de lage
+prioriteit. `symboolcodes` is wel het overwegen waard: het zegt iets over hoe
+een gebiedsaanwijzing in de viewer wordt verbeeld, en dat raakt aan richtlijn 21
+over symbolen — al gaat die richtlijn over de geometrie en niet over de
+symbolisatie.
+
+Alle andere velden in de respons (`locaties`, `hoofdlijnen`, `tekstdelen`)
+worden na dit herstel volledig geladen.
 
 ### V-6 — `locatie.bron` is overal NULL
 
