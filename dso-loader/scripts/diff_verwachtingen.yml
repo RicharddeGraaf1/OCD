@@ -14,6 +14,15 @@
 
 verwacht:
 
+  i2a.sttr_bestand_mislukt:
+    min: 0
+    max: 0
+    reden: >-
+      Bestaat alleen lokaal en is leeg. Hoort bij i2a.sttr_bestand, dat op prod
+      BEWUST leeg is (0,37 GB ruwe XML die prod niet serveert); een tabel die
+      bijhoudt welke van die bestanden niet te parsen waren heeft daar net zo min
+      een functie. Toegevoegd 2026-09-13.
+
   p2p.locatie:
     min: 0
     max: 0

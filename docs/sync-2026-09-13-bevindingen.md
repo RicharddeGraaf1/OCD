@@ -301,7 +301,14 @@ afgemaakt (de vectorstap draaide al toen de keuze viel).
 | `ocd-api/llm.py` | `qwen2.5:14b` via Ollama — **de default** | generatie |
 | `dso-loader` embed-pad (`v2a_refresh`, `run_overnight*`, `build_categorie`, …) | `nomic-embed-text` via Ollama, 12 vindplaatsen | **embeddings** |
 | `instructieregels.nl/match/` screening (`tier1_screen`, `doel_screen`, …) | Ollama | embeddings/screening |
-| diverse losse scripts (`begrijpelijk-*`, `classify_wijziging`, `2026-07-repair-lege-elementen`) | Ollama | generatie |
+| `begrijpelijk-hertaling.py` | Ollama (`qwen2.5:14b`), was de **default** | generatie |
+| `classify_wijziging`, `build_categorie`, `2026-07-repair-lege-elementen` | `nomic-embed-text` | **embeddings** — geen taalmodel |
+
+> **Correctie op de eerste versie van deze tabel.** Ik had die laatste drie als
+> generatie-scripts opgeschreven op grond van "komen voor in een grep op
+> `ollama`". Nagekeken: ze roepen uitsluitend `nomic-embed-text` aan. Onder
+> variant 1 hoeven ze dus niet te veranderen. Een grep op de provider zegt niets
+> over wát er wordt aangeroepen.
 
 ### Wat eenvoudig is
 
@@ -360,9 +367,32 @@ geen configuratiewijziging.
 3. **Retrieval zonder vectoren.** Niet realistisch: de vectorlaag dekt juist de
    norm-as waar de SKOS-trefwoorden blind zijn.
 
-**Aanbeveling**: variant 1 nu vastleggen als de regel, met variant 2 als apart
-traject dat een eigen meting en een eigen beslismoment verdient. Anders staat er
-een regel in de code die niemand kan naleven.
+**Gekozen op 2026-09-13: variant 1.** De regel is "geen lokaal *taalmodel*";
+embeddings blijven lokaal. Variant 2 blijft een apart traject met een eigen
+meting en beslismoment (vault G-151).
+
+**Uitgevoerd:**
+
+- `ocd-api/llm.py`: default van `ollama` naar `anthropic`, model van het
+  verouderde `claude-sonnet-4-6` naar `claude-sonnet-5`. Geen qwen-vangnet meer
+  bij een onbekende providernaam — die logt nu een fout mét de geldige waarden.
+  Expliciet `ollama` kiezen kan nog, maar waarschuwt luid, zodat "bewust lokaal"
+  en "iemand vergat de omgeving te zetten" in het log uit elkaar te houden zijn.
+- **Productie raakt dit niet**: `PRODUCTION-CHECKLIST.md` zet
+  `OCD_LLM_PROVIDER=groq` expliciet, en een omgevingsvariabele wint van de
+  default. Gecontroleerd vóór het pushen, want een gewijzigde default die
+  productie op 503 zet zou een dure manier zijn om een afspraak vast te leggen.
+- `begrijpelijk-hertaling.py`: default van `ollama` naar `anthropic`. Reden staat
+  in de helptekst — op 13-08 is de hele set lokaal gedraaid (2.605 teksten, 72
+  minuten) en bleek achteraf dat de API er niets van toonde, omdat de
+  voorkeursvolgorde met `claude-sonnet-5` begint. Gratis en onzichtbaar is een
+  slechte default.
+
+**Wat openstaat**: productie draait runtime op Groq. Dat is geen lokaal model en
+voldoet dus aan de regel, maar het is ook geen Sonnet. Overstappen kost
+API-tegoed en is daarmee een aparte afweging — de subagent-route werkt alleen
+voor batchwerk vanuit een sessie, niet voor een endpoint dat een bezoeker
+bedient.
 
 ### Wat er concreet moet gebeuren
 

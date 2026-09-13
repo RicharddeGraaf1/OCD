@@ -34,7 +34,15 @@ import httpx
 
 logger = logging.getLogger("ocd_api.llm")
 
-_PROVIDER = os.getenv("OCD_LLM_PROVIDER", "ollama").lower()
+# Default sinds 2026-09-13 `anthropic` en niet meer `ollama`. Gebruikerskeuze:
+# geen lokaal TAALmodel meer. Embeddings blijven wel lokaal -- Anthropic levert
+# er geen API voor en het bevraagmodel moet exact het indexmodel zijn, dus dat
+# is een migratie en geen instelling (vault gaps.md G-151).
+#
+# Waarom de default en niet alleen de omgeving: een default die naar een lokale
+# poort wijst, valt op productie stil terug op iets wat daar niet draait. Wie
+# Ollama wil, zet hem nu bewust aan.
+_PROVIDER = os.getenv("OCD_LLM_PROVIDER", "anthropic").lower()
 # Eén env-var voor de basis-URL, maar de fallback verschilt per provider: de
 # Ollama-ketting (OCD_EXPAND_URL → localhost) is zinloos voor Groq en zou daar
 # stilletjes naar een lokale poort wijzen.
@@ -48,10 +56,14 @@ _TIMEOUT = float(os.getenv("OCD_LLM_TIMEOUT", "60"))
 
 _DEFAULT_MODELS = {
     "ollama": "qwen2.5:14b",
-    "anthropic": "claude-sonnet-4-6",
+    # claude-sonnet-4-6 stond hier tot 2026-09-13 en is een verouderde id.
+    "anthropic": "claude-sonnet-5",
     "groq": "llama-3.3-70b-versatile",
 }
-_MODEL = os.getenv("OCD_LLM_MODEL") or _DEFAULT_MODELS.get(_PROVIDER, "qwen2.5:14b")
+# Geen terugval op qwen als het providerwoord onbekend is: dan zou een typefout
+# in OCD_LLM_PROVIDER stilzwijgend een lokaal model kiezen, en precies dat is
+# wat deze wijziging moet uitsluiten.
+_MODEL = os.getenv("OCD_LLM_MODEL") or _DEFAULT_MODELS.get(_PROVIDER, "")
 
 
 SYSTEM_PROMPT = (
@@ -111,6 +123,29 @@ class LLMService:
         self.provider = _PROVIDER
         self.model = _MODEL
         self.available = self.provider in ("ollama", "anthropic", "groq")
+
+        if self.provider not in ("ollama", "anthropic", "groq", "none"):
+            # Geen terugval, ook niet stil. Een typefout in OCD_LLM_PROVIDER
+            # betekende hiervoor: available=False en een 503 zonder aanwijzing
+            # welke waarde er dan wel wordt verwacht.
+            logger.error("OCD_LLM_PROVIDER=%r is geen geldige waarde "
+                         "(ollama | anthropic | groq | none).", self.provider)
+
+        if self.provider == "ollama":
+            # Gebruikerskeuze 2026-09-13: geen lokaal taalmodel meer. Ollama kan
+            # nog wel -- voor een experiment op de werkbank -- maar niet
+            # ongemerkt. Zonder deze regel is het verschil tussen "bewust lokaal"
+            # en "iemand vergat de omgeving te zetten" niet te zien in het log.
+            logger.warning(
+                "OCD_LLM_PROVIDER=ollama: dit draait een LOKAAL taalmodel (%s). "
+                "De afspraak is Sonnet; zet OCD_LLM_PROVIDER=anthropic tenzij dit "
+                "een bewuste lokale test is. Embeddings zijn hiervan uitgezonderd.",
+                self.model)
+
+        if not self.model and self.available:
+            logger.error("geen model bekend voor provider=%s; zet OCD_LLM_MODEL.",
+                         self.provider)
+            self.available = False
 
         if self.provider == "groq" and not _API_KEY:
             logger.warning("OCD_LLM_PROVIDER=groq maar OCD_LLM_API_KEY is leeg.")

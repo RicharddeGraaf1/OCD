@@ -190,7 +190,13 @@ def main() -> None:
     ap.add_argument("--sinds", default=None,
                     help="alleen bij --scope sync: ISO-tijdstip; default = start van "
                          "de laatste geslaagde sync-run")
-    ap.add_argument("--provider", choices=["ollama", "anthropic"], default="ollama")
+    ap.add_argument("--provider", choices=["ollama", "anthropic"], default="anthropic",
+        help="Default sinds 2026-09-13 anthropic. Op 13-08 is de hele set "
+             "eerst lokaal gedraaid (2.605 teksten, 72 min) en bleek achteraf "
+             "dat de API er niets van toonde: ocd-api leest de hertalingen met "
+             "een voorkeursvolgorde die met claude-sonnet-5 begint. Een lokale "
+             "hertaling is dus gratis en meestal onzichtbaar -- een slechte "
+             "default. Kies ollama alleen bewust.")
     ap.add_argument("--model", default=None)
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
