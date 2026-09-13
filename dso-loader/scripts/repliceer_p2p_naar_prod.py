@@ -304,6 +304,16 @@ PLAN = [
     ("p2p.tekstdeel",
      "SELECT t.* FROM p2p.tekstdeel t JOIN scope_td s ON s.identificatie = t.identificatie"),
 
+    # De IMOW-divisie(tekst) met zijn STOP-wId — de brug die p2p.tekstdeel aan
+    # p2p.tekst_element koppelt. Stond hier niet toen de tabel op 2026-09-10
+    # werd toegevoegd, waardoor prod hem op 2026-09-13 nog op 0 had staan tegen
+    # 29.167 lokaal: nieuwe regelingen kregen hun divisierijen dus evenmin.
+    # Geen FK naar p2p.regeling (net als de andere IMOW-objecten), dus de scope
+    # loopt via de expressie zelf.
+    ("p2p.divisie",
+     "SELECT t.* FROM p2p.divisie t "
+     "WHERE t.regeling_expression IN (SELECT frbr_expression FROM scope_expr)"),
+
     # junctions en bladeren
     ("p2p.besluit_regeling",
      "SELECT t.* FROM p2p.besluit_regeling t "

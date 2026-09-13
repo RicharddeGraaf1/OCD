@@ -25,6 +25,42 @@ from src.config import cfg
 # deze lijst en zet hem in het sync-rapport; zonder dat blijft zo'n mislukking
 # een gekleurde regel in de uitvoer die niemand terugziet.
 ANNOTATIE_FOUTEN: list[tuple[str, str]] = []
+
+# Na hoeveel bronhouders op rij met een dode database we de fase afbreken.
+# Vijf is ruim genoeg om een enkele hik te overleven en klein genoeg om niet
+# door 381 bronhouders te malen.
+MAX_OPEENVOLGENDE_DB_FOUTEN = 5
+
+
+class DatabaseOnbereikbaar(RuntimeError):
+    """De database is weg — doorgaan heeft geen zin, elke bronhouder faalt.
+
+    Op 2026-09-12 werkte WSL zichzelf om 23:52:32 bij (Store-update naar
+    2.7.14.0) en nam daarbij `vmmem.exe` mee. De sync was acht seconden
+    eerder aan zijn delta-sweep begonnen en liep 119 bronhouders lang tegen
+    `connection timeout expired`, elk netjes opgevangen en gelogd. De preflight
+    was groen: die draait één keer, vóór de sweep.
+
+    Een fout per bronhouder hoort de sweep niet te stoppen — één bronhouder met
+    rommel mag de andere 380 niet blokkeren. Een dode database is een andere
+    soort fout, en dit onderscheid maakt de lus nu wel.
+    """
+
+
+def _is_db_verbindingsfout(e: BaseException) -> bool:
+    """Is dit een verbindingsfout richting Postgres (en niet DSO-rommel)?
+
+    Loopt de oorzaakketen af: de loader verpakt fouten soms, en dan zit de
+    `OperationalError` een niveau dieper.
+    """
+    import psycopg
+    gezien = set()
+    while e is not None and id(e) not in gezien:
+        gezien.add(id(e))
+        if isinstance(e, psycopg.OperationalError):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
 from src.db import get_conn
 from src.http_retry import met_retry
 from src.rate_limiter import limiter
@@ -231,6 +267,7 @@ def load_delta(sinds: str | None,
 
     results: dict[str, str] = {}
     total = len(per_bh)
+    db_fouten_op_rij = 0
     for i, (overheid_code, regs) in enumerate(per_bh.items(), 1):
         if bronhouder_map and overheid_code in bronhouder_map:
             bronhouder_code, naam = bronhouder_map[overheid_code]
@@ -242,9 +279,21 @@ def load_delta(sinds: str | None,
                          doc_types=doc_types, force=force, regelingen=regs,
                          uitstel_subdiv=uitstel_subdiv, gewijzigd=gewijzigd)
             results[bronhouder_code] = "ok"
+            db_fouten_op_rij = 0
         except Exception as e:
             console.print(f"[red]delta fout {bronhouder_code}: {e}[/red]")
             results[bronhouder_code] = f"error: {e}"
+            # Alleen verbindingsfouten tellen mee; DSO-rommel bij één bronhouder
+            # laat de teller staan waar hij stond en stopt de sweep dus nooit.
+            if _is_db_verbindingsfout(e):
+                db_fouten_op_rij += 1
+                if db_fouten_op_rij >= MAX_OPEENVOLGENDE_DB_FOUTEN:
+                    raise DatabaseOnbereikbaar(
+                        f"{db_fouten_op_rij} bronhouders op rij zonder database "
+                        f"(laatste: {bronhouder_code}, bij {i}/{total}). "
+                        f"Sweep afgebroken; herstel de database en draai opnieuw — "
+                        f"de skip-guard maakt de herstart goedkoop."
+                    ) from e
     return results
 
 

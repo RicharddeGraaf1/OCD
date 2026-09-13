@@ -399,7 +399,8 @@ def _annotatie_regels() -> list[str]:
     juridische regel, activiteit of norm bij zit. Op 2026-09-04 overkwam dat de
     Zuid-Hollandse Omgevingsverordening en het sync-rapport meldde 0 fouten.
     """
-    gevallen = getattr(p2p, "ANNOTATIE_FOUTEN", [])
+    from src.loaders import api_loader
+    gevallen = getattr(api_loader, "ANNOTATIE_FOUTEN", [])
     if not gevallen:
         return ["- annotatielagen omgevallen: 0"]
     regels = [f"- annotatielagen omgevallen: {len(gevallen)} "
@@ -458,7 +459,8 @@ def fase_p2p(bronhouders, sinds: str | None = None, full: bool = False,
     # tekst geladen, geen enkele juridische regel. Dat gebeurde op 2026-09-04 met
     # de Zuid-Hollandse Omgevingsverordening, en de sync meldde 0 fouten. De
     # loader houdt zulke gevallen nu bij; hier komen ze in het rapport terecht.
-    for expr, boodschap in getattr(p2p, "ANNOTATIE_FOUTEN", []):
+    from src.loaders import api_loader
+    for expr, boodschap in getattr(api_loader, "ANNOTATIE_FOUTEN", []):
         fouten.append(f"p2p annotaties {expr}: {boodschap}")
     if full:
         detail = f"- {ok}/{len(resultaten)} bronhouders ok"
