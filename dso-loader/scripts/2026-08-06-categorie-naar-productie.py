@@ -217,7 +217,23 @@ def laad_annotatie(lconn, pconn, pc) -> int:
         pc.execute("CREATE INDEX chunk_annotatie_locatie_idx ON v2a.chunk_annotatie (locatie_id)")
         pc.execute("CREATE INDEX chunk_annotatie_object_idx ON v2a.chunk_annotatie (object_id)")
         pc.execute("CREATE INDEX chunk_annotatie_herkomst_idx ON v2a.chunk_annotatie (herkomst)")
-    log(f"chunk_annotatie: {n} rijen geladen en omgewisseld in {time.time() - t0:.0f}s")
+
+    # De foreign key hoort hier net zo goed terug als bij chunk_categorie
+    # hieronder. Hij stond hier NIET, en daardoor draaide prod sinds de eerste
+    # omwisseling zonder cascade: verdwijnt een chunk uit v2a.tekst_embedding,
+    # dan bleef zijn annotatierij staan. Gevonden op 2026-09-13 door
+    # diff_schema_lokaal_prod.py, samen met hetzelfde gat in artikel_indeling
+    # (waar het al 72 spookrijen had opgeleverd). Hier was de schade nog nul,
+    # omdat deze tabel elke sync integraal wordt vervangen -- maar dat is geluk
+    # en geen ontwerp.
+    pc.execute("""ALTER TABLE v2a.chunk_annotatie
+                  ADD CONSTRAINT chunk_annotatie_chunk_id_fkey
+                  FOREIGN KEY (chunk_id) REFERENCES v2a.tekst_embedding(id)
+                  ON DELETE CASCADE NOT VALID""")
+    pc.execute("ALTER TABLE v2a.chunk_annotatie VALIDATE CONSTRAINT chunk_annotatie_chunk_id_fkey")
+    pconn.commit()
+    log(f"chunk_annotatie: {n} rijen geladen en omgewisseld in {time.time() - t0:.0f}s "
+        f"(foreign key hersteld)")
     return n
 
 

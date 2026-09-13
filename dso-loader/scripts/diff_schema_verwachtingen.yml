@@ -1,0 +1,80 @@
+# Verwachte STRUCTUURverschillen tussen de lokale werkbank en productie.
+#
+# Tegenhanger van diff_verwachtingen.yml, maar dan voor tabellen, kolommen,
+# constraints, indexen en views in plaats van rijtellingen. Zelfde afspraak:
+# alleen hier hoort een verschil te staan dat we begrijpen en accepteren, zodat
+# de uitvoer leeg is als het goed is.
+#
+# De sleutel is `<soort>:<sleutel>` precies zoals het script hem toont:
+#   tabel:v2a.embed_state
+#   kolom:mer.event.bronhouder_code
+#   constraint:v2a.artikel_indeling :: PRIMARY KEY (tekst_element_id)
+#   index:p2p.locatie.idx_locatie_geom
+#   view:core.v_vrijetekst_health
+#
+# LET OP: tabellen die al in `diff_verwachtingen.yml` staan hoeven hier NIET
+# herhaald te worden. Het script leest dat bestand mee en neemt de reden over,
+# want een tabel die maar aan één kant bestaat is dezelfde constatering voor
+# beide controles. Een tweede keer overtypen laat hem verouderen op de plek waar
+# niemand kijkt.
+#
+# QUOTE DE SLEUTEL. Een constraint-sleutel bevat ' :: ' en dus een dubbele punt
+# met spatie; onquoted breekt dat het hele YAML-blok en dan is er geen enkele
+# verwachting meer (gebeurd op 2026-09-13, dezelfde val als in de vault-CLAUDE.md).
+#
+# `reden` is in de praktijk verplicht: zonder reden waarschuwt het script.
+# Schrijf op WAAROM het verschil er hoort te zijn, niet DAT het er is.
+
+verwacht:
+
+  "constraint:v2a.artikel_indeling :: PRIMARY KEY (tekst_element_id)":
+    reden: >-
+      Alleen de NAAM verschilt: lokaal `artikel_indeling_pkey`, op prod
+      `artikel_indeling_nieuw_pkey`. Dat komt uit de schaduwtabel-swap in
+      indeling_naar_productie.py -- die bouwt `artikel_indeling_nieuw`, zet daar
+      de primary key op (die krijgt dan de naam van de schaduwtabel) en hernoemt
+      de tabel. De constraint zelf is identiek en dwingt hetzelfde af.
+      Meeverhuizen van de naam zou een extra ALTER kosten voor nul winst.
+
+  "kolom:mer.event.bronhouder_code":
+    reden: >-
+      Prod-only bij ontwerp. `harvest/resolve_bronhouder.py` draait TEGEN prod
+      (runbook stap 6d) en maakt deze kolom daar zelf aan met ADD COLUMN IF NOT
+      EXISTS; de koppeling heeft core.bronhouder van prod nodig. Lokaal bestaat
+      hij daarom niet, en dat is geen gat.
+
+  "kolom:mer.project.bronhouder_code":
+    reden: >-
+      Idem -- zie kolom:mer.event.bronhouder_code.
+
+  "kolom:irm.ir_embedding.inhoud_hash":
+    reden: >-
+      Lokale werkboekhouding van de doorwerkingspijplijn. `match/verversen.sql`
+      gebruikt deze hash om te zien of de tekst achter een embedding is
+      gewijzigd; die detectie draait uitsluitend op de werkbank.
+      `match/sync_prod.py` zet alleen de OORDELEN over naar prod, niet de
+      tussenstand waarmee ze zijn berekend.
+
+  "view:core.v_vrijetekst_health":
+    reden: >-
+      Gezondheidsview voor runbook stap 3b, wordt tegen de lokale DB bevraagd en
+      door ocd-api niet gelezen (gecontroleerd 2026-09-13).
+
+  "view:irm.v_ir_inhoud":
+    reden: >-
+      Hulpview van de doorwerkingspijplijn in instructieregels.nl/match/, die
+      volledig lokaal draait. Niet gelezen door ocd-api (gecontroleerd 2026-09-13).
+
+  "view:v2a.wijziging_artikel_categorie":
+    reden: >-
+      Lokaal restant. Tot 2026-08-10 voedde deze view de onderwerp-as van de
+      wijzigingentour; sindsdien leest ocd-api/main.py rechtstreeks uit
+      v2a.wijziging_indeling en komt de naam daar alleen nog in een docstring
+      voor (gecontroleerd 2026-09-13). Kandidaat om lokaal te laten vervallen;
+      zolang hij er staat is zijn afwezigheid op prod correct.
+
+  "tabel:i2a.sttr_bestand_mislukt":
+    reden: >-
+      Hoort bij i2a.sttr_bestand, dat op prod BEWUST leeg is (0,37 GB ruwe XML
+      die prod niet serveert). Een tabel die bijhoudt welke van die bestanden
+      niet te parsen waren, heeft op prod net zo min een functie.

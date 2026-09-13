@@ -489,6 +489,89 @@ reparatie óf een regel in `diff_verwachtingen.yml` — niet blijven staan als
 dat een telling niet ziet"*. Deels het PostGIS-versieverschil uit §10, maar dat
 is een aanname tot iemand het per bronhouder toetst.
 
+---
+
+## 15. Wat de schema-diff bij zijn eerste run vond *(golf 1.1 van het vervolgplan)*
+
+`diff_schema_lokaal_prod.py` is gebouwd naar aanleiding van §13 en meteen
+gedraaid. Van 173 ruwe verschillen naar **24, allemaal indexen**, en onderweg
+drie dingen die het bestaansrecht van de controle bevestigen.
+
+### 15.1 De ontbrekende FK was geen ongeluk maar een patroon
+
+`v2a.artikel_indeling` miste zijn foreign key niet doordat iemand hem vergat aan
+te maken, maar doordat **de schaduwtabel-swap hem elke keer weggooit**.
+`CREATE TABLE ... LIKE` neemt geen constraints mee, en het herstel erna is
+inconsistent:
+
+| script | tabel | PK hersteld | FK hersteld |
+|---|---|---|---|
+| `indeling_naar_productie.py` | `artikel_indeling` | ✅ (met comment erbij) | ❌ |
+| `indeling_naar_productie.py` | `pad_categorie` | ❌ | n.v.t. |
+| `2026-08-06-categorie-naar-productie.py` | `chunk_annotatie` | n.v.t. | ❌ |
+| `2026-08-06-categorie-naar-productie.py` | `chunk_categorie` | n.v.t. | ✅ |
+
+Eén van de vier deed het goed. Mijn reparatie van §13 zou dus bij de volgende
+sync gewoon weer ongedaan zijn gemaakt — en dat is precies wat er de vorige keer
+gebeurd moet zijn.
+
+**Gedaan**: alle drie de swaps herstellen nu hun constraints (`NOT VALID` +
+`VALIDATE`, zoals `chunk_categorie` het al deed), en de twee ontbrekende
+constraints staan alsnog op prod. Schade op dit moment: nul wezen in
+`chunk_annotatie`, nul dubbelen in `pad_categorie` — die tabellen worden elke
+sync integraal vervangen, dus het gat had nog geen kans gekregen. Dat is geluk
+en geen ontwerp.
+
+### 15.2 De vectorindex bestaat niet op productie
+
+`v2a.tekst_embedding` heeft lokaal een HNSW-index
+(`USING hnsw (embedding vector_cosine_ops)`); op prod ontbreekt die, bij
+1.653.475 rijen. Ook de btree op `regeling_expression` staat er niet.
+
+Wat dat wél en niet betekent, want het is minder dramatisch dan het klinkt:
+`ocd-api/semantisch.py` ordent op `embedding <=> …` binnen een CTE die eerst op
+scope filtert, dus er wordt geen 1,65 miljoen rijen gescand bij een gewone
+aanroep. Maar:
+
+- **lokale prestatiemetingen voorspellen prod niet** voor alles wat de
+  vectorkolom raakt — de planner heeft daar een index en hier niet;
+- een ongefilterde vectorzoekopdracht zou op prod geen index vinden;
+- een HNSW-index over 1,65 miljoen vectoren bouw je niet even tussendoor,
+  dus dit is geen knop die je op het moment zelf omzet.
+
+**Niet opgelost** — dit vraagt een meting (hoe vaak en hoe duur is het
+vectorpad op prod echt?) en daarna een keuze over de bouwtijd.
+
+### 15.3 Twee ontwerpfouten in de controle zelf, allebei ruis
+
+Het eerste ontwerp gaf 173 meldingen, en dat is er 173 te veel om te lezen:
+
+1. **Een tabel die aan één kant ontbreekt** leverde één regel per kolom, per
+   index én per constraint. Van de 78 kolomverschillen waren er 75 in feite
+   twaalf tabellen. Nu opgerold tot één regel per tabel.
+2. **Indexen vergeleken op naam** gaf dertien valse "prod mist deze index": de
+   swap maakt zijn indexen onder een eigen naam aan (`ai_regeling_idx0` tegen
+   `artikel_indeling_regeling_idx`), dezelfde index op dezelfde kolom. Nu op de
+   definitie zonder de naam.
+
+Verder leest het script de verwachtingen van de rij-diff mee: staat een tabel
+daar al met een reden, dan is zijn eenzijdigheid hier ook verwacht. Die reden
+twee keer overtypen laat hem verouderen op de plek waar niemand kijkt.
+
+> **En de YAML brak op zijn eerste sleutel.** `constraint:… :: PRIMARY KEY (…)`
+> bevat een dubbele punt met spatie, en onquoted maakt dat het hele blok
+> onleesbaar — dan is er geen énkele verwachting meer, stil. Exact de val die in
+> de vault-`CLAUDE.md` §5.1 beschreven staat en die `model.md` daar tien weken
+> heeft gekost. Sleutels staan nu gequote, met de waarschuwing erbij.
+
+### 15.4 Wat er nog openstaat
+
+24 index-verschillen, elk een eigen afweging: 9 die prod mist, 14 die alleen
+prod heeft (grotendeels prestatie-indexen die daar terecht kunnen staan) en 1
+die inhoudelijk verschilt. Die horen één voor één beoordeeld en dan óf
+gerepareerd óf met reden in `diff_schema_verwachtingen.yml` — niet in bulk
+weggezet.
+
 ## Codewijzigingen uit deze run
 
 | Wijziging | Bestand | Status |

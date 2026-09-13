@@ -112,7 +112,25 @@ def laad(lconn, pconn, pc, tabel: str, kolommen: list[str],
     return n
 
 
-def wissel_om(pconn, pc, tabel: str, verwacht: int, indices: list[str]) -> None:
+def wissel_om(pconn, pc, tabel: str, verwacht: int, indices: list[str],
+              constraints: list[str] | None = None) -> None:
+    """Wissel de schaduwtabel om, inclusief indexen EN constraints.
+
+    `constraints` is er sinds 2026-09-13 en is geen luxe. `CREATE TABLE ... LIKE`
+    neemt geen enkele constraint mee, en dit script herstelde alleen de primary
+    key van `artikel_indeling`. De foreign key naar `p2p.tekst_element` viel dus
+    bij elke omwisseling weg, en `pad_categorie` kreeg zelfs zijn primary key
+    niet terug.
+
+    Gevolg, gemeten 2026-09-13 door `diff_schema_lokaal_prod.py`: prod droeg 72
+    indelingsrijen die naar een niet-bestaand tekstelement wezen — het register
+    toonde categorieen voor artikelen die niet meer bestaan. Zonder de cascade
+    ruimt niets die op, en het liep elke sync verder op.
+
+    NOT VALID + VALIDATE in twee stappen, net als in
+    `2026-08-06-categorie-naar-productie.py`: het toevoegen is dan een
+    metadata-operatie en de validatie blokkeert geen schrijvers.
+    """
     pc.execute(f"SELECT count(*) FROM v2a.{tabel}_nieuw")
     (n,) = pc.fetchone()
     if n != verwacht:
@@ -124,6 +142,11 @@ def wissel_om(pconn, pc, tabel: str, verwacht: int, indices: list[str]) -> None:
         pc.execute(f"DROP TABLE IF EXISTS v2a.{tabel}_oud")
         pc.execute(f"ALTER TABLE IF EXISTS v2a.{tabel} RENAME TO {tabel}_oud")
         pc.execute(f"ALTER TABLE v2a.{tabel}_nieuw RENAME TO {tabel}")
+    for ddl in (constraints or []):
+        pc.execute(ddl.format(tabel=tabel))
+    pconn.commit()
+    if constraints:
+        log(f"{tabel}: {len(constraints)} constraint(s) hersteld")
     log(f"{tabel}: omgewisseld (oude versie staat als {tabel}_oud)")
 
 
@@ -166,7 +189,10 @@ def main() -> None:
         n1 = laad(lconn, pconn, pc, "pad_categorie",
                   ["pad_sleutel", "pad_voorbeeld", "categorie", "subcategorie",
                    "n_artikelen", "n_bronhouders", "bron", "curatie_versie"])
-        wissel_om(pconn, pc, "pad_categorie", n1, [])
+        wissel_om(pconn, pc, "pad_categorie", n1, [], [
+            "ALTER TABLE v2a.{tabel} ALTER COLUMN pad_sleutel SET NOT NULL",
+            "ALTER TABLE v2a.{tabel} ADD PRIMARY KEY (pad_sleutel)",
+        ])
 
         # tekst_element_id gaat NIET mee: die is prod-specifiek en wordt na het
         # laden opgezocht op (regeling_expression, wid).
@@ -200,6 +226,11 @@ def main() -> None:
             "CREATE INDEX ai_wid_idx{i} ON v2a.{tabel} (wid)",
             "CREATE INDEX ai_cat_idx{i} ON v2a.{tabel} (categorie)",
             "CREATE INDEX ai_type_idx{i} ON v2a.{tabel} (type_bepaling)",
+        ], [
+            "ALTER TABLE v2a.{tabel} ADD CONSTRAINT artikel_indeling_tekst_element_id_fkey"
+            " FOREIGN KEY (tekst_element_id) REFERENCES p2p.tekst_element(id)"
+            " ON DELETE CASCADE NOT VALID",
+            "ALTER TABLE v2a.{tabel} VALIDATE CONSTRAINT artikel_indeling_tekst_element_id_fkey",
         ])
         toon_resultaat(pc)
 

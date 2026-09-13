@@ -1,0 +1,423 @@
+﻿# Digitaal Stelsel Omgevingswet (DSO-LV)
+
+> Handleiding voor geautomatiseerde consumenten: synchronisatie-clients, crawlers
+> en LLM-agents. Beheerd door het Kadaster. Hier staat welke API welke vraag
+> beantwoordt, welke domeinkennis je nodig hebt voordat je een leeg antwoord voor
+> een storing aanziet, en de bedieningsdetails waar clients op stuklopen.
+> Toegangsregels staan in `/robots.txt`; dit bestand is de toelichting daarop.
+>
+> **Het api-register is de bron voor alle API's, specificaties en sleutelaanvragen:**
+> <https://developer.omgevingswet.overheid.nl/api-register/>. Leid base-URL's, paden en
+> parameters daaruit af in plaats van ze te raden of uit voorbeelden over te nemen.
+>
+> Dit bestand beschrijft het hele stelsel, dat over meerdere hosts verdeeld is, ook
+> als je het op één daarvan hebt gevonden.
+
+Het stelsel ontsluit de regelgeving over de fysieke leefomgeving: omgevingsplannen,
+omgevingsvisies, programma's, verordeningen, en de toepasbare regels die daarvan
+zijn afgeleid. De belasting die het stelsel ondervindt komt zelden voort uit kwade
+wil. Ze komt voort uit clients die op de verkeerde plek zoeken, een leeg antwoord
+voor een fout aanzien, of ophalen wat ze al hebben. Die drie zijn hieronder
+uitgeschreven.
+
+## De vijf regels
+
+1. **Een FRBR-expressie is onveranderlijk.** Heb je hem al, haal hem dan nooit
+   opnieuw op. Dit bespaart meer dan elke andere maatregel.
+2. **Eén lijst-sweep verslaat N gerichte polls.** Zie [Niet ophalen wat je al
+   hebt](#niet-ophalen-wat-je-al-hebt).
+3. **Retry alleen 5xx en timeouts**, met oplopende backoff en een harde
+   bovengrens. Een 4xx is een fout in je eigen code — herhalen helpt niet.
+4. **Nul resultaten is een antwoord**, geen uitnodiging om door te lussen. In dit
+   domein is leeg vaak inhoudelijk correct. Zie [Domein](#domein-waarom-leeg-meestal-geen-storing-is).
+5. **Haal één keer op, distribueer daarna zelf** — als je überhaupt harvest. Begin met
+   de vraag hieronder; voor veel consumenten is het antwoord dat ze geen eigen kopie
+   nodig hebben.
+
+## Heb je een eigen kopie nodig?
+
+Stel deze vraag vóór alle andere. Een flink deel van dit document gaat over het
+bijhouden van een eigen kopie van de voorraad, en die secties zijn geschreven voor wie
+dat werkelijk moet. **Voor de meeste consumenten is het antwoord nee**, en dan hoef je
+er ook niets van te lezen.
+
+**Je hebt géén kopie nodig voor** — vragen over één locatie, het tonen van één
+document, deeplinken naar Regels op de kaart, of een assistent die per vraag opzoekt
+wat er geldt. Dat zijn enkele calls per vraag. Sinds de locatie-ingang van Ontsluiten
+v2 in één antwoord beide regimes levert, valt hier een categorie consumenten onder die
+vroeger dacht niet zonder eigen database te kunnen.
+
+**Je hebt er wél een nodig als** je zoekt over het hele corpus in plaats van binnen één
+document (een zoekmachine, semantisch zoeken, een assistent die corpusbreed moet
+kunnen antwoorden); als je analyses doet over documenten, bronhouders of de tijd heen;
+of als je beschikbaar moet zijn wanneer het stelsel dat niet is — er zijn geplande
+onderhoudsvensters, en dan geven de API's 503.
+
+**Tussenweg: een cache is geen kopie.** Antwoorden bewaren per FRBR-expressie kost je
+bijna niets en vangt het grootste deel van de herhaling af, zonder dat je een voorraad
+hoeft bij te houden, te verversen of te bewaken. Begin daar; groei pas door naar een
+eigen kopie als je aantoonbaar tegen de grens ervan loopt.
+
+**Bouw je er wel een, publiceer dan wat je eruit afleidt.** De goedkoopste request voor
+het stelsel is die van de volgende partij die jouw dump gebruikt in plaats van zelf te
+harvesten. Dit is de sterkste maatregel in dit hele document, en de enige die niet
+alleen jouw belasting verlaagt maar ook die van anderen.
+
+## Crawler of client
+
+`/robots.txt` en dit bestand spreken tot twee verschillende soorten bezoekers, en
+dat verschil moet je kennen voordat je de twee naast elkaar legt.
+
+Het hele `/publiek/`-oppervlak vereist een API-sleutel: zonder sleutel krijg je
+overal 401. De regels in `/robots.txt` gaan daarom niet over toegang maar over
+**crawlen** — welke paden zinvol zijn om zonder sleutel op te halen. Zo is de
+Downloaden-API daar uitgesloten: het is een opdracht-API waarbij je een pakket
+aanvraagt, wacht tot het gebouwd is en het daarna ophaalt. Er zijn geen URL's om te
+volgen en niets te indexeren.
+
+Werk je mét een sleutel, dan ben je in die zin geen crawler maar een **client**, en
+geldt dit bestand. De Downloaden-API is dan wel degelijk de juiste route voor een
+volledig document. Dat is geen tegenspraak: robots.txt kent het onderscheid tussen
+crawlen en een geauthenticeerde client niet, en kan het dus niet uitdrukken.
+
+Kom je een verbod in `/robots.txt` tegen dat hier als aanbevolen route staat, dan is
+dit de verklaring. Kom je het omgekeerde tegen — iets wat hier ontraden wordt maar
+daar niet verboden is, zoals de BFF van de documentviewer — volg dan de strengste van
+de twee.
+
+## Budget
+
+Vraag een API-sleutel aan en identificeer je met een User-Agent van de vorm
+`<naam>/<versie> (+https://<project-url>; <contactadres>)`. Daarmee geldt:
+
+| | |
+|---|---|
+| Gelijktijdige verbindingen | 50 |
+| Requests per seconde | 50, voortschrijdend venster van 1 s |
+| Limiter | één gedeelde, over alle onderdelen van je client samen — niet één per module, die vermenigvuldigen |
+| Read-timeout | 30–60 s (300 s voor ZIP-streams) |
+| Retry-backoff | 2, 5, 15, 30 s — daarna hard falen |
+| Voorkeursvenster | 22:00–06:00 CET |
+
+Een te krappe timeout is geen zuinigheid: hij produceert retries en verdubbelt
+daarmee de belasting.
+
+**Dit budget geldt niet overal gelijk.** De API's achter het stelsel zijn verschillend
+geschaald, en het bovenstaande is de ruimte op de zwaarst uitgeruste ervan
+(Presenteren). Ontsluiten v2 verdraagt aanzienlijk minder: een reeks calls zonder
+pauze loopt daar grotendeels stuk, terwijl dezelfde reeks met een korte tussenpauze —
+orde 0,4 seconde — probleemloos doorkomt. Behandel elke API dus als een eigen bak met
+een eigen bodem: begin voorzichtig, en laat je tempo bepalen door wat je terugkrijgt,
+niet door wat elders mocht.
+
+## Welke vraag hoort bij welke API
+
+De duurste consument is niet degene die te snel gaat, maar degene die op de
+verkeerde plek zoekt en het stelsel afstruint tot hij zijn antwoord vindt.
+
+| Vraag | Route |
+|---|---|
+| Welke documenten gelden op deze locatie? | **Ontsluiten v2, zoeken op geometrie.** Eén call, en je krijgt zowel de Omgevingswet-documenten als de nog geldende Wro-plannen — die laatste al pons-gecorrigeerd. Ga hier altijd beginnen |
+| Wat staat er in die documenten over deze locatie? | Presenteren v8 met geo-filter, per document uit de vorige stap. Zie het [uitgewerkte voorbeeld](#uitgewerkte-voorbeelden). Niet de ZIP |
+| Wat staat er precies in artikel X? | Presenteren v8, `documentstructuur` |
+| Mag ik hier iets bouwen? Heb ik een vergunning nodig? | RTR (welke activiteiten kent dit bestuursorgaan) en STTR (de beslisregels als DMN). **Niet** Presenteren |
+| Hoe heet dit besluit? | Ontsluiten v2, veld `besluitCiteertitel` |
+| Wat betekent deze code? Welke waarden zijn toegestaan? | Catalogus opvragen v3 |
+| Het hele document, inclusief geometrie en OW-objecten | Downloaden v1 (ZIP), één keer, en cachen. Alleen met sleutel — zie [crawler of client](#crawler-of-client) |
+| Wat gold hier vóór de Omgevingswet? | IHR (`ruimtelijke-plannen/api/opvragen/v4`) of de PDOK-ATOM-download |
+| Welke omgevingsvergunningen zijn verleend? | **Niet in het DSO.** Individuele besluiten en bekendmakingen staan bij KOOP (officielebekendmakingen.nl). Ozon bevat regelgeving, geen beschikkingen |
+
+De toepasbare regel is een ánder artefact dan de juridische regel, met een eigen
+levenscyclus en een eigen bronhouderproces. Wie een vergunningvraag in de
+regelingtekst probeert te beantwoorden, doet veel calls voor een antwoord dat
+elders kant-en-klaar staat, en omgekeerd.
+
+## Domein: waarom leeg meestal geen storing is
+
+Verreweg de meeste retry-stormen komen voort uit de aanname dat een leeg of dun
+antwoord een fout is. In dit domein is het dat zelden.
+
+### Twee regimes naast elkaar, tot uiterlijk 2032
+
+Onder de Omgevingswet heeft elke gemeente een omgevingsplan, maar de oude
+bestemmingsplannen onder de Wro zijn niet in één keer vervallen. Ze blijven
+rechtsgeldig voor het deel van het grondgebied dat nog niet is overgezet. Een volledig
+beeld van een locatie omvat dus beide regimes. Wie alleen naar omgevingsplannen kijkt
+en dan gaat zoeken naar "de ontbrekende plannen", zoekt op de verkeerde plek.
+
+Je hoeft die twee werelden niet zelf bij elkaar te zoeken: Ontsluiten v2 levert op een
+locatie de documenten uit beide regimes in één antwoord. Gebruik dat als ingang, en ga
+pas daarna per document naar de API die de inhoud levert — Presenteren voor de
+Omgevingswet-documenten, IHR voor de Wro-plannen.
+
+### De pons
+
+De pons is het OW-object dat aangeeft welk deel van het grondgebied al door het
+nieuwe omgevingsplan wordt gedekt. Het is een geometrische operatie, geen vlag: een
+bestemmingsplan kan gedéeltelijk weggeponst zijn. De juiste toets is
+
+```
+effectieve Wro-dekking = plangebied MINUS pons-geometrie
+```
+
+en niet een boolean per plan. De pons groeit met elke wijziging van het
+omgevingsplan en verdwijnt zodra een gemeente klaar is.
+
+**Maar reken hem niet zelf na als je de locatie-ingang gebruikt.** De Wro-plannen die
+Ontsluiten v2 op een locatie teruggeeft, zijn al pons-gecorrigeerd: een plan dat op
+dat punt is weggeponst zit niet in het antwoord. Een eigen correctie daarbovenop
+corrigeert iets wat al gecorrigeerd is. Zelf toetsen hoort bij de andere richting —
+wie een voorraad opbouwt uit de lijst-sweep, moet het wél doen, en wie het daar
+overslaat toont plannen zonder gelding. Dat is een inhoudelijk fout antwoord, geen
+efficiëntiekwestie.
+
+### De bruidsschat
+
+Bij inwerkingtreding zijn rijksregels van rechtswege in elk gemeentelijk
+omgevingsplan terechtgekomen. Gemeenten vervangen die geleidelijk door eigen
+regels. Gevolg voor jou: een gemeente kan weinig tot geen eigen genormeerde inhoud
+hebben terwijl er juridisch wel degelijk regels gelden. Een gemeente met nul
+omgevingsnormen is doorgaans inhoudelijke werkelijkheid, geen leveringsprobleem —
+en zeker geen reden om opnieuw te harvesten.
+
+### Annotatie is niet overal even diep
+
+Bronhouders bepalen zelf hoeveel ze annoteren. Een regeling waarvan de tekst er wel
+is maar de OW-objecten dun zijn, is geen incomplete levering. Val in dat geval terug
+op de tekst; probeer niet dezelfde regeling langs meerdere endpoints in de hoop dat
+er ergens meer staat.
+
+## Identificatie: de begrippen waarop clients stuklopen
+
+**FRBR — work, expression, manifestation.** Het *work* is de regeling als zodanig,
+over alle versies heen. De *expression* is een concrete versie. Dit onderscheid
+draagt je hele synchronisatiestrategie: een expressie is onveranderlijk, dus "ken ik
+deze `expressionId` al?" is een volledig antwoord op de vraag of er iets veranderd
+is. Deeplinks wil je daarentegen meestal op het *work*.
+
+**eId en wId.** Een eId identificeert een tekstelement binnen één expressie; een wId
+identificeert het over versies heen. Voor verwijzingen die een versiewissel moeten
+overleven gebruik je wId. Let op: een wId is niet gegarandeerd uniek over regelingen
+heen — scope hem altijd op de regeling, anders koppel je teksten van vreemde
+regelingen aan elkaar.
+
+**Tekst en object zijn twee lagen.** De juridische tekst en de OW-objecten
+(activiteit, gebiedsaanwijzing, omgevingsnorm, omgevingswaarde, locatie) zijn
+gescheiden en worden aan elkaar geknoopt. Verwijzingen naar geo-informatieobjecten
+lopen bovendien in twee trappen: de regeltekst wijst naar een interne verwijzing,
+die op zijn beurt naar het externe object wijst. Sla die tussenstap niet over — de
+kortere weg bestaat niet en levert alleen extra calls op.
+
+**Locatie-identificatie.** De identificatie die de presentatielaag teruggeeft is een
+aggregaat, en niet dezelfde sleutel als de basisgeo-identificatie in het
+bronbestand. Joinen op de verkeerde van de twee geeft geen foutmelding, alleen
+stille onvolledigheid.
+
+**Bronhoudercodes.** Bestuursorganen worden geschreven met een bestuurslaag-prefix:
+`gm0363`, `pv27`, `ws0600`. Niet elke API wil die vorm — zie de RTR-valkuil
+hieronder.
+
+**Documenttypen en status.** Onder meer omgevingsplan, omgevingsvisie, programma,
+omgevingsverordening, waterschapsverordening, projectbesluit,
+voorbereidingsbesluit. De autoritatieve lijst staat in de Catalogus; haal hem daar
+op in plaats van hem af te leiden. Filter daarnaast bewust op status: een ontwerp is
+geen geldend recht, en een besluitversie die nog niet in werking is evenmin. Wie
+alles ophaalt en pas achteraf filtert, haalt een veelvoud op van wat hij nodig heeft.
+
+**Drie soorten tijd, niet één.** Registratietijdstip (wanneer het stelsel het
+opnam), inwerkingtreding (vanaf wanneer het geldt) en geldigheidsperiode zijn
+verschillende dingen. Presenteren kent daarvoor `beschikbaarOp`, `inWerkingOp` en
+`geldigOp`. Sorteren op registratie zegt niets over wat vandaag geldt; filteren op
+geldigheid zegt niets over wat er nieuw is. Kies bewust welke van de drie je vraag
+beantwoordt — een verkeerde keuze hier leidt tot herhaald ophalen "voor de
+zekerheid".
+
+## Niet ophalen wat je al hebt
+
+> Deze sectie en de volgende gelden alleen als je een eigen kopie of een substantiële
+> cache bijhoudt. Bevraag je het stelsel per vraag, dan kun je beide overslaan — zie
+> [Heb je een eigen kopie nodig?](#heb-je-een-eigen-kopie-nodig)
+
+**De skip-guard is je belangrijkste optimalisatie.** Een FRBR-expressie is
+immutabel. Ken je de `expressionId` al, dan is er per definitie niets veranderd.
+Bewaar hem geïndexeerd en controleer lokaal vóórdat je iets ophaalt. Een lokale
+index-lookup is orden van grootte goedkoper dan een HTTP-call; bij een landelijke
+voorraad van duizenden regelingen is dat het verschil tussen seconden en uren.
+
+**Sweep de lijst, poll niet per bronhouder.** `GET /regelingen` zonder
+`bevoegdGezag`-filter met `size=200` kost ongeveer tien calls voor de hele
+landelijke voorraad. Per bronhouder pollen kost er enkele honderden voor dezelfde
+informatie. Filter daarna lokaal.
+
+**Zet je paginagrootte altijd expliciet.** De defaults zijn klein — Ontsluiten levert
+er zonder `size` twintig — en een eerste pagina is een geldig antwoord. Je krijgt dus
+geen foutmelding als je de rest mist, alleen minder resultaat dan er is. Dit is de
+stilste manier om onvolledig te werken die het stelsel kent.
+
+**Vraag om 200 per pagina, maar begrens je lus.** Presenteren gebruikt `size`,
+RTR/STTR gebruiken `pageSize` (let op de andere naam), IHR gebruikt een lagere
+maximumwaarde. Stop op het ontbreken van `_links.next.href`, en zet er alsnog een
+harde paginabovengrens op. Een onbegrensde lus op een API die één keer hikt, is hoe
+je per ongeluk een stresstest draait.
+
+**Gebruik `_expand=true` op de detail-call.** Scheelt de N+1 waarin pons en
+regelingsgebied apart worden opgehaald.
+
+**Gebruik `locatieSelectie=primair` op de annotatie-endpoints.** Zonder deze
+parameter krijg je alle individuele gebieden in plaats van de gebiedengroepen, en
+komt een gebiedengroep terug zónder eigen geometrie-identificatie — waarna je
+vervolgcalls doet om iets op te halen dat met één parameter meteen meekwam. Voor
+grote verordeningen scheelt dit meer dan 99% van het aantal locaties in de respons,
+terwijl regels, activiteiten, gebiedsaanwijzingen en tekstdelen identiek blijven.
+
+**Dedupliceer geometrie-identificaties vóór het ophalen.** Dezelfde geometrie hangt
+aan tientallen objecten. Vraag hem één keer op, met een expliciete `crs`
+(ondersteunde waarden staan op `/crss`).
+
+**Cache waardelijsten op releasecadans, niet per record.** De Catalogus verandert
+bij een standaard-release. Eén keer per release ophalen en lokaal dereferencen
+volstaat.
+
+## Delta's: waarom de slimme aanpak hier de verkeerde is
+
+`GET /regelingen` accepteert een `_sort`-parameter, mét underscore — zoeken op
+`sort` in de parameterlijst vindt hem niet. `?_sort=-registratietijdstip` geeft
+nieuwste eerst. Het veld in het antwoord heet anders dan de sorteersleutel:
+`geregistreerdMet.tijdstipRegistratie`.
+
+**Bouw daar geen watermark op.** Registratietijdstippen worden niet gegarandeerd in
+volgorde zichtbaar: een regeling kan ná een eerdere sweep in de lijst verschijnen
+met een tijdstip dat weken daarvóór ligt. Een watermark veronderstelt dat een item
+zichtbaar wordt op het moment dat het geregistreerd is, en die aanname houdt geen
+stand. Stoppen bij het eerste oudere tijdstip mist dan stil hele regelingen, terwijl
+je rapportage nul fouten meldt.
+
+De veilige aanpak is ook de goedkoopste: sweep de volledige lijst (tien calls),
+filter lokaal, en laat de skip-guard het werk doen. Een `sinds`-parameter in je
+eigen code bespaart geen enkele API-call — de lijst wordt toch al gepagineerd.
+
+**Een voorwaartse delta ziet nooit een verwijdering.** Wat verdwijnt komt niet
+bovendrijven. Los dat op met een periodieke omgekeerde diff — jouw voorraad tegen de
+lijst — niet met een volledige herharvest. En trek geen overhaaste conclusies: een
+voorbereidingsbesluit dat van rechtswege vervalt, is geen intrekking.
+
+## Fouten: de dure soort is de stille
+
+**Retry uitsluitend transiënt.** 5xx, timeouts en verbroken verbindingen: opnieuw,
+met 2/5/15/30 s. Een 4xx: direct doorgeven, nooit herhalen. Een losse 503 komt voor
+en is bijna altijd voorbijgaand; zonder retry breekt zo'n hik een hele
+verwerkingsfase af, met retry is het een rimpeling. Houd de rate-limiter *binnen* de
+retry-scope, zodat een nieuwe poging er opnieuw netjes doorheen gaat.
+
+**200 OK met nul resultaten is meestal een fout in de vraag.** Het bekendste geval:
+de RTR wil de kále organisatiecode. `gm0363` geeft nul activiteiten, `0363` geeft er
+ruim honderd. `pv27` geeft nul, `27` geeft er bijna tweehonderd, `0027` weer nul —
+er is dus geen vaste breedte: strip de letterprefix, vul niet aan. Een client die
+dit fout heeft staan houdt een heel kanaal leeg zonder ooit een foutmelding te zien.
+Behandel een structureel lege respons als een alarm, niet als een resultaat — en
+zeker niet als reden om te blijven pollen. Toets hem eerst tegen
+[Domein](#domein-waarom-leeg-meestal-geen-storing-is): is leeg hier inhoudelijk
+plausibel?
+
+**"Nul exceptions" is niet "compleet".** Tel wat binnenkomt en vergelijk met de
+vorige run. Een groene rapportage zegt alleen dat er niets is omgevallen. Elke
+`except` die logt en doorgaat, is een plek waar het stelsel werk heeft geleverd dat
+is weggegooid.
+
+**Encodeer FRBR-paden goed, of je genereert een 404-storm.** Presenteren v8 vervangt
+in regelingen-paden zowel `/` als `-` door `_`. Alleen de slashes vervangen geeft
+404 voor elke regeling met een datum- of UUID-segment. Een 404 die vervolgens
+geretryd wordt, is de zuiverste vorm van verspilling die er is.
+
+## Zware routes
+
+**De Downloaden-API is asynchroon. Behandel hem zo.** Deze route staat in
+`/robots.txt` op `Disallow`; dat geldt voor ongeauthenticeerd crawlen, niet voor jou
+als client met een sleutel. Zie [crawler of client](#crawler-of-client).
+
+```
+POST /aanvraag         -> 202 + verzoekIdentificatie
+GET  /status/{uuid}    -> poll, interval circa 5 s, harde cap 5 min
+GET  /download/{uuid}  -> tijdelijke URL
+GET  <url>             -> stream naar schijf, timeout 300 s
+```
+
+Elke aanvraag zet serverside een ZIP-bouw in gang. Cache het resultaat op schijf,
+gesleuteld op regeling-identificatie, en vertrouw die cache: de expressie is
+immutabel. Poll nooit in een strakke lus.
+
+**Kies één pijplijn per doel, niet twee.** Hele documentstructuur inclusief
+geometrie nodig? Eén ZIP. Eén fragment of één annotatie nodig? Presenteren. Beide
+draaien voor dezelfde data is dubbele belasting voor exact dezelfde bytes.
+
+**RTR en STTR zijn geldigheidsgestuurd. Pin de peildatum niet.** De
+`datum`-parameter (dd-mm-jjjj) betekent: welke regels golden op die dag. Een
+hardgecodeerde datum bevriest je beeld zonder dat iets klaagt — je haalt dan
+maandenlang keurig data op die niet meer actueel is. Zet hem op vandaag; een vaste
+datum alleen om bewust een oude toestand te reproduceren.
+
+**Meet de opbrengst van een tweede bron vóór je hem aanroept.** Ontsluiten v2 levert
+`besluitCiteertitel` voor besluitversies waar Presenteren die naam niet heeft — de
+moeite waard. Voor ontwerpregelingen levert dezelfde call niets extra op, want daar
+staat de naam al in Presenteren. Eén call per record schrappen die niets oplevert is
+de goedkoopste besparing die er is. En er is geen batch-route: `/documenten/_zoek`
+helpt hier niet.
+
+## Architectuur van de consument
+
+**Harvest één keer, repliceer daarna zelf.** Draai je loader niet apart tegen je
+ontwikkel- en je productieomgeving. Haal op naar één werkbank en repliceer de rijen
+door. De bron wordt één keer bevraagd in plaats van twee keer, de omgevingen kunnen
+per definitie niet uiteenlopen, en een storing kan productie niet half gevuld
+achterlaten.
+
+**Controleer of het écht de API is die traag is.** Trage synchronisaties blijken
+vaak in de eigen verwerking te zitten — geometrie-herberekeningen, index-herbouw —
+en niet in de bevraging. Meet dat eerst, anders "optimaliseer" je met meer requests.
+
+**Identificeer je en wees bereikbaar.** User-Agent met naam, versie, project-URL en
+contactadres, en stuur je API-sleutel mee. Een beheerder die ziet wie ongebruikelijk
+verkeer veroorzaakt kan contact opnemen; anders resteert alleen blokkeren.
+
+**Publiceer wat je afleidt.** Zie [Heb je een eigen kopie
+nodig?](#heb-je-een-eigen-kopie-nodig) — van alle maatregelen in dit document is dit de
+enige die ook de belasting van anderen verlaagt.
+
+## Uitgewerkte voorbeelden
+
+- [Regels op een adres](/llms-voorbeeld-regels-op-adres.md) — van adres naar geldende
+  regels in vijf à tien calls, via de locatie-ingang van Ontsluiten v2. Volledige
+  call-keten met aantallen, de improviserende variant ernaast, en de omgekeerde route
+  die je neemt zodra het om een voorraad gaat in plaats van om één vraag
+
+## Bekende beperkingen van het huidige aanbod
+
+Onderstaande ontbreekt op dit moment. Het staat hier omdat het verklaart waarom de
+omwegen hierboven nodig zijn — en omdat een consument die de beperking kent, hem
+netter omzeilt dan een consument die hem al pollend ontdekt. Meld het als een van
+deze punten je in de weg zit; dat weegt mee in de prioritering.
+
+- **Geen ETag / If-None-Match** op de detail-endpoints. Bevestigen dat een regeling
+  ongewijzigd is kost daarom nu een volledige body.
+- **Geen `gewijzigdSinds`-filter** met de garantie die een watermark nodig heeft.
+- **De locatie-ingang is er wel, maar niet op de sterkste API.** Ontsluiten v2 zet een
+  coördinaat om in de documenten die daar gelden, over beide regimes heen — precies
+  wat je nodig hebt. Het is tegelijk de API die de minste belasting verdraagt. Eén
+  call per locatievraag is prima; hem als bulk-ingang gebruiken niet.
+- **Geen periodieke bulkdump per bronhouder.** Elke serieuze consument bouwt er nu
+  zelf één, uit dezelfde bytes.
+- **Geen intrekkings- of verwijderingsfeed.**
+- **Bij overbelasting volgt 503 en geen 429 met Retry-After**, waardoor een client
+  geen onderscheid kan maken tussen "te snel" en "kapot".
+- **De feitelijke limieten staan niet in de API-documentatie**, waardoor consumenten
+  ze empirisch afleiden. Empirisch afleiden betekent: tegen de grens aan lopen.
+
+## Bronnen
+
+- [Api-register DSO](https://developer.omgevingswet.overheid.nl/api-register/) — alle
+  API's van het stelsel, met OpenAPI-specificatie, pre-productieomgeving en het
+  aanvragen van een sleutel. Begin hier; dit bestand vervangt de specificatie niet
+- `/robots.txt` — toegangsregels per host
+- Standaarden STOP/TPOD en het informatiemodel IMOW — voor de betekenis van
+  OW-objecten, eId/wId en de annotatiestructuur
+- Catalogus opvragen v3 — autoritatieve waardelijsten

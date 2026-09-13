@@ -1,0 +1,162 @@
+﻿# =====================================================================
+#  robots.txt — Digitaal Stelsel Omgevingswet (DSO-LV)
+#  Kadaster, beheerder DSO-LV
+#
+#  TE PLAATSEN OP: document-viewer.dso.kadaster.nl
+#
+#  Een robots.txt geldt uitsluitend voor de host waarop hij staat. Alleen
+#  het blok "DEZE HOST" hieronder is dus werkzaam. De blokken daarna, voor
+#  de overige DSO-hosts, staan volledig in commentaar: ze hebben hier geen
+#  werking en mogen die ook niet krijgen, want vier keer `User-agent: *`
+#  in een bestand is ongeldig. Ze staan er omdat het beleid voor het hele
+#  stelsel geldt en een lezende agent er wel naar handelt. Zodra een van
+#  die hosts een eigen robots.txt krijgt, verhuist het bijbehorende blok
+#  daarheen en gaat het commentaarteken eraf.
+#
+#      document-viewer.dso.kadaster.nl      DEZE HOST — BFF + viewer
+#      service.omgevingswet.overheid.nl     Ozon, OIS, RTR/STTR, Catalogus
+#      ruimte.omgevingswet.overheid.nl      IHR — Wro / oude plannen
+#      omgevingswet.overheid.nl             Omgevingsloket, HTML
+#
+#  De laatste serveert op dit moment zijn eigen webpagina op elk pad, ook
+#  op /robots.txt. Daar plaatsen vereist eerst een uitzondering in de
+#  routering, anders publiceer je iets dat er staat maar niet gelezen
+#  wordt.
+#
+#  ALLE API'S VAN HET STELSEL, MET SPECIFICATIE EN SLEUTELAANVRAAG:
+#      https://developer.omgevingswet.overheid.nl/api-register/
+#  Leid base-URL's, paden en parameters daaruit af; raad ze niet.
+#
+#  BOUW JE EEN CLIENT OF AGENT? Lees /llms.txt.
+#  Daar staat hoe je het stelsel bevraagt zonder het te belasten: welke
+#  API welke vraag beantwoordt, welke domeinkennis je nodig hebt voordat
+#  je een leeg antwoord voor een storing aanziet, en de bedieningsdetails
+#  waar clients op stuklopen. Dit bestand bevat alleen toegangsregels.
+#
+#  robots.txt is advies, geen handhaving: `Crawl-delay` is geen onderdeel
+#  van de standaard en wordt door verschillende crawlers genegeerd, en
+#  commentaar wordt door geen enkele parser gelezen. De bindende limieten
+#  horen bij de API-sleutel.
+#
+#  Regels met (?) zijn nog te verifieren tegen de live routing.
+# =====================================================================
+
+
+# =====================================================================
+#  DEZE HOST: document-viewer.dso.kadaster.nl
+# =====================================================================
+
+User-agent: *
+Disallow: /bff/
+
+User-agent: ClaudeBot
+User-agent: Claude-User
+User-agent: GPTBot
+User-agent: PerplexityBot
+User-agent: Google-Extended
+Disallow: /bff/
+Crawl-delay: 5
+
+Sitemap: https://document-viewer.dso.kadaster.nl/llms.txt
+
+# `/bff/` is een backend-for-frontend: hij bestaat om precies een schermpje
+# te vullen en verandert wanneer dat schermpje verandert. Geen contract,
+# geen versiebelofte, geen changelog, geen toezegging over beschikbaarheid
+# voor derden. Wat je daar zou willen halen, staat ook in een gepubliceerde
+# API met OpenAPI-spec — meestal Ontsluiten v2. Zie het api-register.
+#
+# De uitsluiting van `/bff/` was al beleid op deze host voordat dit bestand
+# werd uitgebreid; ze is hier alleen toegelicht en herhaald in de tweede
+# groep. Dat herhalen is nodig: een robot volgt precies een groep — de
+# meest specifieke die op zijn naam past — en erft niets van de andere.
+#
+# Het gerenderde omgevingsdocument is een projectie. Wil je weten wat de
+# regel zegt, bevraag dan Presenteren v8 en lees de annotaties, niet de
+# HTML en niet de PDF-bijlage.
+#
+# Werk je namens iemand met een eigen API-sleutel, dan ben je in de zin van
+# dit bestand geen crawler maar een client; deze regels gaan over
+# ongeauthenticeerd ophalen. Volg /llms.txt.
+
+
+# =====================================================================
+#  NIET ACTIEF HIER — beleid voor de overige hosts
+#
+#  Alles hieronder staat in commentaar. Het beschrijft wat op de andere
+#  hosts zou gelden. Een agent die dit leest, wordt geacht zich er ook
+#  daar aan te houden.
+# =====================================================================
+
+
+# ---------------------------------------------------------------------
+#  service.omgevingswet.overheid.nl  (Ozon, OIS, RTR/STTR, Catalogus)
+# ---------------------------------------------------------------------
+#
+# User-agent: *
+# Crawl-delay: 1
+# Disallow: /publiek/omgevingsdocumenten/api/downloaden/
+# Allow: /publiek/omgevingsdocumenten/api/presenteren/v8/
+# Allow: /publiek/omgevingsdocumenten/api/geometrieopvragen/v1/
+# Allow: /publiek/omgevingsinformatie/api/ontsluiten/v2/
+# Allow: /publiek/catalogus/api/opvragen/v3/
+# Allow: /publiek/toepasbare-regels/api/rtrgegevens/v2/
+# Allow: /publiek/toepasbare-regels/api/toepasbareregelsuitvoerengegevens/v1/
+#
+# User-agent: ClaudeBot
+# User-agent: Claude-User
+# User-agent: GPTBot
+# User-agent: PerplexityBot
+# User-agent: Google-Extended
+# Disallow: /publiek/omgevingsdocumenten/api/downloaden/
+# Crawl-delay: 5
+#
+# WAT DE DISALLOW HIER WEL EN NIET ZEGT. Het hele `/publiek/`-oppervlak
+# vereist een API-sleutel; zonder sleutel krijg je overal 401. Deze regels
+# gaan dus niet over toegang maar over crawlen: welke paden het zinvol is
+# om als bezoekende robot op te halen.
+#
+# De Downloaden-API (Ozon Download) is uitgesloten omdat het geen crawlbare
+# bron is. Het is een opdracht-API: je vraagt een pakket aan, wacht tot het
+# gebouwd is en haalt het daarna op. Er zijn geen URL's om te volgen en er
+# valt niets te indexeren; een crawler haalt er alleen 401's op. Voor een
+# geregistreerde client met een sleutel is het wel degelijk de juiste route
+# om een volledig document op te halen — robots.txt kan dat onderscheid
+# niet uitdrukken, /llms.txt wel.
+#
+# Er is geen aparte User-agent-groep voor bulkclients: de standaard kent
+# geen wildcard binnen een naam, dus een groep als `*-sync` matcht niets.
+# Het onderscheid loopt via de API-sleutel. Vraag er een aan via het
+# api-register, identificeer je met een User-Agent van de vorm
+#     <naam>/<versie> (+https://<project-url>; <contactadres>)
+# en houd het budget uit /llms.txt aan in plaats van de Crawl-delay.
+
+
+# ---------------------------------------------------------------------
+#  ruimte.omgevingswet.overheid.nl  (IHR — Wro / oude plannen)
+# ---------------------------------------------------------------------
+#
+# User-agent: *
+# Crawl-delay: 2
+# Allow: /ruimtelijke-plannen/api/opvragen/v4/
+#
+# Eigen sleutel, eigen paginering. Niet-weggeponste bestemmingsplannen
+# blijven rechtsgeldig tot uiterlijk 2032; een volledig locatiebeeld
+# vereist deze bron naast Ozon. Voor bulk-geometrie is de PDOK-ATOM-
+# download goedkoper dan deze API — gebruik die.
+
+
+# ---------------------------------------------------------------------
+#  omgevingswet.overheid.nl  (Omgevingsloket, HTML)
+# ---------------------------------------------------------------------
+#
+# User-agent: *
+# Crawl-delay: 10
+# Disallow: /regels-op-de-kaart/     (?) pad verifieren
+# Disallow: /vergunningcheck/        (?) pad verifieren
+#
+# De vergunningcheck is een interactieve sessie met server-state. De
+# onderliggende beslisregels zijn als DMN op te halen uit de STTR-API, waar
+# ze deterministisch en herhaalbaar zijn.
+#
+# Deeplinken naar Regels op de kaart mag en is gewenst; zie /llms.txt voor
+# de encoding.
