@@ -1028,17 +1028,30 @@ def iter_day_records(day: dt.date) -> Iterator[ET.Element]:
         log.info("  paginate: at %d/%d for %s", start, total, day_str)
 
 
-def _fetch_publication_xml(url: str) -> bytes:
-    """GET the full publication XML, with the same retry-backoff as SRU."""
+def _fetch_publication_xml(url: str) -> tuple[bytes, int]:
+    """GET the full publication XML. Retourneert (inhoud, aantal-keer-afgeremd).
+
+    Die tweede waarde is er sinds 2026-09-13. KOOP throttelt met **429**, en die
+    komt hier binnen als een gewone HTTPError met een vaste backoff van 5 s
+    eronder. Daardoor zakte de doorvoer van 200 naar 50 records per minuut
+    zonder dat er iets van te zien was: geen fout, geen melding, alleen traag.
+    Nu telt de aanroeper mee hoe vaak dit gebeurt en zet het in de
+    voortgangsregel. Zie docs/enrich-koop-tempo-analyse.md -- de echte oplossing
+    (429 als tempo-instructie in plaats van als storing) staat daar en is nog
+    niet gebouwd; dit maakt het probleem alleen zichtbaar.
+    """
     client = get_client()
     last_exc = None
+    afgeremd = 0
     for attempt in range(MAX_RETRIES):
         try:
             resp = client.get(url)
             resp.raise_for_status()
-            return resp.content
+            return resp.content, afgeremd
         except httpx.HTTPError as e:
             last_exc = e
+            if getattr(getattr(e, "response", None), "status_code", None) == 429:
+                afgeremd += 1
             wait = RETRY_BACKOFF_SEQ[min(attempt, len(RETRY_BACKOFF_SEQ) - 1)]
             log.warning("  fetch %s failed (%d/%d): %s — retry in %ds",
                         url[-60:], attempt + 1, MAX_RETRIES, type(e).__name__, wait)
@@ -1346,12 +1359,17 @@ def _enrich_one_batch(limit: int,
         log.info("Enriching %d records ...", len(todo))
 
         updated = 0
+        n_throttle = 0
+        t_start = time.time()
         for i, row in enumerate(todo, 1):
             koop_id = row["koop_id"]
             try:
-                xml_bytes = _fetch_publication_xml(row["xml_url"])
+                xml_bytes, throttled = _fetch_publication_xml(row["xml_url"])
+                n_throttle += throttled
             except Exception as e:
                 log.warning("  %s: fetch failed: %s — skipping", koop_id, e)
+                print(f"  enrich {i}/{len(todo)}: ophalen mislukt ({str(e)[:60]})",
+                      flush=True)
                 continue
             xml_text = xml_bytes.decode("utf-8", errors="replace")
             tekst = extract_tekst_uit_publicatie_xml(xml_bytes)
@@ -1415,6 +1433,17 @@ def _enrich_one_batch(limit: int,
             updated += 1
             if i % 50 == 0:
                 conn.commit()
+                # Naar stdout en niet alleen naar `log`: deze stap draait als
+                # subproces van full_sync en logging-uitvoer bereikt het sync-log
+                # niet. Gevolg tot 2026-09-13: anderhalf uur lang geen enkele
+                # regel, waardoor "loopt nog" en "hangt" van buitenaf niet te
+                # onderscheiden waren. Het tempo hoort erbij -- daaraan zie je
+                # een throttle-inzinking terwijl hij gebeurt, in plaats van
+                # achteraf uit de database (gemeten: eerste minuten 200/min, daarna
+                # 50/min doordat KOOP met 429 terugduwt).
+                verstreken = time.time() - t_start
+                print(f"  enrich {i}/{len(todo)} · {i / verstreken * 60:.0f}/min"
+                      f" · {n_throttle} keer afgeremd", flush=True)
                 log.info("  progress: %d/%d (last: %s)", i, len(todo), koop_id)
             time.sleep(REQUEST_INTERVAL)
         conn.commit()

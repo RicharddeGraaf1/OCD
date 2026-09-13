@@ -33,6 +33,20 @@ tail -20 /tmp/<naam>.log
 De uitvoer naar een bestand, de exitcode apart, en pas daarna kijken. In een
 shellscript hoort `set -o pipefail` bovenaan.
 
+**En dezelfde val heeft een tweede gedaante, gevonden 2026-09-13.** Zodra je die
+aanbevolen vorm naar de achtergrond stuurt, is `echo` het laatste commando — en
+de exitcode van de hele opdracht is dan die van `echo`, dus **0**. De crash van
+12-09 (`NameError` in `full_sync`) kwam daardoor binnen als *"completed (exit
+code 0)"* terwijl Python op 1 eindigde en de traceback gewoon in het logbestand
+stond. Voor een achtergrondtaak dus:
+
+```bash
+python scripts/<naam>.py > /tmp/<naam>.log 2>&1        # geen `; echo` erachter
+```
+
+Laat het commando waarvan de exitcode telt het láátste zijn, en lees de code uit
+de taakstatus.
+
 **Geen kale `psql`.** Die staat in deze omgeving op geen enkele PATH — niet in
 bash, niet in PowerShell (`Get-Command psql` vindt niets). Dat het toch werkt
 komt doordat de routes het zelf oplossen: de PowerShell-scripts gebruiken een
@@ -394,6 +408,7 @@ de omvang zit in afgeleide objecten die je nooit over de lijn moet sturen.
 > |---|---|
 > | volledige herbouw (20,3 mln rijen, 3 niveaus) | 15,0 min + 64 s indexbouw |
 > | de tien bronhouders van de sync van 28-08 | **1,8 min** · 426.823 rijen |
+> | de tien van 13-09, mét pv25 en pv30 | **46,6 min** lokaal · 19,3 min op prod · 1.923.828 rijen |
 > | kleine bronhouder (24 rijen) | 0,1–0,4 s |
 >
 > **Draai eerst `scripts/2026-09-add-generalisatie-prefix-index.sql`.** Zonder die
@@ -482,6 +497,13 @@ Daarna nog met de hand, want dat is bewust niet in het script gestopt (het is
 rekenwerk op prod, geen replicatie):
 
 ```bash
+# EERST controleren dat je echt op prod zit. `OCD_DB_URL` leeg laten faalt niet:
+# get_conn() valt dan terug op lokaal en je herbouwt de verkeerde database, met
+# groene uitvoer. Gebeurd op 2026-09-13 (een `grep -oP` die op deze locale niet
+# werkt gaf een lege variabele).
+OCD_DB_URL="$PROD_DB_URL" python -c "import sys;sys.path.insert(0,'.');from src.db import get_conn;c=get_conn();cur=c.cursor();cur.execute('select current_database()');print(cur.fetchone())"
+#   -> moet 'railway' tonen, niet 'dso'
+
 # subdiv voor de geraakte bronhouders
 OCD_DB_URL="$PROD_DB_URL" python -m src.cli refresh-subdiv -b gm0160   # per code
 # dan de MV's
@@ -602,6 +624,22 @@ Alleen als stap 1 nieuwe kennisgevingen laadde.
 powershell -File scripts/refresh-koop-to-prod.ps1 -Push -Refresh -Verify -ProdUrl "<PROD_DB_URL>"
 ```
 
+> **Hoe je ziet dat `enrich-koop` leeft.** Sinds 2026-09-13 schrijft hij elke 50
+> records een regel naar stdout met tempo en het aantal keren dat KOOP hem heeft
+> afgeremd. Draai je een oudere versie, of wil je het naast het log toetsen:
+>
+> ```sql
+> SELECT count(*) FILTER (WHERE inhoud_geladen_at IS NOT NULL) AS verrijkt,
+>        count(*) AS totaal, max(inhoud_geladen_at) AS laatste
+> FROM   vth.vergunningkennisgeving
+> WHERE  datum_publicatie >= '<eerste dag van deze load>';
+> ```
+>
+> `inhoud_geladen_at` is **UTC** — twee uur achter de wandklok in zomertijd. En
+> het is de transactietijd, dus alle 50 rijen van een commit-groep dragen
+> dezelfde waarde. Een teller die stilstaat terwijl `pg_stat_activity` een
+> actieve INSERT toont, betekent niet-gecommit werk en geen hang.
+
 `-Refresh` is **verplicht**, niet cosmetisch: hij doet `VACUUM (ANALYZE)` op
 `vth.vergunningkennisgeving` (vult de visibility map) en ververst
 `dossier_doorlooptijd` / `vergunning_stats` / `vergunning_stats_type_besluit`.
@@ -698,8 +736,8 @@ geen `<semantic:decision>`, alleen uitvoeringsregels.
 
 ### Stap 5 — i2a naar prod (afweging)
 
-i2a heeft sinds 2026-08-08 wél een delta (zie hierboven), maar nog steeds geen
-push-script. Vergelijk na stap 1 de tellingen
+i2a heeft sinds 2026-08-08 een delta (zie hierboven) en sinds 2026-08-13 ook een
+push-script: `scripts/repliceer_i2a_naar_prod.py`. Vergelijk na stap 1 de tellingen
 (`i2a.toepasbaar_regelbestand`, `i2a.uitvoeringsregel`) tussen lokaal en prod:
 
 - **verschil triviaal** → laten staan tot de volgende gelegenheid;
@@ -720,6 +758,17 @@ Twee dingen om te weten vóór je hier tijd in steekt:
   (`gm0363`) terwijl de RTR de kale code verwacht (`0363` → 113 activiteiten).
   Geen activiteiten → geen OIN → STTR stilzwijgend overgeslagen. Na de fix:
   **+384.178 uitvoeringsregels (+46%)**, van 831.835 naar 1.216.013.
+- **De getallen hierboven zijn sinds 2026-09-03 vervuild.** Commit `282f1ab`
+  ruimde de rijen van de oude loader op die naast de nieuwe waren blijven staan:
+  1.238.206 oude naast 118.754 nieuwe, 344.504 overbodige rijen weg. Wie
+  `uitvoeringsregel` telde, telde dubbel. De schone stand op 2026-09-13 is
+  **490.849 lokaal tegen 487.218 op prod** — 0,7%, dus nog steeds triviaal, maar
+  reken niet meer met de miljoenen hierboven. Wat op diezelfde dag wél
+  substantieel bleek: `i2a.rtr_activiteit` stond op prod op **20** tegen 6.840
+  lokaal, terwijl `ocd-api/vergunningcheck.py` die tabel leest. Er ís sinds
+  2026-08-13 een pushscript (`scripts/repliceer_i2a_naar_prod.py`, volledige
+  vervanging in één transactie, 9,3 min); de zin hieronder dat dat er niet is,
+  klopt niet meer.
 - **Dit klopt sinds ergens na 08-08 niet meer.** Hier stond dat productie
   "bewust nog op de oude stand (831.835)" draait. Gemeten 2026-08-28:
   `i2a.uitvoeringsregel` staat op prod op **1.232.842** tegen 1.238.206 lokaal —
@@ -832,7 +881,8 @@ Controle achteraf — beide horen ruim boven nul te staan voor de nieuw geladen
 expressies:
 
 ```sql
-WITH nieuw AS (SELECT frbr_expression FROM p2p.regeling_load
+WITH nieuw AS (SELECT frbr_expression AS regeling_expression
+                 FROM p2p.regeling_load
                 WHERE geladen_op >= '<start van de run>'),
      ch AS (SELECT e.id FROM v2a.tekst_embedding e JOIN nieuw n USING (regeling_expression))
 SELECT (SELECT count(*) FROM ch) AS chunks,

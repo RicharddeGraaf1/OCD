@@ -60,6 +60,19 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from src.db import get_conn
 
+# Windows kiest cp1252 zodra stdout geen terminal is, en dan valt dit script om
+# op zijn eigen voortgangsregel: de pijl in "1.234 weg -> 5.678 nieuw" is niet
+# codeerbaar en geeft een UnicodeEncodeError. Dat kostte op 2026-09-13 een
+# afgebroken run met exitcode 1 terwijl het rekenwerk al gedaan was. De aanroeper
+# hoeft PYTHONIOENCODING niet te kennen; een script dat non-ASCII print regelt
+# zijn eigen uitvoer.
+for _stroom in (sys.stdout, sys.stderr):
+    try:
+        _stroom.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass  # geen tekstuele stroom (bv. omgeleid door een testharnas)
+
+
 console = Console()
 
 # PDOK-RD-piramide: 3440.640 m/px op z0, elke stap gehalveerd.

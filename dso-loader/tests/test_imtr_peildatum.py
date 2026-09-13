@@ -40,4 +40,9 @@ def test_geen_hardgecodeerde_datum_meer():
     # De docstrings noemen 10-04-2026 als geschiedenis; de code mag hem niet
     # meer als parameterwaarde gebruiken.
     assert '"datum": "10-04-2026"' not in bron
-    assert bron.count('"datum": _peildatum()') == 3
+    # Twee, geen drie. Commit 590b2a0 verving het activiteitKoppelingen-blok
+    # door de werkzaamheid-junctie en nam die derde call-site mee. De test bleef
+    # op 3 staan en faalde sindsdien -- niet omdat de peildatum stuk was, maar
+    # omdat het getal verouderd was. Een rode test die niets betekent is erger
+    # dan geen test: hij went, en dan zie je de echte niet meer.
+    assert bron.count('"datum": _peildatum()') == 2
