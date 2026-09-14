@@ -15,8 +15,7 @@
 verwacht:
 
   i2a.sttr_bestand_mislukt:
-    min: 0
-    max: 0
+    alleen: lokaal
     reden: >-
       Bestaat alleen lokaal en is leeg. Hoort bij i2a.sttr_bestand, dat op prod
       BEWUST leeg is (0,37 GB ruwe XML die prod niet serveert); een tabel die
@@ -106,8 +105,8 @@ verwacht:
       (0,13%). Loopt dit op, dan is een landelijke refresh-subdiv aan de orde.
 
   p2p.locatie_generalisatie:
-    min: -20000
-    max: 20000
+    min: -40000
+    max: 40000
     reden: >-
       Vector-tile-generalisatie (vul_locatie_generalisatie.py), gelezen door
       ocd-api/tiles.py voor z0-z10. De marge stond tot 2026-09-05 op
@@ -120,6 +119,17 @@ verwacht:
       samen 1.543 rijen, gemiddeld 30 per bronhouder. Herkenbaar aan het teken --
       die ruis is TWEEZIJDIG (prod staat er soms boven), een echt gat is altijd
       eenzijdig.
+      MARGE VERRUIMD op 2026-09-13 van 20.000 naar 40.000, en de reden is
+      leerzaam. Na het herstel van 219 gedrifte geometrieen zijn 41 bronhouders
+      op PROD herbouwd (waaronder pv23, pv26, pv27) en lokaal niet, waarna het
+      verschil op 26.768 kwam. Ik dacht dat lokaal verouderd was en heb ze daar
+      ook herbouwd -- alle 41 gaven EXACT hetzelfde aantal terug, precies zoals
+      hieronder al staat. Nameting: +24.090 van het verschil zit binnen die 41,
+      en het is tweezijdig (+28.940 hoger, -2.172 lager). Dus versieruis, en een
+      bulkherbouw aan een kant vergroot hem.
+      LET OP wat dat betekent voor de vuistregel hierboven: op het TOTAAL lijkt
+      dit eenzijdig. De toets is het teken PER BRONHOUDER, niet de som -- anders
+      leest een legitieme herbouw als een gat.
       BELANGRIJK: deze ruis is NIET weg te herbouwen, en dat is nagemeten. Negen
       bronhouders boven de drempel zijn op 2026-09-05 herbouwd en gaven alle
       negen exact hetzelfde aantal terug (gm0392 130.531, pv28 610.388, ...),
