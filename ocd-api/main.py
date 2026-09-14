@@ -5070,6 +5070,18 @@ def viewer_ala(
     }
 
 
+def _conv_aanwezig(cur) -> bool:
+    """Of het conv-schema (Wro→Ow-conversie) op deze database bestaat.
+
+    De conversie draait niet op elke omgeving: op productie is `conv` nooit
+    aangemaakt. Zonder deze check viel een verder geslaagde wro-detail-call
+    alsnog om op de laatste query — de viewer meldde dan "OCD-API is tijdelijk
+    niet bereikbaar" terwijl alleen het conversie-extraatje ontbrak.
+    """
+    cur.execute("SELECT to_regclass('conv.conversie_meta') IS NOT NULL AS aanwezig")
+    return bool(cur.fetchone()["aanwezig"])
+
+
 @app.get("/v1/viewer/wro/{idn}/detail", dependencies=[Depends(verify_key)])
 def viewer_wro_detail(
     idn: str,
@@ -5149,17 +5161,19 @@ def viewer_wro_detail(
         teksten = cur.fetchall()
 
         # Check of er een conv-versie bestaat voor dit plan
-        cur.execute(
-            """
-            SELECT cm.regeling_expression, cm.stap, cm.bron, cm.llm_model
-            FROM conv.conversie_meta cm
-            WHERE cm.instrument_idn = %s
-            ORDER BY cm.stap DESC
-            LIMIT 1
-            """,
-            (idn,),
-        )
-        conv_meta = cur.fetchone()
+        conv_meta = None
+        if _conv_aanwezig(cur):
+            cur.execute(
+                """
+                SELECT cm.regeling_expression, cm.stap, cm.bron, cm.llm_model
+                FROM conv.conversie_meta cm
+                WHERE cm.instrument_idn = %s
+                ORDER BY cm.stap DESC
+                LIMIT 1
+                """,
+                (idn,),
+            )
+            conv_meta = cur.fetchone()
 
     return {
         "plan": {
@@ -5192,6 +5206,10 @@ def viewer_conv_boom(expression: str):
     een bestemmingsplan naast de geconverteerde Ow-variant te tonen.
     """
     with get_conn() as conn, conn.cursor() as cur:
+        # Zonder conv-schema bestaat geen enkele conversie: 404, geen 500.
+        if not _conv_aanwezig(cur):
+            raise HTTPException(404, "Geconverteerde regeling niet gevonden")
+
         # Regeling-metadata
         cur.execute(
             "SELECT frbr_expression, opschrift, documenttype FROM conv.regeling WHERE frbr_expression = %s",
