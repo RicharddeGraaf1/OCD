@@ -151,6 +151,10 @@ norm, normwaarde, juridische_regel_norm.
 Elke tabel heeft een `bron`-kolom: `'mechanisch'` (stap 1) of
 `'llm-voorstel'` (stap 2).
 
+Op productie (Railway) staat het schema er sinds 2026-09-14, **leeg**: de
+conversie draait alleen lokaal. De API mag er niet op rekenen dat het
+bestaat — zie [Productie-database: schema's komen er niet vanzelf](#productie-database-schemas-komen-er-niet-vanzelf).
+
 ### `p2pwijziging` — aankomende wijzigingen (5 tabellen + 2 views)
 
 Ontwerpen en besluitversies die wijzigen wat in `p2p` staat.
@@ -429,6 +433,50 @@ niet tussen "zwaar maar gewild" en "niemand luistert nog"; deze knop wel.
 Een `statement_timeout` hoort daarom in de applicatie, waar de verwachte
 duur van de query bekend is — zoals `OcdCollector.STATEMENT_TIMEOUT` (600s)
 en `NORM_OVERLAP_TIMEOUT` (120s) in odkwaliteit.
+
+## Productie-database: schema's komen er niet vanzelf
+
+De Railway-database (`PostGIS 17` in project `ocd`) wordt **niet** uit
+`dso-loader/src/ddl.py` gebouwd. Hij is ooit gevuld met een `pg_restore` van
+de lokale database, en daarna alleen bijgewerkt waar iemand dat expliciet
+deed. Een nieuw schema of een nieuwe tabel in `ddl.py` bestaat dus lokaal
+wél en op productie **niet**, totdat hij daar met de hand wordt aangemaakt.
+Een push naar `main` deployt alleen de API-code, nooit DDL.
+
+Dat is op 2026-09-14 misgegaan. `viewer_wro_detail` las aan het eind
+`conv.conversie_meta` — een schema dat op productie nooit was aangemaakt.
+Elke plandetail van een oud bestemmingsplan gaf daardoor 500, en de viewer
+vertaalde dat naar "OCD-API is tijdelijk niet bereikbaar": het leek alsof de
+hele API weg was, terwijl alleen dat ene pad omviel.
+
+**Afgedwongen in de code, niet in deze tekst.** Een endpoint dat leest uit
+een schema dat niet op elke omgeving hoeft te bestaan, controleert eerst of
+het er is en valt anders terug op "niets gevonden" (404 of een leeg veld),
+nooit op 500. Voorbeeld: `_conv_aanwezig()` in `ocd-api/main.py`
+(`to_regclass('conv.conversie_meta') IS NOT NULL`).
+
+**Bij een nieuw schema of nieuwe tabel die de API gebruikt:**
+
+1. Draai het betreffende blok uit `ddl.py` op productie. Alle DDL daar is
+   `IF NOT EXISTS`, dus opnieuw draaien is veilig. Verbinden kan via de
+   TCP-proxy van `PostGIS 17` (`RAILWAY_TCP_PROXY_DOMAIN` /
+   `RAILWAY_TCP_PROXY_PORT` uit `railway variables -s "PostGIS 17"`); de
+   `DATABASE_URL` van `ocd-api` wijst naar het interne adres en is van
+   buiten Railway niet bereikbaar.
+2. Óf: laat het endpoint tegen de afwezigheid bestand zijn, zoals hierboven.
+3. Controleer daarna of elk schema dat de API aanspreekt op productie
+   bestaat:
+
+```sql
+SELECT s AS ontbreekt
+FROM unnest(ARRAY['audit','conv','core','i2a','lev','mer','p2p',
+                  'p2pwijziging','skos','v2a','vth','wro']) AS s
+WHERE s NOT IN (SELECT schema_name FROM information_schema.schemata);
+```
+
+Stand 2026-09-14: alle twaalf aanwezig. De lijst is wat `ocd-api/*.py` in
+`FROM`/`JOIN`/`INTO`/`UPDATE` noemt; breid hem uit als daar een schema bij
+komt.
 
 ---
 
