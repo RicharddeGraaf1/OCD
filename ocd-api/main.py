@@ -6024,6 +6024,13 @@ def register_landelijk():
     regelingversies niet meetellen.
     """
     with get_conn() as conn, conn.cursor() as cur:
+        # Ruimere timeout, alleen voor dit endpoint. De telling "grootste
+        # omgevingsdocument" loopt over alle tekst_elementen en zat rond de
+        # standaardgrens van 20 s; op 2026-09-18 ging hij er structureel overheen
+        # en gaf landelijk beeld 500. Het antwoord wordt door de proxy van het
+        # register 24 uur gecachet, dus deze trage berekening gebeurt hooguit
+        # één keer per dag. Structureel beter: die telling voorberekenen.
+        cur.execute("SET LOCAL statement_timeout = 90000")
         cur.execute("SELECT count(*) AS n FROM p2p.regeling WHERE NOT inactief")
         ow_totaal = cur.fetchone()["n"]
 
