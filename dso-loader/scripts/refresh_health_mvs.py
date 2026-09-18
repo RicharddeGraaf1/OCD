@@ -44,6 +44,9 @@ HEALTH_MVS = [
     "core.mv_bronhouder_health",
     "core.mv_geo_health",
     "v2a.ponsenkaart_gemeente_stats",
+    # Omvang per regeling; leest /v1/register/landelijk (grootste document).
+    # Zonder verversen blijft landelijk beeld de omvang van de vorige sync tonen.
+    "p2p.mv_regeling_omvang",
 ]
 
 

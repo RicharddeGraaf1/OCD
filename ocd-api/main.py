@@ -6024,12 +6024,11 @@ def register_landelijk():
     regelingversies niet meetellen.
     """
     with get_conn() as conn, conn.cursor() as cur:
-        # Ruimere timeout, alleen voor dit endpoint. De telling "grootste
-        # omgevingsdocument" loopt over alle tekst_elementen en zat rond de
-        # standaardgrens van 20 s; op 2026-09-18 ging hij er structureel overheen
-        # en gaf landelijk beeld 500. Het antwoord wordt door de proxy van het
-        # register 24 uur gecachet, dus deze trage berekening gebeurt hooguit
-        # één keer per dag. Structureel beter: die telling voorberekenen.
+        # Vangnet: ruimere timeout voor dit endpoint. Normaal niet nodig — de
+        # dure telling komt uit p2p.mv_regeling_omvang (zie hieronder) — maar
+        # ontbreekt die view, dan valt het endpoint terug op de live telling
+        # (~40 s op productie) en moet die wél afkomen. Aanleiding: op
+        # 2026-09-18 gaf landelijk beeld 500 op de standaardgrens van 20 s.
         cur.execute("SET LOCAL statement_timeout = 90000")
         cur.execute("SELECT count(*) AS n FROM p2p.regeling WHERE NOT inactief")
         ow_totaal = cur.fetchone()["n"]
@@ -6046,9 +6045,11 @@ def register_landelijk():
         # doordat er geen index op staat; acceptabel omdat de proxy dit
         # antwoord een dag lang cachet, en het is het enige eerlijke getal —
         # zoeken filtert er ook op.
+        # WHERE i.p.v. count(*) FILTER: alleen zo gebruikt de planner
+        # idx_ruimtelijk_instrument_pons_status (2026-09-add-regeling-omvang-mv.sql).
         cur.execute(
-            "SELECT count(*) FILTER (WHERE pons_status = 'actief') AS n "
-            "FROM wro.ruimtelijk_instrument"
+            "SELECT count(*) AS n FROM wro.ruimtelijk_instrument "
+            "WHERE pons_status = 'actief'"
         )
         wro_totaal = cur.fetchone()["n"]
 
@@ -6102,15 +6103,26 @@ def register_landelijk():
         # snelste bronhouder) zitten er bewust niet in.
         opvallend = []
 
-        cur.execute(
-            """
-            SELECT r.frbr_expression, r.opschrift, count(*) AS n
-            FROM p2p.tekst_element te
-            JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
-            WHERE NOT r.inactief
-            GROUP BY 1, 2 ORDER BY n DESC LIMIT 1
-            """
-        )
+        # Uit de voorberekende omvang per regeling (0,02 s) in plaats van een
+        # telling over alle tekst_elementen (39,8 s gemeten 2026-09-18). De MV
+        # wordt ververst met scripts/refresh_health_mvs.py na elke sync.
+        # Bestaat hij (nog) niet, dan de live telling — trager, maar juist.
+        cur.execute("SELECT to_regclass('p2p.mv_regeling_omvang') IS NOT NULL AS bestaat")
+        if cur.fetchone()["bestaat"]:
+            cur.execute(
+                "SELECT frbr_expression, opschrift, n_tekstelementen AS n "
+                "FROM p2p.mv_regeling_omvang ORDER BY n_tekstelementen DESC LIMIT 1"
+            )
+        else:
+            cur.execute(
+                """
+                SELECT r.frbr_expression, r.opschrift, count(*) AS n
+                FROM p2p.tekst_element te
+                JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression
+                WHERE NOT r.inactief
+                GROUP BY 1, 2 ORDER BY n DESC LIMIT 1
+                """
+            )
         if (r := cur.fetchone()):
             opvallend.append({
                 "kop": "Grootste omgevingsdocument",
