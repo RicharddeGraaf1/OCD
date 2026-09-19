@@ -27,6 +27,16 @@ volgt daarom de FK-graaf vanaf de nieuwe expressies, niet een aanname over
 "hoort bij één regeling". `tekstdeel` hangt via `divisie_wid = tekst_element.wid`
 (geen FK; zie ow_loader.py:680).
 
+Die FK-graaf is voor `p2p.locatie` aantoonbaar onvolledig: een pons-gebied of
+het werkingsgebied van een programma hangt aan geen enkele juridische regel,
+gebiedsaanwijzing of tekstdeel, en staat via subdiv → generalisatie → tiles.py
+tóch op de kaart (vault G-141). Daarom een tweede ingang: per bronhouder van de
+geladen regelingen worden de locaties aan beide kanten op `(identificatie,
+md5(geometrie))` vergeleken, en wat op prod ontbreekt of een andere geometrie
+heeft komt in de scope. Alleen sleutels en hashes gaan over de lijn, niet de
+geometrie zelf — integraal spiegelen zou voor de sync van 2026-09-18 ~345 MB
+zijn geweest voor 8 ontbrekende rijen.
+
 Bestaande rijen worden **bijgewerkt**, niet overgeslagen (ON CONFLICT (pk) DO
 UPDATE). Dat is geen detail maar de kern van het geval "nieuwe versie van een
 bestaand plan": de IMOW-objecten houden dan hun `identificatie` — die is de
@@ -50,6 +60,7 @@ import argparse
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import psycopg
 from dotenv import load_dotenv
@@ -234,6 +245,104 @@ CREATE TEMP TABLE scope_hoofdlijn ON COMMIT DROP AS
 """
 
 
+# ── tweede ingang voor locaties (vault G-141) ────────────────────────
+# De FK-graaf hierboven begint bij juridische regel of tekstdeel. Een locatie
+# waar niets uit die keten naar wijst valt er per constructie buiten, en staat
+# toch op de kaart. Gemeten bij de sync van 2026-09-18: 8 locaties, alle met
+# geometrie — de pons-Gebiedengroepen van Utrecht en Zeist, vijf Gebiedengroepen
+# van het Warmteprogramma Lelystad en het werkingsgebied van Programma Landelijk
+# Gebied Zeeland. De replicatie gaf exit 0; pas diff_lokaal_prod.py zag het.
+#
+# Vergeleken wordt per bronhouder van de geladen regelingen, op dezelfde
+# vingerafdruk als de geometriecontrole in diff_lokaal_prod.py
+# (md5 over ST_AsBinary). Rijen die alleen op prod staan blijven ongemoeid —
+# dit script verwijdert niets.
+#
+# Waarom een regex en geen LIKE: de database draait op en_US.utf8, en onder die
+# collatie gebruikt de planner geen gewone btree-index voor een prefix (zie
+# runbook stap 3, de generalisatie-prefixindex). Een scan is het dus hoe dan ook;
+# de regex doet hem één keer voor alle bronhouders tegelijk.
+LOCATIE_HASH_SQL = r"""
+    SELECT identificatie, md5(ST_AsBinary(geometrie)) AS h
+      FROM p2p.locatie
+     WHERE substring(identificatie from 'nl\.imow-([a-z0-9]+)\.') = ANY(%s)
+"""
+
+GROEPSLEDEN_SQL = """
+INSERT INTO scope_loc
+    SELECT DISTINCT lg.lid_identificatie FROM p2p.locatiegroep_lid lg
+     WHERE lg.groep_identificatie IN (SELECT identificatie FROM scope_loc)
+       AND lg.lid_identificatie NOT IN (SELECT identificatie FROM scope_loc)
+"""
+
+
+def _locatie_hashes(conn, bronhouders: list[str]) -> dict[str, str | None]:
+    with conn.cursor() as cur:
+        cur.execute(LOCATIE_HASH_SQL, (bronhouders,))
+        return {i: h for i, h in cur.fetchall()}
+
+
+def te_spiegelen(lok: dict[str, str | None],
+                 prod: dict[str, str | None]) -> tuple[list[str], list[str]]:
+    """(ontbreekt op prod, andere geometrie). Alleen-op-prod telt niet mee."""
+    ontbreekt = sorted(i for i in lok if i not in prod)
+    anders = sorted(i for i, h in lok.items() if i in prod and prod[i] != h)
+    return ontbreekt, anders
+
+
+def locaties_bij_bronhouder(lconn, pconn) -> tuple[int, int]:
+    """Voeg aan scope_loc toe wat op prod ontbreekt of een andere geometrie heeft.
+
+    Geeft (ontbrekend, andere_geometrie) terug. Moet ná SCOPE_SQL draaien: hij
+    leest scope_expr en schrijft in scope_loc, en de tabellen in PLAN die op
+    scope_loc filteren (pons, locatie_basisgeo, locatiegroep_lid) volgen dan
+    vanzelf.
+    """
+    with lconn.cursor() as cur:
+        cur.execute("SELECT DISTINCT bronhouder FROM p2p.regeling "
+                    "WHERE frbr_expression IN (SELECT frbr_expression FROM scope_expr) "
+                    "  AND bronhouder IS NOT NULL")
+        bronhouders = [r[0] for r in cur.fetchall()]
+    if not bronhouders:
+        return 0, 0
+
+    # Beide kanten tegelijk: elk ~40-100 s scan, en ze hebben elkaar niet nodig.
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_lok = pool.submit(_locatie_hashes, lconn, bronhouders)
+        f_prod = pool.submit(_locatie_hashes, pconn, bronhouders)
+        lok, prod = f_lok.result(), f_prod.result()
+
+    ontbreekt, anders = te_spiegelen(lok, prod)
+    extra = ontbreekt + anders
+    if extra:
+        with lconn.cursor() as cur:
+            cur.execute("INSERT INTO scope_loc SELECT unnest(%s::text[]) "
+                        "EXCEPT SELECT identificatie FROM scope_loc", (extra,))
+            # een groep die zo binnenkomt trekt zijn leden mee (FK beide kanten)
+            cur.execute(GROEPSLEDEN_SQL)
+    log(f"  locatie-ingang per bronhouder: {len(bronhouders)} bronhouders, "
+        f"{len(lok):,} locaties lokaal — {len(ontbreekt)} ontbreken op prod, "
+        f"{len(anders)} met andere geometrie ({time.time() - t0:.0f}s)")
+    return len(ontbreekt), len(anders)
+
+
+# Het voorkomen-overzicht (p2p.regeling_voorkomen) wordt geschreven door
+# `markeer_vervallen_regelingen.py` (stap 2b) en de voorkomens-loader, en die
+# raken ook works die deze run niet laadde — precies de ingetrokken regelingen.
+# Stond tot 2026-09-19 niet in de replicatie; die sync liet prod daardoor één
+# voorkomen missen: het bewijs voor de intrekking van het Hoogeveen-programma.
+# Geen FK, en `gesynct_op` wordt bij elke upsert op now() gezet, dus "gesynct
+# sinds de start van de run" is precies wat deze run raakte.
+SCOPE_VOORKOMEN_SQL = """
+CREATE TEMP TABLE scope_vk ON COMMIT DROP AS
+    SELECT frbr_expression FROM p2p.regeling_voorkomen
+     WHERE (%(sinds)s::timestamptz IS NOT NULL AND gesynct_op >= %(sinds)s::timestamptz)
+        OR frbr_work IN (SELECT r.frbr_work FROM p2p.regeling r
+                          WHERE r.frbr_expression IN (SELECT frbr_expression FROM scope_expr))
+"""
+
+
 # Tabellen met een surrogaatsleutel én een unieke natuurlijke sleutel. Zie de
 # uitleg bij het DELETE-blok in kopieer(): een expressie die lokaal is herladen
 # heeft daar andere identity-id's dan op prod, en dan botst de INSERT op de
@@ -294,6 +403,9 @@ PLAN = [
 
     ("p2p.regeling_load",
      "SELECT t.* FROM p2p.regeling_load t JOIN scope_expr s ON s.frbr_expression = t.frbr_expression"),
+
+    ("p2p.regeling_voorkomen",
+     "SELECT t.* FROM p2p.regeling_voorkomen t JOIN scope_vk s ON s.frbr_expression = t.frbr_expression"),
 
     ("p2p.geo_informatieobject",
      "SELECT t.* FROM p2p.geo_informatieobject t JOIN scope_gio s ON s.frbr_expression = t.frbr_expression"),
@@ -491,6 +603,7 @@ def main() -> None:
     else:
         lc.execute(SCOPE_EXPR_SQL, {"sinds": sinds})
     lc.execute(SCOPE_SQL)
+    lc.execute(SCOPE_VOORKOMEN_SQL, {"sinds": sinds})
     lc.execute("SELECT count(*) FROM scope_expr")
     n_expr = lc.fetchone()[0]
     if n_expr == 0:
@@ -500,6 +613,7 @@ def main() -> None:
     for (e,) in lc.fetchall():
         log(f"    {e}")
     log(f"  {n_expr} expressies in scope")
+    locaties_bij_bronhouder(lconn, pconn)
 
     totaal_nieuw = 0
     for tabel, select in PLAN:

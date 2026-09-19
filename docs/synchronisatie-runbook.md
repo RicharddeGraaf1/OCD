@@ -492,6 +492,22 @@ Vier dingen waar hij op let, elk omdat het bij de eerste run misging:
   de kolomlijst opgebouwd en niet met `LIKE`.
 - **`FORMAT TEXT`, geen `BINARY`.** Lokaal is PG 16.9/PostGIS 3.5, prod PG
   17.10/PostGIS 3.7.
+- **Locaties ook per bronhouder, niet alleen via de FK-graaf** *(sinds
+  2026-09-19, vault G-141)*. Een pons-gebied of het werkingsgebied van een
+  programma hangt aan geen juridische regel, gebiedsaanwijzing of tekstdeel, en
+  staat via subdiv → generalisatie → tiles.py tóch op de kaart. Bij de sync van
+  18-09 miste prod er zo 8 — waaronder de ponsen van Utrecht en Zeist — met exit
+  0; pas de diff van stap 7 zag het. Het script vergelijkt nu per bronhouder van
+  de geladen regelingen `(identificatie, md5(geometrie))` aan beide kanten en
+  neemt op wat ontbreekt of een andere geometrie heeft; `pons`,
+  `locatie_basisgeo` en `locatiegroep_lid` volgen via de scope. De logregel
+  `locatie-ingang per bronhouder: … ontbreken op prod, … met andere geometrie`
+  toont wat hij vond. Integraal spiegelen was het alternatief en valt af: ~345 MB
+  geometrie voor die 12 bronhouders, tegen 8 rijen die ontbraken.
+- **`p2p.regeling_voorkomen` gaat mee** *(sinds 2026-09-19)*: alles met
+  `gesynct_op` sinds de start van de run, plus de voorkomens van de geladen
+  works. Stap 2b schrijft voorkomens voor works die deze run níet laadde — de
+  ingetrokken regelingen — en die vielen er tot dan buiten.
 
 Daarna nog met de hand, want dat is bewust niet in het script gestopt (het is
 rekenwerk op prod, geen replicatie):
