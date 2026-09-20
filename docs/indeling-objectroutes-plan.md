@@ -74,19 +74,67 @@ Vulling:
    `overige zone`. Expliciet NULL, niet weglaten — het verschil tussen "weten
    dat het niets zegt" en "niet gekeken" moet in de tabel staan.
 
-### 3.2 Bewijsvolgorde per documenttype
+### 3.2 Bewijsvolgorde — het pad gaat voor, het object vult de gaten
+
+> **Herzien 2026-09-17 na de PoC op Broekhem 33.** Hier stond eerst dat de
+> thema-annotatie vóór het pad moest gaan bij AMvB's en verordeningen, omdat de
+> dekking daar veel hoger is. Dat was een redenering op dekkingscijfers zonder
+> naar de labels te kijken. Zodra je ze naast elkaar zet, klopt hij niet: waar
+> beide routes spreken is het **pad specifieker**. Zie §3.2a.
 
 | documenttype | 1e | 2e | 3e |
 |---|---|---|---|
-| Omgevingsplan, Voorbeschermingsregels | pad | thema-annotatie | activiteit (alleen niveau 2) |
-| AMvB, Ministeriële Regeling, Omgevingsverordening, Waterschapsverordening | thema-annotatie | pad | gebiedsaanwijzing |
-| Aanwijzingsbesluit N2000, Toegangsbeperkingsbesluit | thema-annotatie | gebiedsaanwijzing | — |
+| alle artikelstructuur-documenten | pad | thema-annotatie | gebiedsaanwijzing |
+| Aanwijzingsbesluit N2000, Toegangsbeperkingsbesluit | thema-annotatie | gebiedsaanwijzing | — (die hebben geen bruikbaar pad: 0%) |
 | Wro-plan (IMRO) | bestemmings-/aanduidingsnaam → hoofdgroep | pad | — |
-| Vrijetekst (visie, programma, projectbesluit) | thema-annotatie op tekstdeel | pad | gebiedsaanwijzing |
+| Vrijetekst (visie, programma, projectbesluit) | thema-annotatie op tekstdeel | — | gebiedsaanwijzing |
 
-De regel erachter: **de fijnste route die bewijs levert wint**, en waar twee
-routes even fijn zijn wint de route die voor dat documenttype het hoogst
-gemeten heeft.
+De regel erachter: **de fijnste route die bewijs levert wint.** In de praktijk is
+dat het pad, overal waar het spreekt. De activiteitengroep doet in deze volgorde
+niet mee op niveau 1 (te grof, zie §1).
+
+### 3.2a Waarom die volgorde omging — PoC Broekhem 33 (2026-09-17)
+
+Locatie: Broekhem 33, Valkenburg aan de Geul (RD 185904/320095). Zes documenten
+gelden er, samen 4.716 artikelen: het omgevingsplan, de Limburgse
+omgevingsverordening en vier AMvB's.
+
+| document | artikelen | pad | pad + annotatie | winst |
+|---|---:|---:|---:|---:|
+| Omgevingsplan Valkenburg | 305 | 97,0% | 97,0% | — |
+| Omgevingsbesluit | 313 | 59,7% | 98,1% | +38,3pp |
+| Besluit bouwwerken leefomgeving | 607 | 65,1% | 98,7% | +33,6pp |
+| Besluit kwaliteit leefomgeving | 774 | 37,9% | 98,6% | +60,7pp |
+| Besluit activiteiten leefomgeving | 2.528 | 49,3% | 99,7% | +50,4pp |
+| Omgevingsverordening Limburg | 189 | 41,8% | 100% | +58,2pp |
+
+Dat is de winst, en die is groot. Maar de **inhoud** van de verschilgevallen
+draait de volgorde om:
+
+| artikel | opschrift | pad | annotatie |
+|---|---|---|---|
+| OV 10.4 | Instructieregel geitenhouderij | landbouw | milieu, natuur, planologisch gebruik |
+| OV 12.1 | Instructieregels nieuwe planvoorraad wonen | wonen | planologisch gebruik |
+| Bkl 5.80 | trillinggevoelige gebouwen | geluid | milieu |
+| Bbl 2.23 | meetvoorschriften | procedures | bouwen |
+| Bal 3.15 | aanwijzing milieubelastende activiteiten | economie | energie, geluid, gezondheid, lucht, veiligheid, … |
+
+De annotatie is **breder**, niet anders: zij noemt de beleidsvelden die een
+bepaling raakt, niet het onderwerp waaronder een lezer hem zoekt. Ze is ook vaak
+meervoudig — van de 4.396 geannoteerde artikelen dragen er 1.474 twee thema's,
+297 zelfs zeven. Dat verklaart meteen de 66% "overeenstemming" uit de landelijke
+meting: dat was geen fout, dat was breedte.
+
+De correctie kost niets. Met pad-eerst blijft de dekking identiek
+(98–100% op de AMvB's, 100% op de verordening), want de annotatie vult alleen
+wat het pad laat liggen: 2.179 artikelen op deze locatie, waarvan 921 met precies
+één thema. Wat je wint is dat het scherpere label blijft staan waar het er is.
+
+**Verkenner**: de PoC-pagina met alle 4.716 artikelen, hun onderwerp en het
+bewijs eronder staat op
+<https://claude.ai/artifact/QAtgM3zp6fzAKbCNpmBxH9>.
+Script: `scratchpad/poc_variant.py` uit de sessie van 2026-09-17 (nog te
+verplaatsen naar `scripts/` zodra de variant een eigen tabel krijgt).
 
 ### 3.3 Eenheid en overerving
 
