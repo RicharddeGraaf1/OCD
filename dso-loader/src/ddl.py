@@ -1211,10 +1211,16 @@ CREATE TABLE IF NOT EXISTS vth.vergunningkennisgeving (
             'vergunningvrij'        -- geen vergunning nodig
         )),
 
-    -- Geometrie (PostGIS; 95% gevuld in PoC)
+    -- Geometrie (PostGIS). De loader schakelt op de aanwezigheid van
+    -- <ow:geometrie>, niet op het locatietype; deze lijst is dus een
+    -- registratie van wat KOOP levert, geen filter. Komt er een nieuw type
+    -- bij, dan faalt de insert luid — dat is met opzet beter dan de stille
+    -- NULL-geometrie die tot 2026-09-20 41.049 records trof.
     geometrie_type       TEXT
         CHECK (geometrie_type IS NULL OR geometrie_type IN (
-            'Adres', 'Punt', 'Vlak', 'Postcodegebied'
+            'Adres', 'Punt', 'Vlak', 'Postcodegebied', 'PostcodeHuisnummer',
+            'GeometrieRef', 'Weg', 'Perceel', 'Lijn', 'Woonplaats',
+            'Buurt', 'Wijk', 'Hectometerpaal'
         )),
     geometrie_rd         GEOMETRY(GEOMETRY, 28992),  -- echte geometrie
     geometrie_rd_pt      GEOMETRY(POINT, 28992),     -- centroid / punt
