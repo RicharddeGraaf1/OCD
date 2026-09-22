@@ -848,10 +848,8 @@ def list_facets(
     eerste viewer-iteratie.
     """
     t0 = time.perf_counter()
-    clauses, params = _build_filters(q, tb, ac, bg, org, th, vanaf, totd, geom, ontv, zaak, bbox, afwijk, besch)
-    where = _where_sql(clauses)
 
-    def _bucket_sql(col: str, top: int | None = None) -> str:
+    def _bucket_sql(where: str, col: str, top: int | None = None) -> str:
         limit_clause = f"LIMIT {top}" if top else ""
         # WHERE-clause includes the user's filter clauses plus "<col> IS NOT NULL".
         # If `where` is empty (no user filters), start with WHERE; otherwise append AND.
@@ -865,6 +863,18 @@ def list_facets(
             f"GROUP BY 1 ORDER BY 2 DESC {limit_clause}"
         )
 
+    def _buckets(cur, besch_: str | None, col: str, top: int | None) -> dict[str, int]:
+        clauses, params = _build_filters(
+            q, tb, ac, bg, org, th, vanaf, totd, geom, ontv, zaak, bbox, afwijk, besch_
+        )
+        cur.execute(_bucket_sql(_where_sql(clauses), col, top), params)
+        return {r["value"]: r["count"] for r in cur.fetchall()}
+
+    # besch=nee als NOT EXISTS in elke GROUP BY kost op productie ~10 s per
+    # facet (anti-join over ~99% van de tabel, heap koud). Tel daarom het
+    # complement: (zelfde filters zonder besch) − (zelfde filters met
+    # besch=ja). Exact, want 'nee' is precies het complement van 'ja'; de
+    # ja-kant is klein (~1%) en dus goedkoop.
     result: dict[str, list[FacetBucket]] = {}
     with get_conn() as conn, conn.cursor() as cur:
         for field, top in [
@@ -875,8 +885,17 @@ def list_facets(
             ("subject_taxonomie", None),
             ("publicatieblad", None),
         ]:
-            cur.execute(_bucket_sql(field, top), params)
-            result[field] = [FacetBucket(**dict(r)) for r in cur.fetchall()]
+            if besch == "nee":
+                alle = _buckets(cur, None, field, None)
+                met = _buckets(cur, "ja", field, None)
+                counts = {v: n - met.get(v, 0) for v, n in alle.items()}
+                ranked = sorted(
+                    ((v, n) for v, n in counts.items() if n > 0),
+                    key=lambda vn: vn[1], reverse=True,
+                )[:top]
+            else:
+                ranked = list(_buckets(cur, besch, field, top).items())
+            result[field] = [FacetBucket(value=v, count=n) for v, n in ranked]
     took = int((time.perf_counter() - t0) * 1000)
     return FacetsResponse(**result, took_ms=took)
 
