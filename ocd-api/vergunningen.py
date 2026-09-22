@@ -446,6 +446,7 @@ def _build_filters(
     zaak: str | None,
     bbox: str | None,
     afwijk: str | None = None,
+    besch: str | None = None,
 ) -> tuple[list[str], list[Any]]:
     """Return (where-clauses, params) to be combined with AND."""
     clauses: list[str] = []
@@ -488,6 +489,20 @@ def _build_filters(
         clauses.append("afwijk_status = 'buitenplans_expliciet'")
     elif afwijk == "regulier":
         clauses.append("afwijk_status IS DISTINCT FROM 'buitenplans_expliciet'")
+    # Volledige beschikking = een werkende deeplink naar de vergunning bij het
+    # bevoegd gezag (vth.vergunning_deeplink, werkt=TRUE). Dezelfde bron als
+    # bg_deeplink_url in de detail-response, zodat filter en detailpaneel
+    # nooit uiteenlopen.
+    if besch == "ja":
+        clauses.append(
+            "EXISTS (SELECT 1 FROM vth.vergunning_deeplink dl "
+            "WHERE dl.koop_id = vergunningkennisgeving.koop_id AND dl.werkt)"
+        )
+    elif besch == "nee":
+        clauses.append(
+            "NOT EXISTS (SELECT 1 FROM vth.vergunning_deeplink dl "
+            "WHERE dl.koop_id = vergunningkennisgeving.koop_id AND dl.werkt)"
+        )
 
     parsed_bbox = _parse_bbox(bbox)
     if parsed_bbox:
@@ -663,12 +678,15 @@ def list_vergunningen(
     afwijk: Literal["bopa", "regulier"] | None = Query(
         None, description="bopa = afwijkvergunning (BOPA); regulier = niet-bevestigde BOPA"
     ),
+    besch: Literal["ja", "nee"] | None = Query(
+        None, description="ja = met werkende link naar de volledige beschikking bij het BG; nee = zonder"
+    ),
     sort: Literal["datum", "datum_asc", "ontvangst", "bg"] = Query("datum"),
     limit: int = Query(50, ge=1, le=LIST_MAX_LIMIT),
     offset: int = Query(0, ge=0),
 ):
     t0 = time.perf_counter()
-    clauses, params = _build_filters(q, tb, ac, bg, org, th, vanaf, totd, geom, ontv, zaak, bbox, afwijk)
+    clauses, params = _build_filters(q, tb, ac, bg, org, th, vanaf, totd, geom, ontv, zaak, bbox, afwijk, besch)
     where = _where_sql(clauses)
     order = _SORT_SQL[sort]
     capped = _needs_capped_count(q, bbox)
@@ -741,12 +759,13 @@ def list_pins(
     zaak: str | None = Query(None),
     bbox: str | None = Query(None),
     afwijk: Literal["bopa", "regulier"] | None = Query(None),
+    besch: Literal["ja", "nee"] | None = Query(None),
     cap: int = Query(PINS_CAP, ge=100, le=50_000),
 ):
     t0 = time.perf_counter()
     # Pins-endpoint heeft 'geom' default-true: forceer NOT NULL ongeacht user-input.
     clauses, params = _build_filters(
-        q, tb, ac, bg, org, th, vanaf, totd, True, ontv, zaak, bbox, afwijk
+        q, tb, ac, bg, org, th, vanaf, totd, True, ontv, zaak, bbox, afwijk, besch
     )
     where = _where_sql(clauses)
     capped = _needs_capped_count(q, bbox)
@@ -819,6 +838,7 @@ def list_facets(
     zaak: str | None = Query(None),
     bbox: str | None = Query(None),
     afwijk: Literal["bopa", "regulier"] | None = Query(None),
+    besch: Literal["ja", "nee"] | None = Query(None),
 ):
     """Geeft counts per filter-waarde **met alle filters toegepast**.
 
@@ -828,7 +848,7 @@ def list_facets(
     eerste viewer-iteratie.
     """
     t0 = time.perf_counter()
-    clauses, params = _build_filters(q, tb, ac, bg, org, th, vanaf, totd, geom, ontv, zaak, bbox, afwijk)
+    clauses, params = _build_filters(q, tb, ac, bg, org, th, vanaf, totd, geom, ontv, zaak, bbox, afwijk, besch)
     where = _where_sql(clauses)
 
     def _bucket_sql(col: str, top: int | None = None) -> str:
