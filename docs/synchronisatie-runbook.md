@@ -1579,6 +1579,13 @@ commit, publiceert dus al.
   tegenover 59 GB op prod).
 - Sync-rapport + preview-uitkomst vastleggen; vault `log.md` bijwerken en
   `gaps.md` als er iets nieuws bovenkwam.
+- **De publieke actualiteitspagina bijwerken** *(sinds 2026-10-02)*:
+  `python scripts/export_data_actualiteit.py` schrijft `audit.sync_run` +
+  `core.load_run` als `runs.json` naar `c:/GIT/Conteo_website/public/
+  omgevingswet/data-actualiteit/`; daar committen en pushen (push = deploy van
+  elconteo.nl; alleen `public/` gaat online).
+  De pagina toont per run de deltas op de stroomkaart, het tijdverloop en de
+  groei over alle runs. Zonder deze stap blijft de pagina op de vorige run staan.
 - **Code die tijdens de run is gewijzigd committen — op `main`.** Een sync legt
   regelmatig een loader-fout bloot (2026-08-01: de delta-sortering én de
   ontbrekende retry). Die fixes horen dezelfde dag op main, niet op een branch
