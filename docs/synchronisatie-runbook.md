@@ -296,6 +296,15 @@ python scripts/backfill_besluit_citeertitel.py --uitvoeren --soort beide
 
 ### Stap 2 — Verdrongen versies markeren
 
+> **`0 gemarkeerd` is hier het verwachte antwoord, niet een misser**
+> *(vastgesteld 2026-10-02)*. De preview meldde 13 VERDRONGEN; dit script zette er
+> **0** op inactief. Nagekeken: alle 13 stonden al op
+> `reden_inactief='verouderde-versie'` met een tijdstempel midden in de p2p-fase —
+> de loader markeert de siblings zelf bij het laden van een nieuwe versie. Lees
+> deze stap dus als **controle**, niet als uitvoerder: een getal boven nul betekent
+> dat de loader iets heeft laten liggen. De go/no-go-tabel bij stap 0
+> ("`VERDRONGEN > 0` → stap 2 is verplicht") blijft gelden, om die controle.
+
 ```bash
 python scripts/markeer_verouderde_expressies.py
 ```
@@ -656,6 +665,16 @@ powershell -File scripts/refresh-koop-to-prod.ps1 -Push -Refresh -Verify -ProdUr
 > dezelfde waarde. Een teller die stilstaat terwijl `pg_stat_activity` een
 > actieve INSERT toont, betekent niet-gecommit werk en geen hang.
 
+> **De `TE VERRIJKEN`-schatting van de preview is structureel pessimistisch.**
+> Drie metingen: 19-09 voorspeld 148 min → 87 werkelijk (1,3/s); 01-10 voorspeld
+> **254 min bij 0,8/s** → **116 min bij 1,8/s** voor 12.371 kennisgevingen. De
+> schatter neemt het tempo van de laatste drie runs en komt steeds te laag uit.
+> Praktisch gevolg: `fase_vth` kapt `enrich-koop` af op **4 uur**, en op die
+> voorspelling van 254 min lijkt dat krap — in werkelijkheid zat er ruim twee uur
+> lucht in. Reken dus niet op de voorspelling als je besluit of de verrijking in
+> één run past; kijk na tien minuten naar het echte tempo
+> (`count(*) FILTER (WHERE inhoud_geladen_at IS NOT NULL)`).
+
 `-Refresh` is **verplicht**, niet cosmetisch: hij doet `VACUUM (ANALYZE)` op
 `vth.vergunningkennisgeving` (vult de visibility map) en ververst
 `dossier_doorlooptijd` / `vergunning_stats` / `vergunning_stats_type_besluit`.
@@ -751,6 +770,16 @@ Meet die dekking over **beide** tabellen. Alleen `dmn_element` tellen geeft
 geen `<semantic:decision>`, alleen uitvoeringsregels.
 
 ### Stap 5 — i2a naar prod (afweging)
+
+> **De afweging is per 2026-10-02 beslecht: repliceer elke sync.** Hier stond
+> "verschil triviaal → laten staan", en dat sprak de diff van stap 7 tegen, die
+> **0** eist op `i2a.rtr_activiteit` omdat `ocd-api/vergunningcheck.py` die tabel
+> leest. Op 19-09 werd daarom alsnog gerepliceerd, op 01-10 opnieuw (verschil toen:
+> `uitvoeringsregel` +6.035 = 1,2%, `rtr_activiteit` +11, `toepasbaar_regelbestand`
+> +2). Twee runs op rij dezelfde uitkomst, dus de drempel heeft geen functie:
+> `repliceer_i2a_naar_prod.py` kost 9,0 min, vervangt alles in één transactie en
+> laat lezers de oude stand zien tot de COMMIT. Draai hem gewoon. De
+> afweging-tekst hieronder blijft staan als historie van hoe het zo gegroeid is.
 
 i2a heeft sinds 2026-08-08 een delta (zie hierboven) en sinds 2026-08-13 ook een
 push-script: `scripts/repliceer_i2a_naar_prod.py`. Vergelijk na stap 1 de tellingen
@@ -869,6 +898,19 @@ definitie is: staat wél in `p2p.regeling`, maar op `inactief`.
 `run_overnight.py` blijft bestaan voor een volledige herbouw, maar hoort niet
 meer in een gewone sync.
 
+> **`--opruimen` heeft een tweede helft: zet de verwijdering door naar prod.**
+> *Toegevoegd 2026-10-02.* De replicatie verwijdert niets uit zichzelf, dus na een
+> lokale opruiming staan de chunks op prod nog gewoon in de vindlaag — en wijkt de
+> vingerafdruk af die stap 6c gebruikt. `2026-08-06-categorie-naar-productie.py`
+> kán het wel: hij meldt *"prod opgeschoond: N chunks verwijderd die lokaal weg
+> zijn"* en bevestigt daarna opnieuw de pariteit. Draai hem dus ná elke opruiming.
+>
+> Gemeten 2026-10-02 op de 14 expressies die in die sync inactief werden:
+> lokaal 1.672.062 → 1.653.877 chunks (−18.185), chunks op inactieve expressies van
+> 18.185 naar 0, en via de cascade `chunk_annotatie` −20.520 en `chunk_categorie`
+> −13.585. Prod daarna exact gelijk. De droogloop gaf **14 verweesde expressies**,
+> niet de 39.846 van de naïeve variant — de scherpe definitie houdt stand.
+
 #### Maar dan wél de twee chunk-lagen erbij — anders is de sync half
 
 **Ontdekt 2026-08-13, en het is de keerzijde van bovenstaand advies.**
@@ -973,6 +1015,60 @@ seconden**, met een schaduwtabel en een swap, zodat lezers niet blokkeren.
 Het script controleert eerst een vingerafdruk over `v2a.tekst_embedding` aan
 beide kanten en stopt als die verschilt — anders zouden de `chunk_id`'s naar
 andere tekst wijzen. Zonder `--ja` doet hij alleen die controle.
+
+#### En de indeling erbij — dit stond hier niet, en de diff van 01-10 vond het
+
+*Toegevoegd 2026-10-02.* `2026-08-06-categorie-naar-productie.py` zet
+`tekst_embedding`, `chunk_categorie` en `chunk_annotatie` over. Hij raakt
+`v2a.pad_categorie`, `v2a.artikel_indeling` en `v2a.wijziging_indeling` **niet**,
+en die drie stonden daardoor na een volledig groene sync op prod achter: +35,
++120 en +909. Er bestond al gereedschap voor — `indeling_naar_productie.py` —
+maar het stond in geen enkele stap, dus niemand riep het aan. Alleen de
+tabelbrede diff van stap 7 zag het.
+
+Wat het kost als je het overslaat: ~120 artikelen zonder categorie in
+omgevingsdocumentenregister.nl, en dat is stil — het filter toont wat het kent.
+Zelfde soort onvolledigheid als het chunk-lagen-geval hierboven.
+
+```bash
+python scripts/indeling_naar_productie.py            # droogloop
+python scripts/indeling_naar_productie.py --ja       # pad_categorie + artikel_indeling
+
+# wijziging_indeling gaat NIET mee — die bouw je rechtstreeks op prod, want de
+# twee p2pwijziging-mirrors lopen uiteen (zie de kop van het script):
+OCD_DB_URL="$PROD_DB_URL" python scripts/bouw_indeling.py --alleen-wijzigingen
+```
+
+Gemeten 2026-10-02: kopiëren 150.112 + 10.643 rijen in ~3,5 min (0 wezen bij het
+opzoeken van `tekst_element_id` op de natuurlijke sleutel), `--alleen-wijzigingen`
+op prod 16.408 artikelen.
+
+> ⚠️ **Twee dingen om te weten vóór je `indeling_naar_productie.py` draait.**
+>
+> **1. Hij is niet herhaalbaar zolang er `*_oud`-tabellen staan.** Een
+> `ALTER TABLE ... RENAME` hernoemt de **indexen niet**, dus na een eerdere swap
+> bezit `v2a.artikel_indeling_oud` nog de namen `artikel_indeling_regeling_idx`,
+> `_wid_idx`, `_cat_idx`, `_type_idx`, `_pad_idx` en `artikel_indeling_pkey`.
+> De DDL (`2026-08-add-pad-categorie.sql`) maakt die namen opnieuw aan en valt dan
+> om op `DuplicateTable: relation "artikel_indeling_regeling_idx" already exists`.
+> Gebeurd op 2026-10-02. Indexnamen leven in de schema-namespace, tabelnamen ook —
+> vandaar de botsing; de `wissel_om`-functie in het script zélf gebruikt daarom al
+> gesuffixte namen (`ai_regeling_idx{i}`), de DDL niet.
+>
+> Oplossing zonder iets weg te gooien — de `_oud`-kopie blijft intact:
+> ```sql
+> ALTER INDEX v2a.artikel_indeling_regeling_idx RENAME TO artikel_indeling_regeling_idx_oudnaam;
+> -- idem voor _wid_idx, _cat_idx, _type_idx, _pad_idx en artikel_indeling_pkey
+> ```
+> Structureel hoort de DDL gesuffixte indexnamen te krijgen, of `wissel_om` moet
+> de indexen meehernoemen. **Let op**: op 2026-10-02 stonden beide `_oud`-tabellen
+> op **0 rijen** — als rollback-kopie waren ze dus al waardeloos.
+>
+> **2. De DDL begint met `DROP TABLE IF EXISTS v2a.artikel_indeling` en wordt
+> gecommit vóór het laden.** Tussen die commit en de swap is de tabel op prod dus
+> leeg. Faalt het script daarbinnen, dan staat het register zonder categorieën tot
+> je opnieuw draait. Niet gevaarlijk (de uitkomst is deterministisch uit lokaal),
+> maar draai dit niet ongezien.
 
 ### Stap 6b — Doorwerkingsmeting instructieregels.nl
 
@@ -1313,6 +1409,14 @@ python scripts/diff_lokaal_prod.py                 # moet 0 AFWIJKEND tonen (~20
 > zet hem dan **met reden** in het verwachtingenbestand — een controle die ruis
 > geeft wordt niet gelezen, en dat is precies hoe "0 fouten" jarenlang valse
 > geruststelling gaf.
+>
+> ⚠️ **`diff_lokaal_prod.py` heeft `pyyaml` nodig en dat staat in geen enkele
+> dependency-declaratie** (gevonden 2026-10-02: `ModuleNotFoundError: No module
+> named 'yaml'`, ook `diff_schema_lokaal_prod.py` gebruikt hem; `pyproject.toml`
+> noemt hem niet). Op een verse of herbouwde venv is de hoofdcontrole van stap 7
+> dus niet uit te voeren — en omdat hij hier als laatste stap staat, is "niet
+> gedraaid" precies zo onzichtbaar als "0 afwijkingen". Pip-install lost het op;
+> `pyyaml` hoort bij de dependencies.
 
 En verder:
 
@@ -1420,6 +1524,21 @@ registry is de waarheid.
 
 `--db-source` bepaalt waar de gebakken builds hun data lezen: `local` (default,
 vers direct na de sync) of `prod`.
+
+> **Controleer de sites op inhoud, niet op exitcode** *(2026-10-02)*. Alle drie de
+> deploys melden `✨ Deployment complete`, ook als de build oude data bakte. Wat
+> wél bewijst dat het nieuwe erop staat: vergelijk de bytegrootte van een gebakken
+> artefact met wat de build net schreef. Gemeten die ochtend: `oordeel.json` live
+> op 99.109 bytes = de build, `mer-data.js` op 3.616.696 bytes = de build van
+> 07:16, en annotatieconformiteit byte-identiek aan zijn verse `pages.dev`-URL.
+> Die laatste vergelijking (custom domein vs. de `pages.dev` van déze deploy) is
+> ook de manier om de zone-cache uit te sluiten.
+>
+> **Niet schrikken van `Python was not found` in de instructieregels-build.**
+> `build/build.sh` doet `python3 … || python …`; op Windows slaat `python3` op de
+> Microsoft-Store-shim, die luidruchtig faalt waarna de fallback het werk doet.
+> `oordeel.json` wordt direct erna geschreven. Cosmetisch, maar het leest in een
+> log als een afgebroken stap.
 
 De poort van `publish.py` laat alleen door als de laatste sync-run "0 fouten"
 meldde. Zie de kanttekening in §5: die poort meet exceptions, geen
