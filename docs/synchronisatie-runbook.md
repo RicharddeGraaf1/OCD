@@ -120,6 +120,8 @@ data draait; prod achterlaten betekent dat de sites stale zijn.
 8. DOWNSTREAM       gebakken sites herbouwen         ~15 min
 9. NAZORG           proxy dicht, VACUUM, loggen,
                     code van de run committen op main ~15 min
+9z. SLUITSTUK       elconteo.nl/data-actualiteit:
+                    export_data_actualiteit.py + push ~2 min
 ```
 
 Stappen 0–4, 6d en 7–9 horen bij elke sync. Stap 1b en 5 zijn afwegingen. **Stap 6 draait
@@ -1579,19 +1581,34 @@ commit, publiceert dus al.
   tegenover 59 GB op prod).
 - Sync-rapport + preview-uitkomst vastleggen; vault `log.md` bijwerken en
   `gaps.md` als er iets nieuws bovenkwam.
-- **De publieke actualiteitspagina bijwerken** *(sinds 2026-10-02)*:
-  `python scripts/export_data_actualiteit.py` schrijft `audit.sync_run` +
-  `core.load_run` als `runs.json` naar `c:/GIT/Conteo_website/public/
-  omgevingswet/data-actualiteit/`; daar committen en pushen (push = deploy van
-  elconteo.nl; alleen `public/` gaat online).
-  De pagina toont per run de deltas op de stroomkaart, het tijdverloop en de
-  groei over alle runs. Zonder deze stap blijft de pagina op de vorige run staan.
 - **Code die tijdens de run is gewijzigd committen — op `main`.** Een sync legt
   regelmatig een loader-fout bloot (2026-08-01: de delta-sortering én de
   ontbrekende retry). Die fixes horen dezelfde dag op main, niet op een branch
   die maanden blijft hangen. Zie de repo-hygiëne hieronder.
 - **Nooit tijdens een lopende run**: een `git checkout` wisselt de code onder
   de draaiende processen. Wacht tot het rapport geschreven is.
+
+#### Sluitstuk — de publieke actualiteitspagina bijwerken *(sinds 2026-10-02)*
+
+**Dit is de allerlaatste handeling van elke sync**, ná het committen. De pagina
+[elconteo.nl/omgevingswet/data-actualiteit](https://elconteo.nl/omgevingswet/data-actualiteit/)
+toont per run de deltas op de stroomkaart, het tijdverloop van de fasen en de
+groei over alle runs. Ze leest `runs.json` naast de pagina; zonder deze stap
+blijft ze op de vorige run staan en zegt ze dus iets onwaars over de actualiteit.
+
+```bash
+cd c:/GIT/OCD/dso-loader
+python scripts/export_data_actualiteit.py          # audit.sync_run + core.load_run → runs.json
+cd c:/GIT/Conteo_website
+git add public/omgevingswet/data-actualiteit/runs.json
+git commit -m "data-actualiteit: run <nr> (<datum>)"
+git push                                            # = deploy van elconteo.nl; alleen public/ gaat online
+```
+
+Controle: `curl -s https://elconteo.nl/omgevingswet/data-actualiteit/runs.json | tail -c 400`
+moet het nieuwe run-label tonen. De export koppelt fasen aan een run als ze
+binnen 24 uur na `gestart_op` startten; draai hem dus pas als stap 6 t/m 8
+klaar zijn, anders ontbreken die fasen in het tijdverloop.
 
 ### Stap 10 — Wijzigingsspoor opruimen (periodiek, niet elke sync)
 
