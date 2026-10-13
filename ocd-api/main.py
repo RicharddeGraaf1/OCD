@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from collections import Counter
 from contextlib import asynccontextmanager
 
 import httpx
@@ -4841,8 +4842,40 @@ def viewer_voorkomens(expression: str):
     }
 
 
+# IMOW-thema's die in de waardelijst vervallen zijn -> hun actieve opvolger.
+_THEMA_OPVOLGER = {
+    "bouwwerken": "bouwen",
+    "cultureel erfgoed": "erfgoed",
+    "water en watersystemen": "water",
+    "milieu algemeen": "milieu",
+    "landgebruik": "planologisch gebruik",
+    "energie en natuurlijke hulpbronnen": "energie",
+    "externe veiligheid": "veiligheid",
+}
+# Koepelthema's: staan ze naast een specifieker thema, dan wint het specifieke.
+# Gemeten op Broekhem 33 (vault: Objectroutes naast de padroute, §4a): de
+# annotatie noemt de beleidsvelden die een bepaling raakt, en "milieu" hangt
+# naast bijna alles.
+_KOEPELTHEMAS = {"milieu", "procedures", "planologisch gebruik"}
+
+
+def _norm_thema(t: str) -> str:
+    """`WaterEnWatersystemen` en `water en watersystemen` zijn één thema."""
+    t = re.sub(r"(?<!^)(?=[A-Z])", " ", t or "").lower().strip()
+    return _THEMA_OPVOLGER.get(t, t)
+
+
 @app.get("/v1/viewer/regeling/{expression:path}/onderwerpen", dependencies=[Depends(verify_key)])
-def viewer_onderwerpen(expression: str):
+def viewer_onderwerpen(
+    expression: str,
+    met_annotatie: bool = Query(
+        False,
+        description="Vul artikelen zonder onderwerp uit het opschriftpad aan met het "
+                    "IMOW-thema van hun juridische regels, en geef per onderwerp de "
+                    "herkomst (pad / annotatie). Zonder deze vlag blijft het antwoord "
+                    "gelijk aan de padindeling.",
+    ),
+):
     """Waar gaat dit document over, en wat voor bepalingen staan erin.
 
     Twee onafhankelijke assen, en dat onderscheid is de hele reden dat dit
@@ -4893,20 +4926,54 @@ def viewer_onderwerpen(expression: str):
         )
         rijen = cur.fetchall()
 
+        # Annotatieroute: alleen nodig voor artikelen waar het pad zweeg. Een
+        # juridische regel hangt aan een artikel óf aan een lid; klim op tot het
+        # artikel, want dat is de eenheid van de indeling.
+        themas_per_art: dict[str, Counter] = {}
+        if met_annotatie and any(not r["categorie"] for r in rijen):
+            cur.execute(
+                """
+                SELECT a.wid AS art_wid, t AS thema
+                FROM p2p.juridische_regel jr
+                JOIN p2p.tekst_element te
+                  ON te.regeling_expression = jr.regeling_expression
+                 AND te.wid = jr.regeltekst_wid
+                LEFT JOIN p2p.tekst_element p ON p.id = te.parent_id
+                JOIN p2p.tekst_element a
+                  ON a.id = CASE WHEN te.element_type = 'Artikel' THEN te.id ELSE p.id END
+                CROSS JOIN LATERAL unnest(jr.thema) AS t
+                WHERE jr.regeling_expression = %s AND a.element_type = 'Artikel'
+                """,
+                (expr,),
+            )
+            for r in cur.fetchall():
+                themas_per_art.setdefault(r["art_wid"], Counter())[_norm_thema(r["thema"])] += 1
+
     # Categorie -> subcategorie, allebei op wId-verzamelingen zodat de
     # frontend knopen kan aanwijzen. Een artikel telt in zijn categorie ook mee
     # als het geen subcategorie heeft.
     cats: dict[str, dict] = {}
     types: dict[str, set] = {}
     niet_ingedeeld: set[str] = set()
+    annotatie_themas: dict[str, list] = {}
 
     for r in rijen:
         wid = r["wid"]
-        if r["categorie"]:
-            c = cats.setdefault(r["categorie"], {"wids": set(), "sub": {}})
+        cat, sub, via = r["categorie"], r["subcategorie"], "pad"
+        # Het pad gaat voor; de annotatie vult alleen gaten, en levert dan een
+        # onderwerp zonder subcategorie (IMOW-thema's kennen geen tweede niveau).
+        if not cat and wid in themas_per_art:
+            tel = themas_per_art[wid]
+            gerangschikt = sorted(tel, key=lambda t: (t in _KOEPELTHEMAS, -tel[t], t))
+            cat, sub, via = gerangschikt[0], None, "annotatie"
+            annotatie_themas[wid] = gerangschikt
+        if cat:
+            c = cats.setdefault(cat, {"wids": set(), "sub": {}, "annotatie": set()})
             c["wids"].add(wid)
-            if r["subcategorie"]:
-                c["sub"].setdefault(r["subcategorie"], set()).add(wid)
+            if via == "annotatie":
+                c["annotatie"].add(wid)
+            if sub:
+                c["sub"].setdefault(sub, set()).add(wid)
         else:
             niet_ingedeeld.add(wid)
         if r["type_bepaling"]:
@@ -4919,20 +4986,41 @@ def viewer_onderwerpen(expression: str):
             key=lambda x: -x["n_elementen"],
         )
 
+    def categorie(naam, v):
+        c = {
+            "naam": naam,
+            "n_elementen": len(v["wids"]),
+            "wids": sorted(v["wids"]),
+            "sub": lijst(v["sub"]),
+        }
+        if met_annotatie:
+            c["herkomst"] = {"pad": len(v["wids"]) - len(v["annotatie"]),
+                             "annotatie": len(v["annotatie"])}
+            c["wids_annotatie"] = sorted(v["annotatie"])
+        return c
+
     categorieen = sorted(
-        (
-            {
-                "naam": naam,
-                "n_elementen": len(v["wids"]),
-                "wids": sorted(v["wids"]),
-                "sub": lijst(v["sub"]),
-            }
-            for naam, v in cats.items()
-        ),
+        (categorie(naam, v) for naam, v in cats.items()),
         key=lambda c: -c["n_elementen"],
     )
 
+    extra = {}
+    if met_annotatie:
+        n_annot = len(annotatie_themas)
+        extra = {
+            # Waar komt het onderwerp vandaan: telt op tot dekking.artikelen.
+            "herkomst": {
+                "pad": len(rijen) - len(niet_ingedeeld) - n_annot,
+                "annotatie": n_annot,
+                "geen": len(niet_ingedeeld),
+            },
+            # Alle thema's per artikel dat via de annotatie is ingedeeld,
+            # het gekozen onderwerp eerst.
+            "annotatie_themas": annotatie_themas,
+        }
+
     return {
+        **extra,
         "frbr_expression": expr,
         "categorieen": categorieen,
         # Alias voor de frontend die nog op de oude sleutel staat. Weg zodra
