@@ -370,6 +370,12 @@ CREATE INDEX IF NOT EXISTS idx_jr_regeltekst_expr
 -- Spiegelt p2p.tekst_element: index op (regeling_expression, wid) voor de join-kant:
 CREATE INDEX IF NOT EXISTS idx_tekst_element_expr_wid
     ON p2p.tekst_element(regeling_expression, wid);
+-- Regelmix (GET /v1/viewer/regelmix): de tekstdelen met inhoud, index-only.
+-- Het predicaat is letterlijk het filter van die query; zonder deze index liep
+-- het endpoint bij koude cache tegen de 20 s timeout (500, 2026-10-13).
+CREATE INDEX IF NOT EXISTS idx_tekst_element_wid_met_inhoud
+    ON p2p.tekst_element(wid) INCLUDE (regeling_expression)
+    WHERE inhoud IS NOT NULL AND length(inhoud) > 20;
 
 CREATE TABLE IF NOT EXISTS p2p.activiteit (
     identificatie       TEXT PRIMARY KEY,

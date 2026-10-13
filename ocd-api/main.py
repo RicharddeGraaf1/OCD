@@ -3597,10 +3597,21 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
         # (nieuwste expression) — net als viewer_regelingen, zodat de Documenten-
         # en Regelmix-tab hetzelfde documentenoverzicht tonen. Dat geldt ook voor
         # het gebied-pad hieronder: vrijetekst-instrumenten staan in beide tabs.
+        #
+        # Snelheid (500 op 2026-10-13, Amsterdam 122206/483536: 20 s timeout bij
+        # koude cache). Twee dingen houden dit onder de seconde:
+        #   - core.bronhouder pas NA het tellen koppelen. De planner schat hier
+        #     1 rij (het zijn er ~14.000) en zette de bronhoudertabel dan in een
+        #     nested loop: 6,3 miljoen weggefilterde rijen, de helft van de tijd.
+        #   - idx_tekst_element_wid_met_inhoud (dso-loader/src/ddl.py) draagt
+        #     precies het filter hieronder, zodat tekst_element index-only wordt
+        #     gelezen. Zonder die index haalt elke regel een heap-pagina (plus
+        #     TOAST voor length) uit een tabel van 859 MB die niet in de 2 GB
+        #     van de database past. Wijzig het filter dus niet zonder de index.
         cur.execute(
             """
             WITH per_expr AS (
-                SELECT r.frbr_expression, r.opschrift, r.documenttype, b.bestuurslaag,
+                SELECT r.frbr_expression, r.opschrift, r.documenttype, r.bronhouder,
                        count(DISTINCT te.wid) AS aantal
                 FROM p2p.activiteit_locatieaanduiding ala
                 JOIN p2p.locatie_subdiv ls   ON ls.identificatie = ala.locatie_id
@@ -3608,17 +3619,17 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
                 JOIN p2p.tekst_element te     ON te.wid = jr.regeltekst_wid
                     AND (te.regeling_expression = jr.regeling_expression OR jr.regeling_expression IS NULL)
                 JOIN p2p.regeling r          ON r.frbr_expression = te.regeling_expression
-                JOIN core.bronhouder b       ON b.overheidscode = r.bronhouder
                 WHERE ST_Intersects(ls.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
                   AND NOT r.inactief
                   AND te.inhoud IS NOT NULL AND length(te.inhoud) > 20
-                GROUP BY r.frbr_expression, r.opschrift, r.documenttype, b.bestuurslaag
+                GROUP BY r.frbr_expression, r.opschrift, r.documenttype, r.bronhouder
             )
-            SELECT DISTINCT ON (opschrift)
-                frbr_expression AS bron_id, opschrift AS regeling,
-                documenttype, bestuurslaag, aantal, 'regel'::text AS via
-            FROM per_expr
-            ORDER BY opschrift, frbr_expression DESC
+            SELECT DISTINCT ON (p.opschrift)
+                p.frbr_expression AS bron_id, p.opschrift AS regeling,
+                p.documenttype, b.bestuurslaag, p.aantal, 'regel'::text AS via
+            FROM per_expr p
+            JOIN core.bronhouder b ON b.overheidscode = p.bronhouder
+            ORDER BY p.opschrift, p.frbr_expression DESC
             """,
             {"x": x, "y": y},
         )
