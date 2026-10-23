@@ -181,6 +181,17 @@ REGELS = [
 # Onderbouwing: de diepste kopjes en opschriften in v2a.pad_categorie /
 # artikel_indeling op 2026-10-23 (lokale DB). Oordelen, geen metingen — net als
 # de regels hierboven.
+# Welk bewijs eerst: "kopje-eerst" (de kopjes van diep naar ondiep, dan het
+# artikelopschrift) of "opschrift-eerst" (het opschrift, dan de kopjes).
+# Kopje-eerst houdt broers uit één paragraaf bij elkaar; opschrift-eerst zet een
+# dakkapelregel onder "Hoofdgebouwen algemeen" toch bij de dakkapellen.
+# Proefdraaien zonder dit bestand te wijzigen: env VERFIJNING_VOLGORDE.
+# Gekozen 2026-10-23 (gebruiker), na meting: opschrift-eerst scoort in de
+# RoM-benchmark 7,5 tegen 6,5 en verplaatst landelijk 91 van 18.796 artikelen,
+# vrijwel allemaal naar een passender chip; broers uit één paragraaf raken in
+# 12,8% van de gevallen uit elkaar tegen 12,3%.
+VERFIJNING_VOLGORDE = "opschrift-eerst"
+
 VERFIJNING = {
     ("bouwen", "bouwen en verbouwen"): {
         "onderwerp": [
