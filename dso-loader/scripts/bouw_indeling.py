@@ -400,12 +400,15 @@ def _laad_regels():
     spec = importlib.util.spec_from_file_location("subcategorie_regels", pad)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    verfijning = {sleutel: {stap: [(re.compile(p), fijn) for p, fijn in regels]
+                            for stap, regels in stappen.items()}
+                  for sleutel, stappen in getattr(mod, "VERFIJNING", {}).items()}
     return ([re.compile(p) for p in mod.NIET_INDELEN],
             [(re.compile(p), c, s) for p, c, s in mod.REGELS],
-            mod.CONTAINER)
+            mod.CONTAINER, verfijning)
 
 
-NIET_RE, REGEL_RE, CONTAINER = _laad_regels()
+NIET_RE, REGEL_RE, CONTAINER, VERFIJNING_RE = _laad_regels()
 
 
 def kort(seg: str) -> str:
@@ -442,6 +445,25 @@ def cureer(label: str):
         if rx.search(label):
             return (cat, sub)
     return None
+
+
+def verfijn(cat, sub, pad_segs, art_op):
+    """Specifieker subonderwerp binnen een te brede bak, of de oude sub.
+
+    Alleen voor de bakken in VERFIJNING (curatie/subcategorie_regels.py). Bewijs:
+    de kopjes van diep naar ondiep, daarna het artikelopschrift — eerst op de
+    onderwerpregels, dan pas op de procedureregels. De categorie blijft gelijk.
+    """
+    stappen = VERFIJNING_RE.get((cat, sub))
+    if not stappen:
+        return sub
+    teksten = [kern(s) for s in reversed(pad_segs or []) if s] + [kern(art_op or "")]
+    for stap in ("onderwerp", "procedure"):
+        for tekst in teksten:
+            for rx, fijn in stappen.get(stap, []):
+                if tekst and rx.search(tekst):
+                    return fijn
+    return sub
 
 
 def lees_xlsx(pad):
@@ -548,6 +570,7 @@ def bouw_wijzigingen(cur, curatie: dict) -> None:
             else:
                 uit = cureer(ruw_label(pad.split(" > "))) if pad else None
                 cat, sub = uit if uit else (None, None)
+                sub = verfijn(cat, sub, pad.split(" > ") if pad else [], art_op)
                 bron_cat = "renvooi" if uit else None
 
         tb = bepaal_type(art_op)
@@ -616,6 +639,7 @@ def main(ddl: bool, alleen_type: bool, alleen_wijzigingen: bool,
         else:
             uit = cureer(ruw_label(pad.split(" > ")))
             cat, sub = uit if uit else (None, None)
+            sub = verfijn(cat, sub, pad.split(" > "), art_op)
             bron_cat = "regels" if uit else None
         tb = bepaal_type(art_op)
         herkomst = ("beide" if cat and tb else
