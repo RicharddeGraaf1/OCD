@@ -257,3 +257,40 @@ VANGNET = {
     ("planologisch gebruik", "gebiedstypen en functies"),
 }
 VANGNET_CATEGORIE = {"procedures"}
+
+
+# ── Wro: bestemmingshoofdgroep -> (categorie, subcategorie) ────────────────────
+# De IMRO-waardelijst bestemmingshoofdgroep is de Wro-tegenhanger van het
+# IMOW-thema: een vaste, door de bronhouder gekozen indeling per bestemmingsvlak.
+# Een Wro-artikel krijgt de hoofdgroep van de bestemmingsvlakken waaraan het
+# gekoppeld is (wro.wro_tekst_link); zijn leden erven die. "waarde", "overig" en
+# een lege hoofdgroep zeggen niets over het onderwerp: dan beslist de naam van de
+# bestemming via REGELS hierboven (Waarde - Archeologie -> erfgoed).
+# Opgesteld 2026-10-23 (agent, nacht-opdracht "Wro gaan doen"); oordelen, geen
+# metingen — net als de rest van dit bestand.
+WRO_HOOFDGROEP = {
+    "wonen":                  ("wonen", "wonen"),
+    "woongebied":             ("wonen", "wonen"),
+    "tuin":                   ("wonen", "tuinen en erven"),
+    "bedrijf":                ("economie", "bedrijven"),
+    "bedrijventerrein":       ("economie", "bedrijven"),
+    "detailhandel":           ("economie", "detailhandel"),
+    "horeca":                 ("economie", "horeca"),
+    "kantoor":                ("economie", "kantoren en dienstverlening"),
+    "dienstverlening":        ("economie", "kantoren en dienstverlening"),
+    "centrum":                ("planologisch gebruik", "gemengde functies"),
+    "gemengd":                ("planologisch gebruik", "gemengde functies"),
+    "maatschappelijk":        ("planologisch gebruik", "maatschappelijke voorzieningen"),
+    "cultuur en ontspanning": ("recreatie", "sport en recreatie"),
+    "recreatie":              ("recreatie", "sport en recreatie"),
+    "sport":                  ("recreatie", "sport en recreatie"),
+    "agrarisch":              ("landbouw", "agrarisch gebruik"),
+    "agrarisch met waarden":  ("landbouw", "agrarisch gebruik"),
+    "groen":                  ("natuur", "groen en beplanting"),
+    "bos":                    ("natuur", "bomen en houtopstanden"),
+    "natuur":                 ("natuur", "natuurgebieden"),
+    "verkeer":                ("infrastructuur", "wegen en spoorwegen"),
+    "water":                  ("water", "watersysteem en waterkeringen"),
+    "waterstaat":             ("water", "watersysteem en waterkeringen"),
+    "leiding":                ("infrastructuur", "kabels en leidingen"),
+}

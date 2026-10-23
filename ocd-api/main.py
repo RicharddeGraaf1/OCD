@@ -3582,6 +3582,89 @@ def viewer_filter_options():
 _LAAG_ORDER = {'gemeente': 0, 'provincie': 1, 'waterschap': 2, 'rijk': 3}
 
 
+# ── Wro-planteksten v2 (2026-10-23) ──────────────────────────────────────────
+# `wro.wro_tekst_object` is onvolledig: de oude loader stopte na 100 teksten per
+# plan en gooide teksten weg waarvan de (per plan unieke) id al in een ander plan
+# voorkwam. `dso-loader/scripts/laad_wro_teksten_v2.py` laadt ze opnieuw in
+# `wro.wro_tekst_object_v2`, met de koppeling tekst -> planobject in
+# `wro.wro_tekst_link`. Zie OCD docs/wro-teksten-herstel-plan.md.
+#
+# Per plan: staat het in `wro.wro_tekst_laadstand` zonder fout, dan geldt v2,
+# anders de oude tabel. Bestaat v2 op een omgeving niet, dan blijft alles zoals
+# het was — daarom elke keer de to_regclass-check, net als _conv_aanwezig.
+
+def _wro_v2_aanwezig(cur) -> bool:
+    cur.execute("SELECT to_regclass('wro.wro_tekst_laadstand') IS NOT NULL AS aanwezig")
+    return bool(cur.fetchone()["aanwezig"])
+
+
+def _wro_v2_geladen(cur, idn: str) -> bool:
+    if not _wro_v2_aanwezig(cur):
+        return False
+    cur.execute("SELECT 1 FROM wro.wro_tekst_laadstand WHERE instrument_idn = %s AND fout IS NULL", (idn,))
+    return cur.fetchone() is not None
+
+
+def _wro_teksten_op_punt(cur, idn: str, x: float, y: float) -> list[dict]:
+    """De teksten van één Wro-plan die op (x, y) gelden, uit v2.
+
+    Een tekst geldt hier als hij — of een bovenliggende tekst — gekoppeld is aan
+    een planobject (bestemmingsvlak, aanduiding, maatvoering, figuur) dat het punt
+    raakt. Teksten zonder enige koppeling in hun hele tak gelden planbreed
+    (begrippen, wijze van meten, algemene regels, overgangsrecht) en gaan altijd
+    mee. Teksten die alleen aan planobjecten elders hangen, vallen weg: dat is het
+    verschil met vroeger, toen elk artikel van het plan meekwam.
+    """
+    cur.execute(
+        """SELECT identificatie, parent_id, volgnummer, label, nummer, naam, inhoud
+           FROM wro.wro_tekst_object_v2 WHERE instrument_idn = %s ORDER BY volgnummer""",
+        (idn,))
+    teksten = cur.fetchall()
+    cur.execute("SELECT DISTINCT tekst_id FROM wro.wro_tekst_link WHERE instrument_idn = %s", (idn,))
+    gekoppeld = {r["tekst_id"] for r in cur.fetchall()}
+    cur.execute(
+        """SELECT DISTINCT l.tekst_id
+           FROM wro.planobject po
+           JOIN wro.wro_tekst_link l ON l.instrument_idn = po.instrument_idn
+                                    AND l.planobject_id = po.identificatie
+           WHERE po.instrument_idn = %(idn)s
+             AND ST_Intersects(po.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))""",
+        {"idn": idn, "x": x, "y": y})
+    hier = {r["tekst_id"] for r in cur.fetchall()}
+
+    ouder = {t["identificatie"]: t["parent_id"] for t in teksten}
+
+    def keten(tid):
+        gezien = set()
+        while tid and tid not in gezien:
+            gezien.add(tid)
+            yield tid
+            tid = ouder.get(tid)
+
+    # een tak met ergens een koppeling: de tekst zelf, een voorouder of een afstammeling
+    tak_gekoppeld = set()
+    for tid in gekoppeld:
+        tak_gekoppeld.update(keten(tid))
+    # Een artikel onder "Bestemmingsregels" hoort per definitie bij een bestemming.
+    # Is het nergens gekoppeld (HTML-plannen: naam onvindbaar; of een bestemming die
+    # in OCD geen vlak heeft), dan geldt het NIET planbreed — anders verscheen bij
+    # Earnewâld 2013 "Agrarisch - Cultuurgrond" op elk woonperceel.
+    label = {t["identificatie"]: (t["label"] or "") for t in teksten}
+    bestemmingshoofdstuk = {tid for tid, lb in label.items()
+                            if re.match(r"\s*(hoofdstuk\s+\d+[a-z]?\.?\s*)?bestemmingsregels\b", lb, re.I)}
+    uit = []
+    for t in teksten:
+        tid = t["identificatie"]
+        voorouders = set(keten(tid))
+        if voorouders & hier:
+            uit.append(t)
+        elif voorouders & bestemmingshoofdstuk and tid not in bestemmingshoofdstuk:
+            continue
+        elif not (voorouders & gekoppeld) and tid not in tak_gekoppeld:
+            uit.append(t)
+    return uit
+
+
 # Onderwerp x soort bepaling over álle regels op één punt, per document.
 @app.get("/v1/viewer/regelmix", dependencies=[Depends(verify_key)])
 def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
@@ -3669,7 +3752,44 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
                     if d["bron_id"] not in met_regels]
 
         # Wro: aantal tekst-objecten per actief plan, dedupliceren op naam
-        # (nieuwste datum) — net als viewer_regelingen.
+        # (nieuwste datum) — net als viewer_regelingen. Staat een plan in v2
+        # (zie _wro_teksten_op_punt), dan telt v2: daar ontbreken geen teksten
+        # meer, en een plan dat in de oude tabel leeg was verschijnt nu wél.
+        wro_sql_v2 = """
+            WITH plannen AS (
+                SELECT ri.idn, ri.naam, ri.type_plan, ri.datum, b.bestuurslaag
+                FROM wro.ruimtelijk_instrument ri
+                JOIN core.bronhouder b ON b.overheidscode = ri.bronhouder
+                WHERE ST_Intersects(ri.geometrie, ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 28992))
+                  AND ri.pons_status = 'actief'
+            ), per_plan AS (
+                SELECT p.*,
+                       CASE WHEN ls.instrument_idn IS NOT NULL THEN
+                            (SELECT count(*) FROM wro.wro_tekst_object_v2 v
+                             WHERE v.instrument_idn = p.idn AND length(v.inhoud) > 20)
+                       ELSE (SELECT count(*) FROM wro.wro_tekst_object wt
+                             WHERE wt.instrument_idn = p.idn AND length(wt.inhoud) > 20)
+                       END AS aantal
+                FROM plannen p
+                LEFT JOIN wro.wro_tekst_laadstand ls ON ls.instrument_idn = p.idn AND ls.fout IS NULL
+            )
+            SELECT DISTINCT ON (naam)
+                idn AS bron_id, naam AS regeling, type_plan AS documenttype,
+                bestuurslaag, aantal, 'regel'::text AS via
+            FROM per_plan
+            WHERE aantal > 0
+            ORDER BY naam, datum DESC NULLS LAST
+            """
+        if _wro_v2_aanwezig(cur):
+            cur.execute(wro_sql_v2, {"x": x, "y": y})
+            wro_docs = [dict(d, bron_type='wro') for d in cur.fetchall()]
+            documenten = ow_docs + wro_docs
+            documenten.sort(key=lambda d: (
+                0 if d['via'] == 'regel' else 1,
+                _LAAG_ORDER.get(d['bestuurslaag'] or '', 4),
+                d['regeling'] or '',
+            ))
+            return {"locatie": {"x": x, "y": y}, "documenten": documenten}
         cur.execute(
             """
             WITH per_plan AS (
@@ -3830,6 +3950,32 @@ def viewer_regelmix_document(
     instrumenten (zie `_REGELMIX_BASE_VIA_GEBIED`).
     """
     with get_conn() as conn, conn.cursor() as cur:
+        if bron_type == 'wro' and _wro_v2_geladen(cur, bron):
+            # v2: alleen wat op dit punt geldt (zie _wro_teksten_op_punt). Met de
+            # onderwerp-indeling uit v2a.wro_artikel_indeling (dso-loader
+            # bouw_wro_indeling.py) als die er is: zelfde categorieën als de
+            # Ow-indeling, zodat de frontend Wro op dezelfde tegels kan leggen.
+            indeling = {}
+            cur.execute("SELECT to_regclass('v2a.wro_artikel_indeling') IS NOT NULL AS aanwezig")
+            if cur.fetchone()["aanwezig"]:
+                cur.execute("""SELECT tekst_id, categorie, subcategorie FROM v2a.wro_artikel_indeling
+                               WHERE instrument_idn = %s""", (bron,))
+                indeling = {r["tekst_id"]: (r["categorie"], r["subcategorie"]) for r in cur.fetchall()}
+            rows = [{
+                "tekst_id": t["identificatie"],
+                "categorie": indeling.get(t["identificatie"], (None, None))[0],
+                "subcategorie": indeling.get(t["identificatie"], (None, None))[1],
+                "bron_type": "wro", "bron_id": bron,
+                "activiteit_naam": None, "activiteit_id": None,
+                "artikel": t["label"] or t["naam"] or ("Artikel " + t["nummer"] if t["nummer"] else None),
+                "wid": None,
+                "inhoud": t["inhoud"],
+                "artikel_nummer": t["nummer"],
+                "artikel_opschrift": t["label"] or t["naam"],
+                "hoofdstuk_nummer": None, "lid_nummer": None,
+            } for t in _wro_teksten_op_punt(cur, bron, x, y)
+                if t["inhoud"] and len(t["inhoud"]) > 20]
+            return {"regelmix": rows, "inactief": False}
         if bron_type == 'wro':
             cur.execute(
                 """
@@ -5246,15 +5392,17 @@ def viewer_wro_detail(
             for row in cur.fetchall()
         ]
 
-        # Teksten
+        # Teksten — uit v2 als het plan daar volledig geladen is (zie
+        # _wro_teksten_op_punt); de oude tabel mist er vaak de meeste van.
         cur.execute(
             """
             SELECT wt.naam, wt.label, wt.nummer, wt.inhoud,
                    wt.object_type, wt.niveau
-            FROM wro.wro_tekst_object wt
+            FROM {tabel} wt
             WHERE wt.instrument_idn = %s
             ORDER BY wt.volgnummer
-            """,
+            """.format(tabel="wro.wro_tekst_object_v2" if _wro_v2_geladen(cur, idn)
+                       else "wro.wro_tekst_object"),
             (idn,),
         )
         teksten = cur.fetchall()
