@@ -66,14 +66,28 @@ REGELS = [
     (r"telen|kweken|gewas|glastuinbouw",  "landbouw", "teelt en tuinbouw"),
 
     # -- water ----------------------------------------------------------------
+    # "beperkingengebied" stond tot 2026-10-23 in de waterregel hieronder en ving
+    # zo ook de beperkingengebieden van wegen, spoor en luchthavens (Overijssel
+    # 7.12-7.18 stond onder water). Nu alleen met een waterwoord erbij.
+    (r"beperkingengebied.*(\bweg|wegen|spoor)|(\bweg|wegen|spoor).*beperkingengebied",
+                                         "infrastructuur", "wegen en spoorwegen"),
+    # "lucht" (luchtkwaliteit) ving ook "luchthaven" (2026-10-23).
+    (r"luchthaven|vliegveld|luchtvaart|vliegveilig",
+                                         "infrastructuur", "luchtvaart"),
+    (r"beperkingengebied.*(water|kering)|(water|kering).*beperkingengebied",
+                                         "water",    "watersysteem en waterkeringen"),
     (r"afvalwater",                      "water",    "afvalwater"),
     (r"lozen|lozing",                    "water",    "lozen"),
     (r"grondwater ?ont|wateronttrekking|onttrekk",
                                          "water",    "grondwateronttrekking"),
     (r"grondwaterbescherming|grondwaterverontreiniging|boringsvrije",
                                          "water",    "grondwaterbescherming"),
-    (r"oppervlaktewater|waterstaatswerk|waterkering|beperkingengebied",
+    (r"oppervlaktewater|waterstaatswerk|waterkering",
                                          "water",    "watersysteem en waterkeringen"),
+    # Toegevoegd 2026-10-23 (RoM-benchmark): omgevingswaarden voor wateroverlast en
+    # overstromingskans vielen op "water algemeen" of nergens op.
+    (r"wateroverlast|overstroming|hoogwater|inundatie|waterveiligheid",
+                                         "water",    "wateroverlast en waterveiligheid"),
     (r"\bwater\b",                       "water",    "water algemeen"),
 
     # -- bodem ----------------------------------------------------------------
@@ -91,7 +105,7 @@ REGELS = [
     (r"wassen van motorvoertuig|autowas", "milieu",  "wassen van voertuigen"),
     (r"acculader|accu",                  "milieu",   "acculaders"),
     (r"fotografisch",                    "milieu",   "fotografische bewerking"),
-    (r"metaal|lassen|solderen|galvani",  "milieu",   "metaalbewerking"),
+    (r"metaal|\blassen|solderen|galvani",    "milieu",   "metaalbewerking"),  # \b: "plassen" is geen lassen (2026-10-23)
     (r"tanken|brandstof|lpg|propaan",    "milieu",   "tanken en brandstoffen"),
     (r"zwerfafval|afvalstof|\bafval\b",  "milieu",   "afval"),
     (r"stookinstallatie|verbranding|rookgas",
@@ -120,7 +134,7 @@ REGELS = [
     # -- erfgoed, natuur, landschap ------------------------------------------
     (r"erfgoed|monument|archeolog|stads- en dorpsgezicht",
                                          "erfgoed",  "cultureel erfgoed"),
-    (r"natuur|flora|fauna|soortenbescherming|houtopstand|kappen|bomen",
+    (r"natuur|natura 2000|vogelrichtlijn|habitatrichtlijn|flora|fauna|soortenbescherming|houtopstand|kappen|bomen",
                                          "natuur",   "natuur en bomen"),
     (r"beplanting|groen|park\b",         "natuur",   "groen en beplanting"),
     (r"landschap|kernkwaliteit|openheid", "landschap", "landschap"),
@@ -222,9 +236,24 @@ VERFIJNING = {
                                               "bomen en houtopstanden"),
             (r"flora|fauna|soortenbescherming|\bwild|ganzen",
                                               "flora en fauna"),
-            (r"natuurnetwerk|natuur netwerk|natura 2000|natuurgebied",
+            (r"natuurnetwerk|natuur netwerk|natura 2000|natuurgebied|vogelrichtlijn|habitatrichtlijn",
                                               "natuurgebieden"),
         ],
         "procedure": [],
     },
 }
+
+
+# Vangnetten: subcategorieën die een regel toekent als er geen specifieker
+# onderwerp is. Bij de terugval (bouw_indeling.terugval: diepere kopjes en het
+# opschrift als het kortste kopje niets opleverde) tellen ze NIET mee — daar
+# moet een tekst een echt onderwerp noemen. Gemeten 2026-10-23: zonder deze
+# uitsluiting zette de terugval o.a. "werken, geen bouwwerken zijnde" en
+# "gebruiksregels voor gronden en bouwwerken" onder bouwen.
+VANGNET = {
+    ("bouwen", "bouwen en verbouwen"),
+    ("water", "water algemeen"),
+    ("milieu", "milieubelastende activiteiten overig"),
+    ("planologisch gebruik", "gebiedstypen en functies"),
+}
+VANGNET_CATEGORIE = {"procedures"}

@@ -411,10 +411,12 @@ def _laad_regels():
         sys.exit(f"VERFIJNING_VOLGORDE onbekend: {volgorde!r}")
     return ([re.compile(p) for p in mod.NIET_INDELEN],
             [(re.compile(p), c, s) for p, c, s in mod.REGELS],
-            mod.CONTAINER, verfijning, volgorde)
+            mod.CONTAINER, verfijning, volgorde,
+            set(getattr(mod, "VANGNET", set())), set(getattr(mod, "VANGNET_CATEGORIE", set())))
 
 
-NIET_RE, REGEL_RE, CONTAINER, VERFIJNING_RE, VERFIJNING_VOLGORDE = _laad_regels()
+(NIET_RE, REGEL_RE, CONTAINER, VERFIJNING_RE, VERFIJNING_VOLGORDE,
+ VANGNET, VANGNET_CATEGORIE) = _laad_regels()
 
 
 def kort(seg: str) -> str:
@@ -450,6 +452,28 @@ def cureer(label: str):
     for rx, cat, sub in REGEL_RE:
         if rx.search(label):
             return (cat, sub)
+    return None
+
+
+def terugval(pad_segs, art_op):
+    """(categorie, subcategorie) als het kortste kopje niets opleverde, of None.
+
+    `ruw_label` kiest het kortste kopje, en zegt dat niets ("omgevingswaarden"),
+    dan bleef het artikel niet ingedeeld — ook als een dieper kopje of het
+    opschrift het onderwerp wél noemt ("omgevingswaarden wateroverlast regionale
+    wateren"). Toegevoegd 2026-10-23. Dezelfde regels, alleen meer bewijs:
+    de bruikbare kopjes van diep naar ondiep (geen boekdeel-containers), dan het
+    opschrift. Begripsbepalingen en andere bepalingtypes doen niet mee.
+    """
+    kandidaten = [kern(s) for s in reversed(pad_segs or []) if bruikbaar(s) and kern(s) not in CONTAINER]
+    if art_op and bruikbaar(art_op):
+        kandidaten.append(kern(art_op))
+    for tekst in kandidaten:
+        uit = cureer(tekst)
+        # Een vangnet (bouwen en verbouwen, water algemeen, procedures, ...) is
+        # hier geen onderwerp: zoek door naar een tekst die er echt een noemt.
+        if uit and uit not in VANGNET and uit[0] not in VANGNET_CATEGORIE:
+            return uit
     return None
 
 
@@ -576,9 +600,11 @@ def bouw_wijzigingen(cur, curatie: dict) -> None:
             if pc:
                 cat, sub, bron_cat = pc["categorie"], pc["subcategorie"], "renvooi"
             else:
-                uit = cureer(ruw_label(pad.split(" > "))) if pad else None
+                segs = pad.split(" > ") if pad else []
+                uit = cureer(ruw_label(segs)) if pad else None
+                uit = uit or terugval(segs, art_op)
                 cat, sub = uit if uit else (None, None)
-                sub = verfijn(cat, sub, pad.split(" > ") if pad else [], art_op)
+                sub = verfijn(cat, sub, segs, art_op)
                 bron_cat = "renvooi" if uit else None
 
         tb = bepaal_type(art_op)
@@ -645,10 +671,14 @@ def main(ddl: bool, alleen_type: bool, alleen_wijzigingen: bool,
         if hit:
             cat, sub, bron_cat = hit["categorie"], hit["subcategorie"], "pad-curatie"
         else:
-            uit = cureer(ruw_label(pad.split(" > ")))
-            cat, sub = uit if uit else (None, None)
-            sub = verfijn(cat, sub, pad.split(" > "), art_op)
+            segs = pad.split(" > ")
+            uit = cureer(ruw_label(segs))
             bron_cat = "regels" if uit else None
+            if not uit:
+                uit = terugval(segs, art_op)
+                bron_cat = "terugval" if uit else None
+            cat, sub = uit if uit else (None, None)
+            sub = verfijn(cat, sub, segs, art_op)
         tb = bepaal_type(art_op)
         herkomst = ("beide" if cat and tb else
                     bron_cat if cat else
