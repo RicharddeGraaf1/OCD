@@ -83,6 +83,9 @@ def vingerafdruk() -> str:
     import hashlib
     h = hashlib.sha256()
     h.update(CURATIE_VERSIE.encode())
+    # Een env-override van de volgorde verandert de uitkomst zonder dat een
+    # bestand verandert; zonder deze regel zou de volgende run "ongewijzigd" zien.
+    h.update(os.environ.get("VERFIJNING_VOLGORDE", "").encode())
     for pad in (os.path.abspath(__file__),
                 os.path.join(HIER, "..", "curatie", "subcategorie_regels.py"),
                 os.path.abspath(XLSX)):
@@ -403,12 +406,15 @@ def _laad_regels():
     verfijning = {sleutel: {stap: [(re.compile(p), fijn) for p, fijn in regels]
                             for stap, regels in stappen.items()}
                   for sleutel, stappen in getattr(mod, "VERFIJNING", {}).items()}
+    volgorde = os.environ.get("VERFIJNING_VOLGORDE") or getattr(mod, "VERFIJNING_VOLGORDE", "kopje-eerst")
+    if volgorde not in ("kopje-eerst", "opschrift-eerst"):
+        sys.exit(f"VERFIJNING_VOLGORDE onbekend: {volgorde!r}")
     return ([re.compile(p) for p in mod.NIET_INDELEN],
             [(re.compile(p), c, s) for p, c, s in mod.REGELS],
-            mod.CONTAINER, verfijning)
+            mod.CONTAINER, verfijning, volgorde)
 
 
-NIET_RE, REGEL_RE, CONTAINER, VERFIJNING_RE = _laad_regels()
+NIET_RE, REGEL_RE, CONTAINER, VERFIJNING_RE, VERFIJNING_VOLGORDE = _laad_regels()
 
 
 def kort(seg: str) -> str:
@@ -457,7 +463,9 @@ def verfijn(cat, sub, pad_segs, art_op):
     stappen = VERFIJNING_RE.get((cat, sub))
     if not stappen:
         return sub
-    teksten = [kern(s) for s in reversed(pad_segs or []) if s] + [kern(art_op or "")]
+    kopjes = [kern(s) for s in reversed(pad_segs or []) if s]
+    teksten = ([kern(art_op or "")] + kopjes if VERFIJNING_VOLGORDE == "opschrift-eerst"
+               else kopjes + [kern(art_op or "")])
     for stap in ("onderwerp", "procedure"):
         for tekst in teksten:
             for rx, fijn in stappen.get(stap, []):
