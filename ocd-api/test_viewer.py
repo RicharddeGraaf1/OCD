@@ -558,6 +558,50 @@ class TestWroDetail:
 
 
 # ══════════════════════════════════════════════════════════
+# Wro-planteksten v2: per punt (docs/wro-teksten-herstel-plan.md)
+# ══════════════════════════════════════════════════════════
+
+class TestWroV2OpPunt:
+    """Hilversum Binnenstad 2013 op 's-Gravelandseweg 9 (RoM-benchmark vraag 8):
+    bestemming Dienstverlening, artikel 11. Alleen als dat plan lokaal in v2 staat."""
+    IDN = "NL.IMRO.0402.11bp00binnenstad-va01"
+    X, Y = 140261, 470759
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('wro.wro_tekst_laadstand') IS NOT NULL AS aanwezig")
+            if not cur.fetchone()["aanwezig"]:
+                pytest.skip("geen v2-tabellen op deze database")
+            cur.execute("SELECT 1 FROM wro.wro_tekst_laadstand WHERE instrument_idn = %s AND fout IS NULL",
+                        (self.IDN,))
+            if cur.fetchone() is None:
+                pytest.skip("plan niet in v2 geladen")
+
+    def _rijen(self):
+        r = client.get(f"/v1/viewer/regelmix/document?x={self.X}&y={self.Y}&bron={self.IDN}&bron_type=wro")
+        assert r.status_code == 200
+        return r.json()["regelmix"]
+
+    def test_artikel_van_de_bestemming_op_het_punt(self):
+        nummers = {x["artikel_nummer"] for x in self._rijen()}
+        assert "11.1" in nummers, "artikel 11 (Dienstverlening) hoort bij dit punt"
+
+    def test_geen_artikelen_van_bestemmingen_elders(self):
+        # artikel 3 (Bedrijf) ligt niet op dit punt
+        nummers = {x["artikel_nummer"] for x in self._rijen()}
+        assert "3.1" not in nummers
+
+    def test_planbrede_regels_gaan_mee(self):
+        nummers = {x["artikel_nummer"] for x in self._rijen()}
+        assert any(n and n.startswith("1.") for n in nummers), "begrippen gelden planbreed"
+
+    def test_rijen_dragen_onderwerp_als_indeling_er_is(self):
+        rijen = self._rijen()
+        assert all("categorie" in x for x in rijen)
+
+
+# ══════════════════════════════════════════════════════════
 # /v1/viewer/conv/{expression}/boom
 # ══════════════════════════════════════════════════════════
 
