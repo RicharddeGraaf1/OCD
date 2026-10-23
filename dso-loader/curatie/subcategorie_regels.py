@@ -160,3 +160,60 @@ REGELS = [
     (r"instructieregel",                 "procedures", "instructieregels"),
     (r"procedure|beoordelingsregel",     "procedures", "procedures"),
 ]
+
+
+# ── Verfijning: een specifieker subonderwerp binnen een te brede bak ─────────
+# Aanleiding: RoM-benchmark 2026-10-23. Onder bouwen > "bouwen en verbouwen"
+# stonden landelijk 14.130 artikelen (gemiddeld 34 per regeling); bij Does 30
+# Utrecht stond de dakkapelregel tussen 60 artikelen. Het label hierboven komt
+# uit het KORTSTE kopje (`ruw_label`), dus een fijnere regel daar ziet de
+# kopjes "Hoofdgebouwen algemeen" of "Dakterrassen" nooit. Daarom een tweede
+# stap, alleen binnen de bakken hieronder: zoek het onderwerp in de diepere
+# kopjes en het artikelopschrift. Categorie verandert niet; past er niets,
+# dan blijft de oude subcategorie staan (de restbak).
+#
+# Volgorde van bewijs (bouw_indeling.verfijn):
+#   1. ONDERWERP-regels over de kopjes, diepste eerst, daarna het opschrift
+#   2. PROCEDURE-regels over diezelfde reeks
+# Zo wint "Mantelzorg" (opschrift) van "binnenplanse vergunningplicht" (kopje
+# erboven, bruidsschat). Binnen één tekst wint de eerste treffer.
+#
+# Onderbouwing: de diepste kopjes en opschriften in v2a.pad_categorie /
+# artikel_indeling op 2026-10-23 (lokale DB). Oordelen, geen metingen — net als
+# de regels hierboven.
+VERFIJNING = {
+    ("bouwen", "bouwen en verbouwen"): {
+        "onderwerp": [
+            (r"dakkapel|dakopbouw|dakterras|extra bouwlaag|bijzondere bouwla|optopping|\bkap\b",
+                                              "dakkapellen, dakopbouwen en dakterrassen"),
+            (r"bijbehorend|bijgebouw|aanbouw|uitbouw|overkapping|mantelzorg|tuinhuis",
+                                              "bijbehorende bouwwerken"),
+            (r"geen gebouw|erfafscheiding|perceelafscheiding|zwembad|vlaggenmast|antenne|speeltoestel",
+                                              "bouwwerken, geen gebouwen"),
+            (r"woonboot|woonboten|woonark|woonschip|woonschepen|woonwagen|ligplaats",
+                                              "woonschepen, woonarken en woonwagens"),
+            (r"bodemgevoelig|grondwatergevoelig|geluidgevoelig|geluidsgevoelig",
+                                              "gevoelige gebouwen"),
+            (r"distributienet|afvalwater|hemelwater|terreinleiding|perceelaansluiting|bluswater"
+             r"|hulpverlening|brandweer",     "aansluitingen, bluswater en bereikbaarheid"),
+            (r"welstand|uiterlijk",           "welstand"),
+            (r"hoofdgebouw|bedrijfswoning",   "hoofdgebouwen"),
+        ],
+        "procedure": [
+            (r"vergunningplicht|vergunningvrij|binnenplanse vergunning|omgevingsvergunning|aanvraagvereisten"
+             r"|beoordelingsregel|van rechtswege",
+                                              "vergunningen voor bouwen"),
+        ],
+    },
+    ("natuur", "natuur en bomen"): {
+        "onderwerp": [
+            (r"houtopstand|\bbomen\b|\bboom\b|kappen|vellen|beplanting",
+                                              "bomen en houtopstanden"),
+            (r"flora|fauna|soortenbescherming|\bwild|ganzen",
+                                              "flora en fauna"),
+            (r"natuurnetwerk|natuur netwerk|natura 2000|natuurgebied",
+                                              "natuurgebieden"),
+        ],
+        "procedure": [],
+    },
+}
