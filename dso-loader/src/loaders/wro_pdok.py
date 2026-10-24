@@ -488,8 +488,11 @@ def load_wro_structuurvisies(niveaus: list[str] | None = None,
         conn.close()
 
 
-def load_wro_plans(cbs_codes: dict[str, str] | None = None):
-    """Load Wro plans. If cbs_codes given, load for all; else PoC only."""
+def load_wro_plans(cbs_codes: dict[str, str] | None = None, met_teksten: bool = True):
+    """Load Wro plans. If cbs_codes given, load for all; else PoC only.
+
+    met_teksten=False: alleen plannen en planobjecten; de teksten laadt de aanroeper
+    (pipeline/wro.py doet dat zelf, zodat --no-teksten ook echt geen teksten laadt)."""
     conn = get_conn()
     try:
         n_plans = _load_bestemmingsplangebied(conn, cbs_codes)
@@ -511,10 +514,10 @@ def load_wro_plans(cbs_codes: dict[str, str] | None = None):
         ]:
             _load_planobjecten(conn, feature, obj_type, code_set)
 
-        # Step 3: Load planteksten via IHR API
-        from src.loaders.ihr_loader import load_wro_teksten
-        code_list = list(cbs_codes.keys()) if cbs_codes else None
-        load_wro_teksten(code_list)
+        # Step 3: planteksten via de v2-keten (sinds 2026-10-24; zie wro_teksten_keten.py)
+        if met_teksten:
+            from src.loaders.wro_teksten_keten import laad
+            laad(bronhouders=list(cbs_codes.keys()) if cbs_codes else [cfg.POC_CBS_CODE])
 
         console.print("[bold green]Wro loading complete![/bold green]")
     finally:

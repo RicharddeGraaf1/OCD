@@ -1390,6 +1390,45 @@ Het bakken en deployen van de site zit **niet** in deze stap maar in stap 8:
 `publish.py` doet de export, de twee verrijkers en `./deploy.sh`, met
 `harvest/stand.py` als poort ervoor.
 
+### Stap 6e — Wro-planteksten (v2) *(sinds 2026-10-24)*
+
+Wro zit niet in `full_sync.py` (zie de kop van dat script). Worden er Wro-plannen
+geladen — `pipeline wro`, `load-wro`, `load-wro-imro2006` of `load-wro-teksten` — dan
+lopen de teksten sinds 2026-10-24 via **één keten**,
+`src/loaders/wro_teksten_keten.py`:
+
+1. `laad_wro_teksten_v2.py`: IHR-teksten plus de koppeling tekst → planobject. Plannen
+   die al zonder fout geladen zijn worden overgeslagen. Een plan-idn verandert per
+   versie, dus nieuw is nieuw.
+2. `laad_wro_regels_html.py --alle`: plannen zonder objectgerichte teksten krijgen het
+   HTML-regelsdocument. Wat al geprobeerd is, wordt niet nog eens geprobeerd.
+3. `bouw_wro_indeling.py --sinds <start>`: de onderwerp-indeling, alleen voor wat in 1
+   en 2 geladen is.
+
+De oude `ihr_loader.load_wro_teksten` delegeert naar deze keten. De oude implementatie
+(`load_wro_teksten_v1`) schreef naar `wro.wro_tekst_object`; die tabel is bevroren en
+de API leest hem alleen nog voor plannen die niet in v2 staan.
+
+Losse aanroep, bijvoorbeeld na een PDOK-herparse:
+
+```bash
+python -m src.cli load-wro-teksten -g 0402,0014    # bronhouders; zonder -g: alle plannen
+```
+
+**Naar productie** gaat apart, per plan idempotent. Het script schat de omvang en
+weigert boven `--max-mb`:
+
+```bash
+python scripts/wro_v2_naar_productie.py --bronhouder gm0402,gm0014          # droogloop
+python scripts/wro_v2_naar_productie.py --bronhouder gm0402,gm0014 --ja
+```
+
+Bij veel plannen eerst de vrije ruimte op het Railway-volume controleren. Volume
+vergroten kan alleen in het dashboard; 150 GB sinds 2026-10-24, en de prod-DB stond
+toen op 84 GB. Draai na een grote overzet `ANALYZE` op `wro.wro_tekst_object_v2`,
+`wro.wro_tekst_link` en `v2a.wro_artikel_indeling`. Dat kost ±20 s; anders kiest de
+planner na de bulklading slechte plannen.
+
 ### Stap 7 — Verificatie
 
 ```bash
@@ -1941,6 +1980,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 | Doorwerkingsmeting (stap 6b) | na elke sync die omgevingsplannen of instructieregels raakte | lokaal, ná stap 6; `match/stand.py` zegt of het moet |
 | `diff_dso_bronhouder_coverage.py` | maandelijks | zwaardere coverage-diff naast de preview |
 | Wro/IMRO2006 (`load-wro-imro2006`) | los, ~24 min | landelijke PDOK-herparse, niet in de sync |
+| Wro-teksten v2 (stap 6e) | na elke Wro-lading | gaat vanzelf mee via `wro_teksten_keten`; daarna `wro_v2_naar_productie.py` (droogloop eerst) |
 | MER-register (stap 6d) | elke sync | harvest (~5 min incrementeel) + `load-mer` lokaal + `load_to_ocd.py` naar prod; site via `publish.py`. Stond hier als "los, seconden" — dat gold alleen voor `load-mer`, waardoor de harvest en de site vijf weken stilstonden |
 | `core.gemeentegrens` | 1×/jaar | gemeente-herindelingen |
 | Vervallen regelingen markeren (stap 2b) | elke sync | droogloop eerst; `markeer_vervallen_regelingen.py` |
