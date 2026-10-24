@@ -13,7 +13,8 @@ Terugdraaien voor een plan: zijn rij in wro.wro_tekst_laadstand op prod verwijde
 LET OP — volume: op 2026-10-23 stond de Railway-volume op 82,2 / 100 GB. Een
 volledige overzet is ~10 GB (gemeten: ~158 KB per plan). Daarom een harde grens:
 --max-mb (standaard 500). Verhoog die pas als de volume groter is gemaakt
-(Railway-dashboard; kan niet via de CLI).
+(Railway-dashboard; kan niet via de CLI). Stand 2026-10-24: volume 150 GB, volledige
+overzet gedaan (48.161 plannen, prod-DB 74 -> 84 GB, 216 min).
 
     python scripts/wro_v2_naar_productie.py --bronhouder gm0402,gm0014         # droogloop
     python scripts/wro_v2_naar_productie.py --bronhouder gm0402,gm0014 --ja

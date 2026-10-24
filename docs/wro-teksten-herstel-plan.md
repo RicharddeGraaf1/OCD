@@ -55,7 +55,7 @@ API lezen hem nog):
 | 3 | API: Wro-teksten per punt — teksten die via `wro_tekst_link` aan een planobject op het punt hangen, plus hun onderliggende leden; de inleidende regels (hoofdstuk 1) erbij. Valt terug op het oude gedrag als een plan nog niet in v2 staat | `ocd-api` | laag (terugval) |
 | 4 | Benchmark lokaal: Wro-vragen op document en artikel | tests | geen |
 | 5 | Onderwerp-indeling voor Wro-artikelen (bestemmingsnaam/artikelkop → categorie met dezelfde regels) + tegels in RoM | `dso-loader`, `ocd-api`, register | middel (frontend) |
-| 6 | Productie | Railway | **hoog: volume 82,2 / 100 GB** |
+| 6 | Productie | Railway | **hoog: volume 82,2 / 100 GB** (vergroot naar 150 GB op 24-10) |
 
 ### Productie: wat wel en wat niet
 
@@ -79,9 +79,9 @@ Vergroten kan alleen in het dashboard. Daarom:
 | 1b | HTML-regels (`laad_wro_regels_html.py`) | **klaar** — Word-export (`<p class=…>`), div/h-pagina's en `_Index.html` (wortelpagina `_0000` als die ≥80% van de artikelen bevat, anders alle onderdeelpagina's ontdubbeld); koppeling via exacte bestemmingsnaam |
 | 2 | Lokaal laden | **loopt / klaar** — zie de tellingen hieronder |
 | 3 | API | **klaar en live** (`f6ec188` op `main`): regelmix telt v2; regelmix/document geeft per punt de teksten van de bestemmingen en aanduidingen op dat punt plus de planbrede regels; artikelen onder *Bestemmingsregels* zonder koppeling vallen weg (ze horen bij een bestemming die hier niet ligt); rijen dragen `categorie`/`subcategorie`; wro-detail leest v2. Zonder v2 voor een plan: oud gedrag. 84 bestaande tests + 4 nieuwe (`TestWroV2OpPunt`) groen |
-| 4 | Benchmark | **klaar** — lokaal én prod (deelset): Doc 33 → **38**/40, Artikel 18 → **20**/22 |
+| 4 | Benchmark | **klaar** — lokaal én prod: Doc 33 → **38**/40, Artikel 18 → **20**/22; Wro-vragen 5, 7–9, 11–14, 39 op prod gelijk aan lokaal (24-10, 11:32) |
 | 5 | Wro-onderwerp-indeling | **data + API klaar** (`bouw_wro_indeling.py`, `WRO_HOOFDGROEP`); **frontend klaar maar niet live**: branch `wro-onderwerpen` in het register (`1eab69a`, niet gepusht) |
-| 6 | Productie | **deelset live**: 852 plannen van gm0402, gm0014, gm0737, gm0307, gm0344 en pv25 (~222 MB, planobject-id's 200/200 gelijk). **De rest wacht op een grotere volume** |
+| 6 | Productie | **volledig live** (24-10, 07:55–11:31): volume eerst 100 → 150 GB (dashboard), daarna `--alle --max-mb 12000 --ja`: 48.161 plannen, 7.820.415 teksten, gelijk aan lokaal; 216 min; prod-DB 74 → 84 GB; ANALYZE op de vier tabellen. Eerder die nacht: deelset van 852 plannen |
 
 ### Gemeten — eindstand lokaal (24-10, 02:30)
 
@@ -119,8 +119,11 @@ Vergroten kan alleen in het dashboard. Daarom:
 
 ### Openstaand
 
-1. **Volume vergroten** (Railway-dashboard, alleen door de gebruiker), daarna
-   `python scripts/wro_v2_naar_productie.py --alle --max-mb 12000 --ja`.
+1. ~~Volume vergroten en volledige overzet~~ — gedaan 24-10. Bij een volgende Wro-sync per
+   bronhouder of plan opnieuw `wro_v2_naar_productie.py` (idempotent per plan).
+   Kanttekening: ~0,7% van de koppelingen (steekproef 2000) wijst naar een bestemmingsvlak dat
+   lokaal én op prod ontbreekt in `wro.planobject`; die tekst komt dan niet per punt. Een
+   laadgat in de planobjecten, niet in de overzet.
 2. **Frontend**: branch `wro-onderwerpen` bekijken en mergen. Ontwerpvraag: tellen
    Wro-artikelen mee in de tegels bovenaan, of alleen als chips per Wro-document?
 3. **Sync**: de runbook-stap voor Wro-teksten moet `laad_wro_teksten_v2.py` (+ HTML +
