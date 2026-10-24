@@ -3605,6 +3605,13 @@ def _wro_v2_geladen(cur, idn: str) -> bool:
     return cur.fetchone() is not None
 
 
+# De toelichting (en de bijlagen daarbij) is geen regel. IHR levert ze in dezelfde
+# lijst als de regels (NL.IMRO.PT.toelichting.*, ...bijlagenBijToelichting.*); voor
+# "welke regels gelden hier" en de telling in de regelmix vallen ze weg. Gemeten
+# 2026-10-24: 1,69 mln van 7,82 mln v2-teksten. Bijlagen bij de regels blijven.
+_WRO_GEEN_REGEL = re.compile(r"\.(toelichting|bijlagenbijtoelichting)[._]", re.I)
+
+
 def _wro_teksten_op_punt(cur, idn: str, x: float, y: float) -> list[dict]:
     """De teksten van één Wro-plan die op (x, y) gelden, uit v2.
 
@@ -3619,7 +3626,7 @@ def _wro_teksten_op_punt(cur, idn: str, x: float, y: float) -> list[dict]:
         """SELECT identificatie, parent_id, volgnummer, label, nummer, naam, inhoud
            FROM wro.wro_tekst_object_v2 WHERE instrument_idn = %s ORDER BY volgnummer""",
         (idn,))
-    teksten = cur.fetchall()
+    teksten = [t for t in cur.fetchall() if not _WRO_GEEN_REGEL.search(t["identificatie"])]
     cur.execute("SELECT DISTINCT tekst_id FROM wro.wro_tekst_link WHERE instrument_idn = %s", (idn,))
     gekoppeld = {r["tekst_id"] for r in cur.fetchall()}
     cur.execute(
@@ -3766,7 +3773,8 @@ def viewer_regelmix(x: float = Query(...), y: float = Query(...)):
                 SELECT p.*,
                        CASE WHEN ls.instrument_idn IS NOT NULL THEN
                             (SELECT count(*) FROM wro.wro_tekst_object_v2 v
-                             WHERE v.instrument_idn = p.idn AND length(v.inhoud) > 20)
+                             WHERE v.instrument_idn = p.idn AND length(v.inhoud) > 20
+                               AND v.identificatie !~* '[.](toelichting|bijlagenbijtoelichting)[._]')
                        ELSE (SELECT count(*) FROM wro.wro_tekst_object wt
                              WHERE wt.instrument_idn = p.idn AND length(wt.inhoud) > 20)
                        END AS aantal
