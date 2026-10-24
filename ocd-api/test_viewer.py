@@ -596,6 +596,10 @@ class TestWroV2OpPunt:
         nummers = {x["artikel_nummer"] for x in self._rijen()}
         assert any(n and n.startswith("1.") for n in nummers), "begrippen gelden planbreed"
 
+    def test_geen_toelichting_als_regel(self):
+        # IHR levert regels en toelichting in één lijst; de toelichting is geen regel
+        assert not any(".toelichting." in (x.get("tekst_id") or "").lower() for x in self._rijen())
+
     def test_rijen_dragen_onderwerp_als_indeling_er_is(self):
         rijen = self._rijen()
         assert all("categorie" in x for x in rijen)
