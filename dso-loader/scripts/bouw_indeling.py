@@ -334,20 +334,23 @@ GROUP BY 1, 2
 """
 
 
+# Divisietekst sinds 2026-10-24: programma's en omgevingsvisies (vrijetekst-instrumenten)
+# hebben geen artikelen, alleen divisieteksten onder koppen. Zonder deze uitbreiding waren
+# ze per definitie "niet ingedeeld" (RoM-benchmark 35/36/38: Natuurbeheerplan, visies).
 PAD_SQL = """
 WITH RECURSIVE keten AS (
     SELECT a.id AS art, a.regeling_expression, a.parent_id, a.wid, a.opschrift AS art_op,
-           ARRAY[]::text[] AS ops, 0 AS d
-    FROM p2p.tekst_element a WHERE a.element_type = 'Artikel'{seed_filter}
+           a.element_type AS el_type, ARRAY[]::text[] AS ops, 0 AS d
+    FROM p2p.tekst_element a WHERE a.element_type IN ('Artikel', 'Divisietekst'){seed_filter}
   UNION ALL
-    SELECT k.art, k.regeling_expression, p.parent_id, k.wid, k.art_op,
+    SELECT k.art, k.regeling_expression, p.parent_id, k.wid, k.art_op, k.el_type,
            coalesce(p.opschrift,'') || k.ops, k.d + 1
     FROM keten k JOIN p2p.tekst_element p ON p.id = k.parent_id WHERE k.d < 8
 )
 SELECT k.art, k.regeling_expression, k.wid, k.art_op,
        array_to_string(array_remove(k.ops,''), ' > ') AS pad,
-       r.bronhouder
-FROM (SELECT DISTINCT ON (art) art, regeling_expression, wid, art_op, ops
+       r.bronhouder, r.opschrift AS reg_op, k.el_type
+FROM (SELECT DISTINCT ON (art) art, regeling_expression, wid, art_op, ops, el_type
       FROM keten ORDER BY art, d DESC) k
 JOIN p2p.regeling r ON r.frbr_expression = k.regeling_expression
 WHERE NOT coalesce(r.inactief, false)
@@ -663,7 +666,7 @@ def main(ddl: bool, alleen_type: bool, alleen_wijzigingen: bool,
     print("artikelen inlezen en indelen...", flush=True)
     cur.execute(PAD_SQL.format(seed_filter="" if volledig else INCR_SEED_FILTER))
     rijen, tel = [], Counter()
-    for art, expr, wid, art_op, pad, _bron in cur.fetchall():
+    for art, expr, wid, art_op, pad, _bron, reg_op, el_type in cur.fetchall():
         sleutel = pad_sleutel(pad)
         # Eerst de handmatige koppeling op het exacte pad (die wint altijd),
         # anders de curatieregels op het label uit de keten.
@@ -677,6 +680,12 @@ def main(ddl: bool, alleen_type: bool, alleen_wijzigingen: bool,
             if not uit:
                 uit = terugval(segs, art_op)
                 bron_cat = "terugval" if uit else None
+            # Programma's en visies: zegt geen kopje of opschrift iets, dan de titel van het document
+            # ("Programma Integraal Riviermanagement" -> water). Alleen voor divisieteksten: bij een
+            # omgevingsplan noemt de titel geen onderwerp, en elk artikel zou dezelfde categorie krijgen.
+            if not uit and el_type == "Divisietekst" and reg_op:
+                uit = terugval([], reg_op)
+                bron_cat = "titel" if uit else None
             cat, sub = uit if uit else (None, None)
             sub = verfijn(cat, sub, segs, art_op)
         tb = bepaal_type(art_op)

@@ -86,7 +86,7 @@ REGELS = [
                                          "water",    "watersysteem en waterkeringen"),
     # Toegevoegd 2026-10-23 (RoM-benchmark): omgevingswaarden voor wateroverlast en
     # overstromingskans vielen op "water algemeen" of nergens op.
-    (r"wateroverlast|overstroming|hoogwater|inundatie|waterveiligheid",
+    (r"wateroverlast|overstroming|hoogwater|inundatie|waterveiligheid|\brivier(?:en|management)?\b",
                                          "water",    "wateroverlast en waterveiligheid"),
     (r"\bwater\b",                       "water",    "water algemeen"),
 
@@ -232,6 +232,7 @@ VERFIJNING = {
     },
     ("natuur", "natuur en bomen"): {
         "onderwerp": [
+            (r"subsidie",                     "subsidies natuur en landschap"),
             (r"houtopstand|\bbomen\b|\bboom\b|kappen|vellen|beplanting",
                                               "bomen en houtopstanden"),
             (r"flora|fauna|soortenbescherming|\bwild|ganzen",
