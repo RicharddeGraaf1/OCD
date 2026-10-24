@@ -61,7 +61,7 @@ VINGERAFDRUK = """
     SELECT count(*), count(*) FILTER (WHERE wid IS NULL),
            md5(string_agg(regeling_expression || '|' || coalesce(wid,''),
                           ',' ORDER BY regeling_expression, wid))
-    FROM p2p.tekst_element WHERE element_type = 'Artikel'
+    FROM p2p.tekst_element WHERE element_type IN ('Artikel', 'Divisietekst')
 """
 
 
@@ -206,7 +206,7 @@ def main() -> None:
             SET tekst_element_id = te.id
             FROM p2p.tekst_element te
             WHERE te.regeling_expression = ai.regeling_expression
-              AND te.wid = ai.wid AND te.element_type = 'Artikel'
+              AND te.wid = ai.wid AND te.element_type IN ('Artikel', 'Divisietekst')
         """)
         pconn.commit()
         pc.execute("SELECT count(*) FROM v2a.artikel_indeling_nieuw WHERE tekst_element_id IS NULL")
