@@ -71,4 +71,61 @@ Vergroten kan alleen in het dashboard. Daarom:
 
 ## Stand van uitvoering
 
-*(wordt tijdens de nacht bijgewerkt)*
+*Bijgewerkt in de nacht van 23 op 24 oktober 2026.*
+
+| # | Wat | Stand |
+|---|---|---|
+| 1 | Loader v2 (`laad_wro_teksten_v2.py`) | **klaar** — paginering via `_links.next`, sleutel per plan, koppelingen, hervatbaar, 8 workers / 15 req/s, 0 fouten |
+| 1b | HTML-regels (`laad_wro_regels_html.py`) | **klaar** — Word-export (`<p class=…>`), div/h-pagina's en `_Index.html` (wortelpagina `_0000` als die ≥80% van de artikelen bevat, anders alle onderdeelpagina's ontdubbeld); koppeling via exacte bestemmingsnaam |
+| 2 | Lokaal laden | **loopt / klaar** — zie de tellingen hieronder |
+| 3 | API | **klaar en live** (`f6ec188` op `main`): regelmix telt v2; regelmix/document geeft per punt de teksten van de bestemmingen en aanduidingen op dat punt plus de planbrede regels; artikelen onder *Bestemmingsregels* zonder koppeling vallen weg (ze horen bij een bestemming die hier niet ligt); rijen dragen `categorie`/`subcategorie`; wro-detail leest v2. Zonder v2 voor een plan: oud gedrag. 84 bestaande tests + 4 nieuwe (`TestWroV2OpPunt`) groen |
+| 4 | Benchmark | **klaar** — lokaal én prod (deelset): Doc 33 → **38**/40, Artikel 18 → **20**/22 |
+| 5 | Wro-onderwerp-indeling | **data + API klaar** (`bouw_wro_indeling.py`, `WRO_HOOFDGROEP`); **frontend klaar maar niet live**: branch `wro-onderwerpen` in het register (`1eab69a`, niet gepusht) |
+| 6 | Productie | **deelset live**: 852 plannen van gm0402, gm0014, gm0737, gm0307, gm0344 en pv25 (~222 MB, planobject-id's 200/200 gelijk). **De rest wacht op een grotere volume** |
+
+### Gemeten — eindstand lokaal (24-10, 02:30)
+
+| | Oud (`wro_tekst_object`) | Nieuw (v2) |
+|---|---|---|
+| Teksten | 799.183 | **7.820.415** |
+| Koppelingen tekst → planobject | — | 2.756.931 |
+| Plannen met tekst (niet-ontwerp, 52.219) | — | 48.161 (44.801 IHR, 3.360 HTML) |
+| Plannen zonder tekst | — | 4.058: geen regelsdocument 2.998 (vooral oude "gemeentelijk plan"), alleen pdf 577, structuur niet herkend 416, index zonder herkende onderdelen 67 |
+| Met onderwerp (`wro_artikel_indeling`) | — | 3.739.730 van 7.805.240 tekstdelen (48%; de rest: begrippen, meetregels, algemene regels, toelichting, bijlagen) |
+| Omvang | 771 MB | v2 6,6 GB + links 1,1 GB + indeling 2,1 GB ≈ **9,7 GB** |
+
+- **Juistheid per punt** (80 willekeurige enkelbestemmingsvlakken, punt binnen het vlak):
+  bij alle 79 vlakken met een koppeling komt de tekst van die bestemming mee (74 IHR,
+  5 HTML); 1 vlak heeft geen gekoppelde tekst.
+- Doorlooptijd: IHR-lading 51.262 plannen in 119 min (7,2 plan/s, 0 fouten); HTML
+  2 rondes; indeling 89 min met 8 processen.
+- Bekende zwakte HTML: indexplannen met een eigen paginanaamgeving worden soms maar
+  deels gelezen (Noranjewoud: 5 van ~26 artikelen); bij een plan met al IHR-teksten
+  vervangt HTML die alleen als het minstens twee keer zoveel onderdelen oplevert.
+
+### Gemeten tijdens de bouw
+
+- Hilversum *Binnenstad 2013*: 770 teksten (was 22); op 's-Gravelandseweg 9 234 van de
+  617 tekstdelen met inhoud, waaronder art. 11.1 *Dienstverlening*.
+- Earnewâld 2013 (HTML): 46 artikelen, 151 leden, 183 subleden; art. 29 *Wonen - A1*
+  gekoppeld aan 68 vlakken.
+- Koppelingsdekking (aandeel bestemmingsvlakken met minstens één gekoppelde tekst):
+  IHR-plannen enkelbestemming 96,6%, dubbelbestemming 95,1%; HTML-plannen 83,3% / 91,3%.
+- Plannen zonder objectgerichte teksten: oude "gemeentelijk plan"-plannen hebben geen
+  regelsdocument (niet te halen); van de bestemmingsplannen met een HTML-document lukt
+  het merendeel (herkansing: 554 van 1.029 kandidaten; 89 onleesbaar, 62 index zonder
+  onderdelen, 31 alleen pdf).
+- Omvang: ~158 KB per plan (teksten + koppelingen), volledig ~10 GB met HTML en indeling.
+
+### Openstaand
+
+1. **Volume vergroten** (Railway-dashboard, alleen door de gebruiker), daarna
+   `python scripts/wro_v2_naar_productie.py --alle --max-mb 12000 --ja`.
+2. **Frontend**: branch `wro-onderwerpen` bekijken en mergen. Ontwerpvraag: tellen
+   Wro-artikelen mee in de tegels bovenaan, of alleen als chips per Wro-document?
+3. **Sync**: de runbook-stap voor Wro-teksten moet `laad_wro_teksten_v2.py` (+ HTML +
+   `bouw_wro_indeling.py`) worden; de oude `ihr_loader` schrijft nog naar de oude tabel.
+4. **Vraagroute** (`/v1/regelteksten-bij-vraag`) leest de Wro-teksten nog niet; die
+   endpoint deelt de omgevingsbot, dus niet ongezien aangepast.
+5. **Onderwerp-gaten** in `WRO_HOOFDGROEP`/REGELS: o.a. *Historische buurt*, *Waarde -
+   Stedenbouwkundige karakteristiek* blijven niet ingedeeld.

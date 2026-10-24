@@ -228,8 +228,12 @@ def verwerk(net, conn, idn):
     if re.search(r"_index\.html?$", url, re.I):
         basis = url.rsplit("/", 1)[0] + "/"
         paginas = []
-        for href in re.findall(r"""href\s*=\s*["']([^"'#]+\.html?)""", html, re.I):
-            if re.match(r"r_.*_\d{3,4}", href, re.I) and href not in paginas:
+        # Onderdeelpagina's heten per planprogramma anders (r_<idn>_0005Tuin.html,
+        # r_<idn>_01begrippen.html, r_<idn>_H1.html); soms staan ze in frames (src=).
+        # Alles wat met r_ begint en geen index is; rb_/t_/tb_ (bijlagen, toelichting) niet.
+        for href in re.findall(r"""(?:href|src)\s*=\s*["']([^"'#]+\.html?)""", html, re.I):
+            naam = href.rsplit("/", 1)[-1]
+            if re.match(r"r_", naam, re.I) and not re.search(r"_index\.html?$", naam, re.I)                     and href not in paginas:
                 paginas.append(href)
         if not paginas:
             return None, "index zonder onderdelen"
@@ -258,6 +262,13 @@ def verwerk(net, conn, idn):
     knopen = ontleed(html)
     if not knopen:
         return None, "geen structuur herkend"
+    # Bij plannen waar IHR wél iets gaf (--weinig): alleen vervangen als HTML duidelijk
+    # vollediger is, anders blijft de objectgerichte IHR-versie (met echte koppelingen) staan.
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM wro.wro_tekst_object_v2 WHERE instrument_idn = %s", (idn,))
+        bestaand = cur.fetchone()[0]
+    if bestaand and len(knopen) < 2 * bestaand:
+        return None, "html niet vollediger dan ihr"
 
     with conn.cursor() as cur:
         cur.execute("""SELECT identificatie, naam FROM wro.planobject
@@ -291,7 +302,7 @@ def verwerk(net, conn, idn):
                     for row in {l[:3]: l for l in links}.values():
                         cp.write_row(row)
             cur.execute("""UPDATE wro.wro_tekst_laadstand SET n_teksten = %s, n_links = %s, bron = 'html',
-                                  bron_url = %s, fout = NULL, geladen_op = now()
+                                  bron_url = %s, fout = NULL, html_reden = NULL, geladen_op = now()
                            WHERE instrument_idn = %s""", (len(obj), len(links), url, idn))
     return (len(obj), len(links), len(per_naam)), None
 
@@ -301,6 +312,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--idn")
     ap.add_argument("--alle", action="store_true", help="alle plannen met 0 objectgerichte teksten")
+    ap.add_argument("--weinig", type=int, default=0,
+                    help="ook plannen met minder dan N IHR-teksten (bv. alleen een voorblad)")
     ap.add_argument("--herkansen", action="store_true",
                     help="ook plannen die eerder 'geen structuur herkend' of een fout gaven")
     ap.add_argument("--workers", type=int, default=6)
@@ -317,10 +330,11 @@ def main():
                 plannen = a.idn.split(",")
             else:
                 cur.execute("""SELECT instrument_idn FROM wro.wro_tekst_laadstand
-                               WHERE n_teksten = 0 AND fout IS NULL
+                               WHERE (n_teksten = 0 OR (bron = 'ihr-teksten' AND n_teksten < %s)) AND fout IS NULL
                                  AND (html_reden IS NULL OR (%s AND (html_reden = 'geen structuur herkend'
+                                                                     OR html_reden = 'index zonder onderdelen'
                                                                      OR html_reden LIKE 'fout:%%')))
-                               ORDER BY instrument_idn""", (a.herkansen,))
+                               ORDER BY instrument_idn""", (a.weinig, a.herkansen))
                 plannen = [r[0] for r in cur.fetchall()]
     print(f"{len(plannen)} plannen zonder objectgerichte teksten", flush=True)
     net = Net(a.per_seconde)

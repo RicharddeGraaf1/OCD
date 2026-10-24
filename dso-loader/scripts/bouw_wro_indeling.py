@@ -118,10 +118,31 @@ def deel_in(cur, idn):
     return rijen
 
 
+def _werk(idns):
+    """Eén proces: een reeks plannen indelen en schrijven. -> Counter van herkomst."""
+    tel = Counter()
+    with psycopg.connect(DB, autocommit=True) as conn, conn.cursor() as cur:
+        for idn in idns:
+            rijen = deel_in(cur, idn)
+            with conn.transaction():
+                cur.execute("DELETE FROM v2a.wro_artikel_indeling WHERE instrument_idn = %s", (idn,))
+                with cur.copy("""COPY v2a.wro_artikel_indeling (instrument_idn, tekst_id, categorie,
+                                 subcategorie, herkomst) FROM STDIN""") as cp:
+                    for r in rijen:
+                        cp.write_row(r)
+            for r in rijen:
+                tel[r[4] or "niet ingedeeld"] += 1
+    return tel
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--idn")
+    ap.add_argument("--bronhouder", help="komma-gescheiden, bv. gm0402,pv25")
+    ap.add_argument("--sinds", help="alleen plannen die sinds dit tijdstip (opnieuw) geladen zijn, bv. '2026-10-24 02:00'")
+    ap.add_argument("--processen", type=int, default=1,
+                    help="parallel over plannen; de regex-regels per tekst zijn het knelpunt (~380 teksten/s per proces)")
     a = ap.parse_args()
     if "rlwy.net" in DB or os.environ.get("OCD_DB_URL"):
         sys.exit("STOP: alleen lokaal; productie gaat via een overzet.")
@@ -130,9 +151,32 @@ def main():
         cur.execute(DDL)
         if a.idn:
             plannen = a.idn.split(",")
+        elif a.bronhouder:
+            cur.execute("""SELECT ls.instrument_idn FROM wro.wro_tekst_laadstand ls
+                           JOIN wro.ruimtelijk_instrument ri ON ri.idn = ls.instrument_idn
+                           WHERE ls.fout IS NULL AND ls.n_teksten > 0 AND ri.bronhouder = ANY(%s)""",
+                        (a.bronhouder.split(","),))
+            plannen = [r[0] for r in cur.fetchall()]
+        elif a.sinds:
+            cur.execute("""SELECT instrument_idn FROM wro.wro_tekst_laadstand
+                           WHERE fout IS NULL AND n_teksten > 0 AND geladen_op >= %s::timestamptz""", (a.sinds,))
+            plannen = [r[0] for r in cur.fetchall()]
         else:
             cur.execute("SELECT instrument_idn FROM wro.wro_tekst_laadstand WHERE fout IS NULL AND n_teksten > 0")
             plannen = [r[0] for r in cur.fetchall()]
+        if a.processen > 1:
+            from multiprocessing import Pool
+            brokken = [plannen[i:i + 200] for i in range(0, len(plannen), 200)]
+            tel = Counter()
+            with Pool(a.processen) as pool:
+                for j, t in enumerate(pool.imap_unordered(_werk, brokken), 1):
+                    tel.update(t)
+                    if j % 10 == 0 or j == len(brokken):
+                        tot = sum(tel.values()) or 1
+                        print(f"  {min(j*200, len(plannen))}/{len(plannen)} plannen · {tot} teksten · "
+                              + " · ".join(f"{k} {100*v/tot:.1f}%" for k, v in tel.most_common())
+                              + f" · {(time.time()-t0)/60:.1f} min", flush=True)
+            return
         tel = Counter()
         for i, idn in enumerate(plannen, 1):
             rijen = deel_in(cur, idn)
