@@ -18,7 +18,8 @@ from rich.console import Console
 
 from src.config import cfg
 from src.db import get_conn, normalize_bronhouder_code
-from src.loaders.ihr_loader import _ihr_get, load_teksten_for_plan
+from src.loaders.ihr_loader import _ihr_get
+from src.loaders import wro_teksten_keten
 
 console = Console()
 
@@ -127,6 +128,7 @@ def load_imro2006_ambtsgebied(cbs_codes: list[str] | None = None) -> int:
 
     conn = get_conn()
     n = 0
+    nieuw: list[str] = []   # teksten na de lus in één keer via de v2-keten
     try:
         missend = _missende_idns(conn, cbs_codes)
         console.print(f"[bold]{len(missend)} missende IMRO2006-plannen[/bold]")
@@ -177,13 +179,14 @@ def load_imro2006_ambtsgebied(cbs_codes: list[str] | None = None) -> int:
                 if geladen == 0:
                     console.print(f"  [yellow]{idn}: geen ambtsgebied voor {bron} — overgeslagen[/yellow]")
                     continue
-                n_tekst = load_teksten_for_plan(conn, idn)
-                console.print(f"  [green]{idn}[/green] ({naam[:40]}) — ambtsgebied {bron}, {n_tekst} teksten")
+                nieuw.append(idn)
+                console.print(f"  [green]{idn}[/green] ({naam[:40]}) — ambtsgebied {bron}")
                 n += 1
             except Exception as e:
                 conn.rollback()  # één slecht plan mag de rest niet meeslepen
                 console.print(f"  [red]{idn}: {type(e).__name__} — overgeslagen[/red]")
                 continue
-        return n
     finally:
         conn.close()
+    wro_teksten_keten.laad(idns=nieuw)
+    return n

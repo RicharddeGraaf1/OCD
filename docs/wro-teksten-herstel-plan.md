@@ -80,7 +80,7 @@ Vergroten kan alleen in het dashboard. Daarom:
 | 2 | Lokaal laden | **loopt / klaar** — zie de tellingen hieronder |
 | 3 | API | **klaar en live** (`f6ec188` op `main`): regelmix telt v2; regelmix/document geeft per punt de teksten van de bestemmingen en aanduidingen op dat punt plus de planbrede regels; artikelen onder *Bestemmingsregels* zonder koppeling vallen weg (ze horen bij een bestemming die hier niet ligt); rijen dragen `categorie`/`subcategorie`; wro-detail leest v2. Zonder v2 voor een plan: oud gedrag. 84 bestaande tests + 4 nieuwe (`TestWroV2OpPunt`) groen |
 | 4 | Benchmark | **klaar** — lokaal én prod: Doc 33 → **38**/40, Artikel 18 → **20**/22; Wro-vragen 5, 7–9, 11–14, 39 op prod gelijk aan lokaal (24-10, 11:32) |
-| 5 | Wro-onderwerp-indeling | **data + API klaar** (`bouw_wro_indeling.py`, `WRO_HOOFDGROEP`); **frontend klaar maar niet live**: branch `wro-onderwerpen` in het register (`1eab69a`, niet gepusht) |
+| 5 | Wro-onderwerp-indeling | **live** (24-10): data + API (`bouw_wro_indeling.py`, `WRO_HOOFDGROEP`) en frontend (register `6ef2b25`): Wro-plannen tellen mee in de tegels van Regels op maat en krijgen onderwerp-chips |
 | 6 | Productie | **volledig live** (24-10, 07:55–11:31): volume eerst 100 → 150 GB (dashboard), daarna `--alle --max-mb 12000 --ja`: 48.161 plannen, 7.820.415 teksten, gelijk aan lokaal; 216 min; prod-DB 74 → 84 GB; ANALYZE op de vier tabellen. Eerder die nacht: deelset van 852 plannen |
 
 ### Gemeten — eindstand lokaal (24-10, 02:30)
@@ -124,10 +124,15 @@ Vergroten kan alleen in het dashboard. Daarom:
    Kanttekening: ~0,7% van de koppelingen (steekproef 2000) wijst naar een bestemmingsvlak dat
    lokaal én op prod ontbreekt in `wro.planobject`; die tekst komt dan niet per punt. Een
    laadgat in de planobjecten, niet in de overzet.
-2. **Frontend**: branch `wro-onderwerpen` bekijken en mergen. Ontwerpvraag: tellen
-   Wro-artikelen mee in de tegels bovenaan, of alleen als chips per Wro-document?
-3. **Sync**: de runbook-stap voor Wro-teksten moet `laad_wro_teksten_v2.py` (+ HTML +
-   `bouw_wro_indeling.py`) worden; de oude `ihr_loader` schrijft nog naar de oude tabel.
+2. ~~Frontend~~ — live 24-10 (register `6ef2b25`). Keuze: Wro-artikelen tellen mee in de
+   tegels bovenaan (een bezoeker weet niet of zijn perceel onder het omgevingsplan of nog
+   onder een bestemmingsplan valt), en staan onder een onderwerp als eigen kaart met tag Wro.
+   Bij het testen bleek de branch zelf stuk: `bouwAnalyse` las `ond.categorieen` ook voor Wro,
+   waar `ond` null is, dus de analyse viel stil weg en de chips verschenen nooit.
+3. ~~Sync~~ — gedaan 24-10: alle Wro-tekstladingen lopen via `src/loaders/wro_teksten_keten.py`
+   (v2 → HTML → indeling); `ihr_loader.load_wro_teksten` delegeert, `wro_imro2006` en
+   `wro_pdok` roepen de keten aan. Runbook stap 6e. Productie blijft een aparte stap
+   (`wro_v2_naar_productie.py`).
 4. **Vraagroute** (`/v1/regelteksten-bij-vraag`) leest de Wro-teksten nog niet; die
    endpoint deelt de omgevingsbot, dus niet ongezien aangepast.
 5. **Onderwerp-gaten** in `WRO_HOOFDGROEP`/REGELS: o.a. *Historische buurt*, *Waarde -

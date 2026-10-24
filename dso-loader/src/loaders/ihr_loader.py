@@ -1,6 +1,11 @@
 """Load Wro planteksten via IHR (Informatiehuis Ruimte) API v4.
 
-Fetches text blocks per bestemmingsplan and stores them as wro_tekst_object.
+VEROUDERD sinds 2026-10-24. Deze loader stopte na 100 teksten per plan (IHR v4
+pagineert via `_links.next`, niet via `page.totalElements`) en verloor teksten op een
+niet-unieke sleutel. `load_wro_teksten` delegeert nu naar de v2-keten
+(`src/loaders/wro_teksten_keten.py`); de oude implementatie staat als
+`load_wro_teksten_v1` / `load_teksten_for_plan` alleen nog voor naslag en schrijft naar
+de bevroren tabel `wro.wro_tekst_object`. Zie docs/wro-teksten-herstel-plan.md.
 """
 
 import re
@@ -119,7 +124,13 @@ def load_teksten_for_plan(conn, plan_idn: str) -> int:
 
 
 def load_wro_teksten(cbs_codes: list[str] | None = None):
-    """Load Wro planteksten for all loaded instruments."""
+    """Wro-planteksten laden — via de v2-keten (sinds 2026-10-24)."""
+    from src.loaders.wro_teksten_keten import laad
+    laad(bronhouders=cbs_codes)
+
+
+def load_wro_teksten_v1(cbs_codes: list[str] | None = None):
+    """VEROUDERD: oude loader naar wro.wro_tekst_object (max. 100 teksten per plan)."""
     if not cfg.IHR_API_KEY:
         console.print("[red]IHR_API_KEY not set in .env[/red]")
         return
