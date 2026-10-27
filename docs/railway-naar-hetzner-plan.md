@@ -6,8 +6,8 @@
 > **Niet in scope**: Locus zelf. Die verhuizing loopt al bij Thomas, zie
 > [hosting-naar-hetzner.md](c:/GIT/Locus/docs/plans/hosting-naar-hetzner.md) en
 > [infrastructure.md](c:/GIT/Locus/docs/architectuur/infrastructure.md).
-> **Status**: in voorbereiding, 2026-10-27. Besluiten B1–B4 genomen; V5 deels gedaan (lokaal,
-> nog niet gecommit). Nog niets verhuisd.
+> **Status**: in uitvoering, 2026-10-27. Besluiten B1–B4 genomen, V1, V2 en V5 (op V5.2 na)
+> klaar. De woordjacht-API draait op Coolify en wacht op de DNS-overstap. Zie [Verloop](#verloop).
 > **Vorige afweging**: [prod-restore-en-hosting-afweging.md](prod-restore-en-hosting-afweging.md) (2026-06-06, toen gekozen voor Railway-resize).
 
 ## Waarom
@@ -117,10 +117,15 @@ zonder opschalen beginnen, en zo verhuizen dat er geen tweede kopie op de schijf
 
 | Op de schijf van 150 GB | GB |
 |---|---|
-| Nu in gebruik (Locus, Coolify, systeem, 2026-10-27) | 13 |
-| `ocd`-database | 84 |
+| Nu in gebruik (2026-10-27, 18:20), waarvan 16 GB build-cache van Locus | 29 |
+| `ocd`-database (vers teruggezet, zonder de 10 GB extra van het Railway-volume) | 84 |
 | Kleine databases, images, Ollama-model | ~8 |
-| **Samen** | **~105 (70%)** |
+| **Samen** | **~121 (81%)** |
+
+De build-cache van Locus houdt Thomas bewust warm, zodat de eerste build van de dag niet koud
+is (hosting-naar-hetzner.md, stap 2). Daardoor komt `ocd` direct boven de 80%. **Vóór `ocd`
+met Thomas kiezen**: de build-cache begrenzen (bijvoorbeeld 8 GB via `docker builder prune
+--keep-storage`), of de schijf meteen groter.
 
 - **Overzetten zonder dumpbestand**: per schema een dump in mapformaat (`-Fd -j 4`), meteen
   terugzetten met `pg_restore -j 6`, en de map weggooien voor het volgende schema. De grootste is
@@ -209,7 +214,7 @@ oefening met Coolify.
 
 | # | Wat | Waarom hier | Onderbreking |
 |---|---|---|---|
-| 1 | woordjacht-API (`api.elconteo.nl`) | één service en een kleine database: de oefenronde | minuten, tijdens de dump |
+| 1 | woordjacht-API (`api.elconteo.nl`) | één service: de oefenronde. **Draait op Coolify**, wacht op DNS | geen: de lobby zit in het geheugen |
 | 2 | `ocd`: PostGIS, `ollama-embed`, `ocd-api` | het grootste stuk, wel alleen-lezen voor gebruikers | geen: de API leest Railway tot de DNS omgaat |
 | 3 | omgevingsbot (backend, frontend, Postgres) | na 2, en na V5.2 | minuten |
 | 4 | Football-Faceoff | database en Redis zonder actieve app: niemand merkt iets | geen |
@@ -307,3 +312,29 @@ oefening met Coolify.
 
 1. Hoe verdelen Richard en Thomas de kosten van `apps-1`? Railway kost nu $65 per maand
    (Richard, 2026-10-27), inclusief Locus. `apps-1` kost €69,49; de 32 GB-stap (B4) €130,99.
+
+## Verloop
+
+### 2026-10-27: toegang, GitHub en de oefenronde
+
+- **Toegang.** SSH-sleutels voor Richard (`richard@locuslegis-hetzner`) en voor zijn Claude
+  (`claude-richard@locuslegis-hetzner`) op `apps-1`. Daarbij wiste een opruimregel per ongeluk
+  ook `claude-thomas@locuslegis-hetzner`; die is na twee minuten teruggezet uit
+  `authorized_keys.voor-hernoemen` (zelfde vingerafdruk `fcZoC…`). Richard licht Thomas in.
+- **API-token** `claude-richard` voor Coolify: `read`, `write`, `deploy`, niet `root`, Root Team,
+  verloopt 2026-11-26. Het token staat alleen op Richards laptop
+  (`~/.coolify-token-claude-richard`).
+- **GitHub App** `coolify-rdg-apps1` op het account RicharddeGraaf1, alleen leesrechten, voor
+  OCD, omgevingsbot.nl, Conteo_website, RichFitApp en FootballFaceoff (V2).
+- **woordjacht-API.** Project `woordjacht` in Coolify, app `woordjacht-api` uit
+  `Conteo_website/api`, Railpack, poort 3000, geheugenlimiet 256 MB, health-check op `/gezond`
+  (de Railpack-image heeft curl). `WOORDJACHT_SECRET` overgenomen van Railway.
+  - De database van het Railway-project is **leeg en ongebruikt**: de API heeft geen
+    Postgres-bibliotheek en houdt de lobby in het geheugen. Op Coolify dus geen database.
+  - Eerste build en deploy in 49 s. Een push naar `main` deployt via de webhook (getest met
+    `dbc641d`). `/gezond`, `/samen/nu` en CORS voor `https://elconteo.nl` gelijk aan Railway.
+  - Domeinen: `https://api.elconteo.nl` en het tijdelijke
+    `https://7oxqiqvbozxnjbhvmgh8i8ga.2.31.94.124.sslip.io`.
+  - **Volgende stap**: in Cloudflare (`elconteo.nl`) het record `api` van CNAME
+    `p37n5982.up.railway.app` naar A `2.31.94.124`, proxy uit. Daarna de app herstarten voor
+    het certificaat, en een week later het Railway-project `woordjacht` opheffen.
