@@ -7,7 +7,8 @@
 > [hosting-naar-hetzner.md](c:/GIT/Locus/docs/plans/hosting-naar-hetzner.md) en
 > [infrastructure.md](c:/GIT/Locus/docs/architectuur/infrastructure.md).
 > **Status**: in uitvoering, 2026-10-27. Besluiten B1–B4 genomen, V1, V2 en V5 (op V5.2 na)
-> klaar. De woordjacht-API draait op Coolify en wacht op de DNS-overstap. Zie [Verloop](#verloop).
+> klaar. De woordjacht-API en de omgevingsbot draaien op Coolify en wachten op de
+> DNS-overstap. Zie [Verloop](#verloop).
 > **Vorige afweging**: [prod-restore-en-hosting-afweging.md](prod-restore-en-hosting-afweging.md) (2026-06-06, toen gekozen voor Railway-resize).
 
 ## Waarom
@@ -172,7 +173,7 @@ Na deze stappen draait er nog niets anders, maar staat alles klaar.
     [`functions/api/[[catchall]].js`](c:/GIT/ponsenkaart.nl/functions/api/[[catchall]].js) is nu
     `https://api.ponsenkaart.nl`. Dat adres antwoordt nu al (200 op `/health`). Na de deploy van
     ponsenkaart.nl verhuist de proxy vanzelf mee met de DNS.
-  - [ ] **V5.2 Omgevingsbot**: de backend is de chatlaag (vraag ontvangen, regels ophalen bij
+  - [x] **V5.2 Omgevingsbot** (2026-10-27, op Coolify ingericht): de backend is de chatlaag (vraag ontvangen, regels ophalen bij
     `ocd-api` of live bij het DSO, antwoord laten schrijven door Groq, sleutels en feedback). De
     website praat er niet rechtstreeks mee: `frontend/server.js` stuurt `/api/*` door naar
     `BACKEND_URL`. Op Coolify kan dat dus over het interne netwerk, zonder publiek adres. Alleen
@@ -216,7 +217,7 @@ oefening met Coolify.
 |---|---|---|---|
 | 1 | woordjacht-API (`api.elconteo.nl`) | één service: de oefenronde. **Draait op Coolify**, wacht op DNS | geen: de lobby zit in het geheugen |
 | 2 | `ocd`: PostGIS, `ollama-embed`, `ocd-api` | het grootste stuk, wel alleen-lezen voor gebruikers | geen: de API leest Railway tot de DNS omgaat |
-| 3 | omgevingsbot (backend, frontend, Postgres) | na 2, en na V5.2 | minuten |
+| 3 | omgevingsbot (backend, frontend, Postgres) | kan vóór 2: praat via `api.ponsenkaart.nl`. **Draait op Coolify**, wacht op DNS | geen |
 | 4 | Football-Faceoff | database en Redis zonder actieve app: niemand merkt iets | geen |
 | 5 | RichFit | na V3 (backups) | minuten, buiten de trainingstijden |
 | 6 | Bundle of Recipes | na V3 en akkoord van Iris | minuten |
@@ -338,3 +339,22 @@ oefening met Coolify.
   - **Volgende stap**: in Cloudflare (`elconteo.nl`) het record `api` van CNAME
     `p37n5982.up.railway.app` naar A `2.31.94.124`, proxy uit. Daarna de app herstarten voor
     het certificaat, en een week later het Railway-project `woordjacht` opheffen.
+- **omgevingsbot.** Project `omgevingsbot.nl` in Coolify:
+  - `omgevingsbot-postgres`: `postgres:18-alpine`, alleen intern, 256 MB. De 11
+    feedback-berichten van Railway gekopieerd (bron 11, doel 11).
+  - `omgevingsbot-backend`: Nixpacks uit `/backend`, met het spaCy-model in de build (~9 min),
+    poort 8000, 1 GB (gebruikt ~420 MB), health-check op `/api/health`. **Geen publiek adres**:
+    vaste interne naam `omgevingsbot-backend` (consistent container name). Nadeel: bij een
+    deploy van de backend een paar seconden geen antwoord. `OCD_API_URL` is
+    `https://api.ponsenkaart.nl`; de andere variabelen overgenomen van Railway.
+  - `omgevingsbot-frontend`: Dockerfile uit `/frontend`, poort 3000, 256 MB, health-check op `/`.
+    `BACKEND_URL=http://omgevingsbot-backend:8000`.
+  - Getest: dezelfde vraag (Broekhem 33, dakkapel) via `/api/ocd/chat` geeft op Coolify en op
+    Railway **hetzelfde antwoord**, met dezelfde 10 bronnen, in ~3,3 s.
+  - Domeinen: `https://www.omgevingsbot.nl` en het tijdelijke
+    `https://qnqia3nzuagqrnfogdqfdc3k.2.31.94.124.sslip.io`. `omgevingsbot.nl` zonder www
+    stuurt Cloudflare zelf door naar www; dat blijft zo.
+  - **Volgende stap**: feedback nog één keer kopiëren, dan in Cloudflare (`omgevingsbot.nl`) het
+    record `www` naar A `2.31.94.124`, eerst met de proxy **uit** (Let's Encrypt), na het
+    certificaat weer aan, SSL op Full (strict). Een week later Railway-project
+    `omgevingsbot.nl` opheffen.
