@@ -152,9 +152,12 @@ Na deze stappen draait er nog niets anders, maar staat alles klaar.
   `FootballFaceoff`. De route `/webhooks/source/github/events` heeft in `admins-only.yaml` al een
   uitzondering op het filter, dus webhooks werken ook voor jouw app. Voor Bundle of Recipes moet
   Iris de app op haar repo toelaten, of de repo verhuist naar jouw account of een organisatie.
-- [ ] **V3. Backups** voor jouw databases: een S3-bestemming in Coolify (Hetzner Object Storage
-  €6,49/mnd, of Cloudflare R2, waar je al een account hebt) en per database een dagelijkse
-  `pg_dump`. Eén keer een restore testen. Verplicht vóór RichFit en Bundle of Recipes (B1).
+- [ ] **V3. Backups** voor jouw databases naar **Cloudflare R2** (besluit Richard, 2026-10-27):
+  een ander bedrijf dan de server, en de kleine databases passen waarschijnlijk in de gratis
+  10 GB. In het Cloudflare-dashboard een bucket (`coolify-backups`) en een R2-sleutel voor de S3-API
+  (alleen die bucket, lezen en schrijven); de sleutel die nu in `.env` van ponsenkaart staat,
+  mag alleen Pages en kan niet bij R2. In Coolify een S3-bestemming met die sleutel, en per
+  database een dagelijkse `pg_dump`. Eén keer een restore testen. Verplicht vóór RichFit en Bundle of Recipes (B1).
   Voor `ocd` (84 GB, opnieuw op te bouwen uit de lokale database) is een wekelijkse dump genoeg.
 - [ ] **V4. TTL omlaag.** Een dag van tevoren de TTL van elk domein dat verhuist naar 300 s. Op
   Cloudflare: `api.ponsenkaart.nl`, `www.omgevingsbot.nl`, `bundleofrecipes.nl`,
@@ -231,20 +234,25 @@ oefening met Coolify.
    een lege of gekopieerde database.
 5. **Data overzetten**: schrijven stopzetten (app op Railway in onderhoud of gestopt), dan
    `pg_dump -Fc` via de publieke URL of TCP-proxy van Railway, `pg_restore` in de nieuwe
-   container, en rijen tellen per tabel aan beide kanten. Redis van Football-Faceoff: de dump van
-   het volume (`/data/dump.rdb`) meenemen, of leeg starten als de app hem alleen als cache
-   gebruikt (te checken in de code).
+   container, en rijen tellen per tabel aan beide kanten. Redis van Football-Faceoff start leeg:
+   de app bewaart er alleen lobbystatus in, met een vervaltijd (`LobbyContext.ts`, `set ... EX`).
 6. **DNS omzetten**, certificaat van Let's Encrypt afwachten, rooktest.
 7. **Railway laten staan** zonder verkeer, een week. Daarna het project verwijderen.
 
 ### Bijzonderheden `ocd`
 
-- **Overzetten vanaf de server zelf**, niet via de laptop, en per schema (zie B3): op `apps-1`
-  `pg_dump -Fd -j 4 -n <schema>` van Railway (TCP-proxy) naar een map, `pg_restore -j 6` in de
-  nieuwe container, map weg, volgende schema. Eerst de extensies en de rollen, en `core` vóór de
-  rest (verwijzingen). Railway in Amsterdam naar Neurenberg is datacenter naar datacenter: veel
-  sneller dan de thuisverbinding. Reken op een paar uur, vooral voor het opnieuw opbouwen van de
-  GiST- en vectorindexen.
+- **Overzetten met [overzetten.sh](../ocd-postgis/overzetten.sh)**, op `apps-1` zelf, niet via de
+  laptop. Het script doet: extensies en `search_path` zoals op de bron; de structuur zonder
+  indexen; per schema de data (map in mapformaat, terugzetten, map weg, dus nooit een tweede
+  kopie, zie B3); daarna alle indexen en sleutels parallel; ANALYZE; en per tabel het aantal rijen
+  vergelijken met Railway. Elke onverwachte fout stopt alles.
+  **Geproefd op 2026-10-27** van Railway naar een lokale container, met schema `skos`: alle
+  stappen groen, rijen gelijk. Die proef vond ook een fout die bij de echte overzetting was
+  misgegaan: `pg_trgm` en `vector` staan op prod in schema `p2p`, niet in `public`, en indexen
+  verwijzen naar `p2p.gin_trgm_ops`. Het script maakt elke extensie nu in hetzelfde schema als
+  op de bron. Railway in Amsterdam naar Neurenberg is datacenter naar datacenter: veel sneller
+  dan de thuisverbinding. Reken op een paar uur, vooral voor het opnieuw opbouwen van de GiST-
+  en vectorindexen.
 - **Geen onderbreking.** Gebruikers lezen alleen. Doe geen sync tussen de dump en de
   DNS-overstap. Dan is de kopie gelijk, en mag Railway blijven antwoorden tot de DNS om is.
 - **`/dev/shm`.** Docker geeft een container standaard 64 MB gedeeld geheugen; parallelle
@@ -299,4 +307,3 @@ oefening met Coolify.
 
 1. Hoe verdelen Richard en Thomas de kosten van `apps-1`? Railway kost nu $65 per maand
    (Richard, 2026-10-27), inclusief Locus. `apps-1` kost €69,49; de 32 GB-stap (B4) €130,99.
-2. Gebruikt Football-Faceoff Redis alleen als cache, of staat er data in die mee moet?
