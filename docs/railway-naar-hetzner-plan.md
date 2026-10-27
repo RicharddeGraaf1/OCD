@@ -218,7 +218,7 @@ oefening met Coolify.
 | 1 | woordjacht-API (`api.elconteo.nl`) | één service: de oefenronde. **Live op Coolify** | geen: de lobby zit in het geheugen |
 | 2 | `ocd`: PostGIS, `ollama-embed`, `ocd-api` | het grootste stuk, wel alleen-lezen voor gebruikers | geen: de API leest Railway tot de DNS omgaat |
 | 3 | omgevingsbot (backend, frontend, Postgres) | kan vóór 2: praat via `api.ponsenkaart.nl`. **Live op Coolify** | geen |
-| 4 | Football-Faceoff | database en Redis zonder actieve app: niemand merkt iets | geen |
+| 4 | Football-Faceoff | database en Redis zonder actieve app. **Data over; app bouwt niet (codefout)** | geen |
 | 5 | RichFit | na V3 (backups) | minuten, buiten de trainingstijden |
 | 6 | Bundle of Recipes | na V3 en akkoord van Iris | minuten |
 | 7 | Railway opruimen | na een week zonder verkeer per project | — |
@@ -392,3 +392,21 @@ oefening met Coolify.
   geheugen). De omgevingsbot op Railway had hetzelfde. Gaat weg als `ocd` verhuist.
 - **Over een week (2026-11-03)**: Railway-projecten `woordjacht` en `omgevingsbot.nl` opheffen,
   na een laatste controle op feedback.
+
+### 2026-10-27, avond: Football-Faceoff
+
+- Project `Football-Faceoff` in Coolify: `footballfaceoff-postgres` (`postgres:18-alpine`, 256 MB)
+  en `footballfaceoff-redis` (`redis:8.2.9-alpine`, zoals op Railway, 128 MB, leeg gestart).
+- **Database overgezet**, structuur en data (`pg_dump | psql`): alle tien tabellen gelijk, met
+  5000 spelers en 8 managers; geen gebruikers.
+- App `footballfaceoff` uit de repo (Dockerfile, poort 3000, health-check `/health`, 512 MB),
+  **auto-deploy uit**: een push mag hem niet stilletjes starten. Variabelen overgenomen, met
+  `DATABASE_URL` en `REDIS_URL` naar de nieuwe containers.
+  - Op Railway heette de variabele `"NODE_ENV "` (met spatie), dus de app zag hem niet. Hier
+    `NODE_ENV=production`, zoals bedoeld.
+- **De app bouwt niet**: `origin/main` (`c48cb07`, ook de laatste Railway-deploy) faalt in
+  `tsc -b` op TypeScript-fouten en een ontbrekende `expo/tsconfig.base`. Dat verklaart
+  waarschijnlijk waarom hij op Railway stilstaat. Lokaal staat `main` **13 commits voor** (niet
+  gepusht, o.a. een deploy-checklist). Die zijn van Richard: pushen en dan handmatig deployen in
+  Coolify. Niets aan de hand voor gebruikers: hij draaide al niet.
+- Railway-project `Football-Faceoff` (Postgres en Redis kosten nog geld) mag op 2026-11-03 weg.
