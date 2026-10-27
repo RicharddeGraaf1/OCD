@@ -40,6 +40,7 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(HIER, "..", ".env"))
 sys.path.insert(0, os.path.join(HIER, ".."))
 from src.config import cfg  # noqa: E402
+from src.db import is_prod_url  # noqa: E402
 
 DB = os.environ.get("DSO_DB") or "postgresql://postgres:postgres@localhost:5434/dso"
 MAX_BYTES = 15_000_000
@@ -319,7 +320,7 @@ def main():
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--per-seconde", type=float, default=6.0)
     a = ap.parse_args()
-    if "rlwy.net" in DB or os.environ.get("OCD_DB_URL"):
+    if is_prod_url(DB) or os.environ.get("OCD_DB_URL"):
         sys.exit("STOP: dit script laadt alleen lokaal.")
     with psycopg.connect(DB, autocommit=True) as conn:
         conn.execute("ALTER TABLE wro.wro_tekst_laadstand ADD COLUMN IF NOT EXISTS bron TEXT NOT NULL DEFAULT 'ihr-teksten'")

@@ -76,7 +76,8 @@ def kies_doelwit(args):
         return False
     dsn = dsn.strip().strip('"').strip("'")
     os.environ["OCD_DB_URL"] = dsn
-    prod = ("rlwy.net" in dsn) or ("railway" in dsn) or (args.target == "prod")
+    from src.db import is_prod_url
+    prod = is_prod_url(dsn) or (args.target == "prod")
     print(f"Doelwit-DB: {'PROD' if prod else 'EXPLICIET'} -> {_masker(dsn)}")
     if prod and args.apply and not args.yes:
         try:
