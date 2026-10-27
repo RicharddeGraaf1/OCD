@@ -342,7 +342,7 @@ oefening met Coolify.
 - **omgevingsbot.** Project `omgevingsbot.nl` in Coolify:
   - `omgevingsbot-postgres`: `postgres:18-alpine`, alleen intern, 256 MB. De 11
     feedback-berichten van Railway gekopieerd (bron 11, doel 11).
-  - `omgevingsbot-backend`: Nixpacks uit `/backend`, met het spaCy-model in de build (~9 min),
+  - `omgevingsbot-backend`: Nixpacks uit `/backend`, met het spaCy-model in de build (~4 min),
     poort 8000, 1 GB (gebruikt ~420 MB), health-check op `/api/health`. **Geen publiek adres**:
     vaste interne naam `omgevingsbot-backend` (consistent container name). Nadeel: bij een
     deploy van de backend een paar seconden geen antwoord. `OCD_API_URL` is
@@ -358,3 +358,14 @@ oefening met Coolify.
     record `www` naar A `2.31.94.124`, eerst met de proxy **uit** (Let's Encrypt), na het
     certificaat weer aan, SSL op Full (strict). Een week later Railway-project
     `omgevingsbot.nl` opheffen.
+  - **Image van 11,3 naar 3,7 GB.** `sentence-transformers` (de reranker) trok de CUDA-build van
+    PyTorch binnen, met 3,2 GB aan NVIDIA-bibliotheken. Nu installeert
+    `omgevingsbot.nl/backend/nixpacks.toml` eerst de CPU-versie (`d3982d9`, eerst op een aparte
+    branch alleen op Coolify getest). Geldt ook voor Railway. De build duurt 4 in plaats van 9 min.
+  - **Bevinding: de reranker kan in deze build niet laden**, ook niet op Railway en ook niet in
+    het oude image: `import torch` faalt op een ontbrekende `libstdc++.so.6` in de
+    Nix-omgeving. Hij staat nergens aan (geen `USE_SEMANTIC`- of `VECTOR_`-variabelen), dus niemand
+    merkt het. Wie hem aanzet, heeft nodig: `libstdc++` in de build (in `nixpacks.toml`, bv.
+    `nixLibs`), en meer dan 1 GB geheugen voor `BAAI/bge-reranker-v2-m3`.
+- **Schijf na deze ronde**: 47 GB in gebruik, waarvan ~29 GB build-cache (Locus en de nieuwe
+  builds). Coolify ruimt die 's nachts op (`docker_cleanup_frequency` 00:00, drempel 80%).
