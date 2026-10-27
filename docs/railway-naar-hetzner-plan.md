@@ -7,8 +7,8 @@
 > [hosting-naar-hetzner.md](c:/GIT/Locus/docs/plans/hosting-naar-hetzner.md) en
 > [infrastructure.md](c:/GIT/Locus/docs/architectuur/infrastructure.md).
 > **Status**: in uitvoering, 2026-10-27. Besluiten B1–B4 genomen, V1, V2 en V5 (op V5.2 na)
-> klaar. De woordjacht-API en de omgevingsbot draaien op Coolify en wachten op de
-> DNS-overstap. Zie [Verloop](#verloop).
+> klaar. De woordjacht-API en de omgevingsbot draaien **live** op Coolify (DNS om op
+> 2026-10-27). Zie [Verloop](#verloop).
 > **Vorige afweging**: [prod-restore-en-hosting-afweging.md](prod-restore-en-hosting-afweging.md) (2026-06-06, toen gekozen voor Railway-resize).
 
 ## Waarom
@@ -215,9 +215,9 @@ oefening met Coolify.
 
 | # | Wat | Waarom hier | Onderbreking |
 |---|---|---|---|
-| 1 | woordjacht-API (`api.elconteo.nl`) | één service: de oefenronde. **Draait op Coolify**, wacht op DNS | geen: de lobby zit in het geheugen |
+| 1 | woordjacht-API (`api.elconteo.nl`) | één service: de oefenronde. **Live op Coolify** | geen: de lobby zit in het geheugen |
 | 2 | `ocd`: PostGIS, `ollama-embed`, `ocd-api` | het grootste stuk, wel alleen-lezen voor gebruikers | geen: de API leest Railway tot de DNS omgaat |
-| 3 | omgevingsbot (backend, frontend, Postgres) | kan vóór 2: praat via `api.ponsenkaart.nl`. **Draait op Coolify**, wacht op DNS | geen |
+| 3 | omgevingsbot (backend, frontend, Postgres) | kan vóór 2: praat via `api.ponsenkaart.nl`. **Live op Coolify** | geen |
 | 4 | Football-Faceoff | database en Redis zonder actieve app: niemand merkt iets | geen |
 | 5 | RichFit | na V3 (backups) | minuten, buiten de trainingstijden |
 | 6 | Bundle of Recipes | na V3 en akkoord van Iris | minuten |
@@ -369,3 +369,26 @@ oefening met Coolify.
     `nixLibs`), en meer dan 1 GB geheugen voor `BAAI/bge-reranker-v2-m3`.
 - **Schijf na deze ronde**: 47 GB in gebruik, waarvan ~29 GB build-cache (Locus en de nieuwe
   builds). Coolify ruimt die 's nachts op (`docker_cleanup_frequency` 00:00, drempel 80%).
+
+### 2026-10-27, avond: DNS om voor woordjacht en omgevingsbot
+
+- Feedback van de omgevingsbot vlak ervoor opnieuw gekopieerd (11 = 11); daarna kwam er op
+  Railway niets meer bij.
+- Cloudflare (door Richards Claude in Chrome): `api.elconteo.nl` van CNAME
+  `p37n5982.up.railway.app` naar A `2.31.94.124`; `www.omgevingsbot.nl` van CNAME
+  `frontend-production-xxxx.up.railway.app` (proxied) naar A `2.31.94.124`. Beide **DNS only**,
+  TTL Auto. Niets anders aangeraakt. SSL/TLS van `omgevingsbot.nl` staat op Full.
+- Na een redeploy hebben beide een certificaat van Let's Encrypt (tot 2027-01-25). `/gezond`,
+  CORS voor `https://elconteo.nl`, de site, `/api/models` en een chatvraag werken op de nieuwe
+  server. `omgevingsbot.nl` (CNAME naar www, proxied) geeft via Cloudflare nog steeds de 301
+  naar `www`.
+- **Raadsel**: het oude `www`-record wees naar een niet-bestaande host (`xxxx`) en werkte toch.
+  Er zit dus een Cloudflare-regel (Worker-route, Origin Rule of iets dergelijks) die verkeer
+  voor `www.omgevingsbot.nl` naar Railway stuurde. Met de proxy uit doet die niets. **Niet
+  de proxy aanzetten** voordat die regel gevonden en weg is, anders gaat `www` terug naar
+  Railway (en na het opheffen naar niets). Advies: proxy voorlopig uit laten.
+- **Traag of 500 bij sommige vragen**: niet door de verhuizing. `ocd-api` op Railway loopt bij
+  `/v1/adres` tegen de statement timeout (koude cache: de PostGIS op Railway heeft 2 GB
+  geheugen). De omgevingsbot op Railway had hetzelfde. Gaat weg als `ocd` verhuist.
+- **Over een week (2026-11-03)**: Railway-projecten `woordjacht` en `omgevingsbot.nl` opheffen,
+  na een laatste controle op feedback.
