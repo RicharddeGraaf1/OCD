@@ -14,7 +14,8 @@
 #   1. extensies en database-instellingen (search_path) zoals op de bron
 #   2. pre-data: schema's, tabellen, types, functies, views (zonder indexen)
 #   3. per schema de data: dump in mapformaat, terugzetten, map weg
-#   4. post-data: indexen, sleutels, triggers, materialized views, parallel
+#   4. post-data: indexen, sleutels, triggers, parallel; daarna de materialized
+#      views een voor een, met de planner-instellingen die ze nodig hebben
 #   5. ANALYZE, en per tabel het aantal rijen vergelijken met de bron
 #
 # De pg_dump en pg_restore van de container zelf worden gebruikt (versie 17).
@@ -110,10 +111,21 @@ for s in $SCHEMAS; do
   log "   $s: dump $grootte, $(( $(date +%s) - t0 )) s"
 done
 
-log "4. Post-data (indexen, sleutels, materialized views)"
+log "4. Post-data (indexen, sleutels), daarna de materialized views"
 in_c pg_dump "$SRC_DSN" --section=post-data $N_ARGS -Fc -f /tmp/post.dump
-herstel post-data -j "$J_RESTORE" /tmp/post.dump
-in_c rm -f /tmp/post.dump
+# De views niet door pg_restore laten verversen: die doet dat kaal, en
+# p2p.naammatch_signaal kost dan uren in plaats van minuten (geleerd op
+# 2026-10-28; zie PLANNER_PER_STAP in dso-loader/scripts/refresh_drieslag.py).
+in_c sh -c "pg_restore -l /tmp/post.dump | grep -v 'MATERIALIZED VIEW DATA' > /tmp/post.lijst"
+herstel post-data -j "$J_RESTORE" -L /tmp/post.lijst /tmp/post.dump
+for mv in $(in_c sh -c "pg_restore -l /tmp/post.dump | grep 'MATERIALIZED VIEW DATA' | awk '{print \$(NF-2)\".\"\$(NF-1)}'"); do
+  instelling=""
+  [ "$mv" = "p2p.naammatch_signaal" ] && instelling="set enable_bitmapscan = off;"
+  t0=$(date +%s)
+  doel "$instelling refresh materialized view $mv" >/dev/null
+  log "   $mv: $(( $(date +%s) - t0 )) s"
+done
+in_c rm -f /tmp/post.dump /tmp/post.lijst
 
 log "5. ANALYZE en rijen tellen"
 doel "analyze" >/dev/null

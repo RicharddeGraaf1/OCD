@@ -7,8 +7,9 @@
 > [hosting-naar-hetzner.md](c:/GIT/Locus/docs/plans/hosting-naar-hetzner.md) en
 > [infrastructure.md](c:/GIT/Locus/docs/architectuur/infrastructure.md).
 > **Status**: in uitvoering, 2026-10-27. Besluiten B1–B4 genomen, V1, V2 en V5 (op V5.2 na)
-> klaar. De woordjacht-API en de omgevingsbot draaien **live** op Coolify (DNS om op
-> 2026-10-27). Zie [Verloop](#verloop).
+> klaar. woordjacht-API en omgevingsbot live op Coolify sinds 2026-10-27, **ocd** (database,
+> ollama-embed, ocd-api op `api.ponsenkaart.nl`) sinds 2026-10-28. Football-Faceoff: data over,
+> app bouwt niet. Nog te doen: RichFit, Bundle of Recipes, Railway opruimen. Zie [Verloop](#verloop).
 > **Vorige afweging**: [prod-restore-en-hosting-afweging.md](prod-restore-en-hosting-afweging.md) (2026-06-06, toen gekozen voor Railway-resize).
 
 ## Waarom
@@ -221,7 +222,7 @@ oefening met Coolify.
 | # | Wat | Waarom hier | Onderbreking |
 |---|---|---|---|
 | 1 | woordjacht-API (`api.elconteo.nl`) | één service: de oefenronde. **Live op Coolify** | geen: de lobby zit in het geheugen |
-| 2 | `ocd`: PostGIS, `ollama-embed`, `ocd-api` | het grootste stuk, wel alleen-lezen voor gebruikers | geen: de API leest Railway tot de DNS omgaat |
+| 2 | `ocd`: PostGIS, `ollama-embed`, `ocd-api` | het grootste stuk. **Live op Coolify** (2026-10-28) | geen |
 | 3 | omgevingsbot (backend, frontend, Postgres) | kan vóór 2: praat via `api.ponsenkaart.nl`. **Live op Coolify** | geen |
 | 4 | Football-Faceoff | database en Redis zonder actieve app. **Data over; app bouwt niet (codefout)** | geen |
 | 5 | RichFit | na V3 (backups) | minuten, buiten de trainingstijden |
@@ -426,3 +427,51 @@ oefening met Coolify.
 - Alle containers gezond terug, ook Locus: `app.locuslegis.nl/api/health` 200 met
   `"database":"connected"`, plus elconteo, omgevingsbot en het Coolify-dashboard.
 - Daarmee is de schijf geen blokkade meer voor `ocd`.
+
+### 2026-10-28: ocd verhuisd
+
+- **ocd-postgis** als Coolify-app (Dockerfile `ocd-postgis/`), niet als database-resource: die
+  doet altijd `docker compose pull`, en een image dat alleen op de server bestaat, faalt dan.
+  Auto-deploy uit, vaste containernaam `ocd-postgis`, volume op `/var/lib/postgresql/data`,
+  `--shm-size=2g`, geheugenlimiet 6 GB, poort `5433:5432` (de Cloud Firewall laat 5433 niet
+  door; van buiten getest: dicht). Coolify neemt `-p 127.0.0.1:…` uit de Docker-opties niet
+  over. Instellingen via `ALTER SYSTEM`: `shared_buffers` 2 GB (Railway: 512 MB),
+  `effective_cache_size` 8 GB, `work_mem` 32 MB, `maintenance_work_mem` 1 GB, `max_wal_size`
+  8 GB, `random_page_cost` 1.1.
+- **Overzetten** met `overzetten.sh` op de server, 10:04–11:36 (NL) voor alle data: v2a 19 min,
+  wro 35 min, p2p 25 min; tempo ~10 MB/s, begrensd door de TCP-proxy van Railway.
+- **Vertraging**: `pg_restore` ververste `p2p.naammatch_signaal` kaal, zonder
+  `enable_bitmapscan = off`, en was na twee uur niet klaar. Afgebroken en met de instelling zelf
+  gedaan: 6 min 51 s. `overzetten.sh` ververst de views nu zelf, na de rest van de post-data,
+  met die instelling (getest op een post-data-dump: 519 items plus 15 views in de goede volgorde).
+- **Getoetst**, via de SSH-tunnel: alle **147 tabellen exact gelijk** aan Railway. Van de 15
+  views is `p2p.mv_regel_op_locatie` op Hetzner groter (392.743 tegen 383.403): vers
+  berekend, op Railway na de laatste sync niet ververst. API-vergelijking: 9 van 11 gelijk; de
+  twee `/v1/adres`-verschillen zijn die view (25 regels meer bij Broekhem 33) en de visies,
+  die zonder zoektermen een `LIMIT 50` **zonder `ORDER BY`** hebben (main.py, rond regel 552):
+  welke 50 je krijgt, hangt van de database af. Bestaand gedrag.
+- **Snelheid**: op Railway gaven `/v1/adres` en `/v1/zoek` onder belasting 500 na 20–56 s; op
+  Hetzner 0,2–3 s.
+- **ollama-embed** als Coolify-app, vaste naam, volume voor de modellen, zelfde model-id.
+  **ocd-api** als Coolify-app, auto-deploy aan (push naar main deployt, zoals op Railway),
+  `DATABASE_URL` naar `ocd-postgis:5432`, `OLLAMA_URL` naar `ollama-embed:11434`.
+- **DNS** `api.ponsenkaart.nl` (zone ponsenkaart.nl) van CNAME `hb9vvnlr.up.railway.app` naar
+  A `2.31.94.124`, DNS only, door Richards Claude in Chrome. Certificaat van Let's Encrypt.
+  ponsenkaart.nl en de omgevingsbot werken via de nieuwe server.
+- **Tunnel voor de sync**: `dso-loader/scripts/prod_tunnel.sh` (lokaal 15433; 5433 is op
+  Richards laptop bezet). `PROD_DB_URL` in `.env` wijst nu naar `127.0.0.1:15433`; de oude
+  Railway-waarde staat er als commentaar. Droogloop: verbinding, `is_prod_url()` waar,
+  parallelisme uit, Wro-blokkade zegt STOP. **Vóór de volgende sync `main` in de werkbranch
+  mergen**: die mist `is_prod_url()`.
+
+### Nog open na ocd
+
+- **Railway `ocd`**: TCP-proxy uit en project opheffen na een week (2026-11-04), na akkoord.
+  Tot dan deployt een push naar main óók nog op Railway.
+- **GitHub Action van `instructieregels.nl`**: `PSQL_CONN` wijst nog naar Railway. Moet vóór het
+  opheffen naar de tunnel (eigen tunnelgebruiker, SSH open voor GitHub: afspraak met Thomas) of
+  naar een Scheduled Task in Coolify. Read-only rol aanmaken.
+- **Verbeterpunten ocd-api** (geen verhuizing): visies in `/v1/adres` een vaste volgorde geven;
+  `/v1/adres` met 12 zoektermen kost 17 s (veel korte query's na elkaar), de omgevingsbot stuurt
+  er zoveel mee bij een schuurvraag.
+- **Backups van ocd**: nog geen. Wekelijkse `pg_dump` naar R2 zodra die er is (V3).
