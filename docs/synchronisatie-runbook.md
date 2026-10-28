@@ -155,6 +155,10 @@ de grootste openstaande tijdwinst (zie §5).
 
 ### Stap 0 — Preview (read-only)
 
+`--vergelijk-prod` leest prod: open eerst de tunnel, in een eigen venster, en laat
+hem open tot en met stap 9 (`bash scripts/prod_tunnel.sh`; een Claude-sessie zet
+`OCD_TUNNEL_SLEUTEL=~/.ssh/claude-richard-locuslegis-hetzner`).
+
 ```bash
 cd c:/GIT/OCD/dso-loader
 python scripts/preview_sync.py --vergelijk-prod
@@ -455,7 +459,7 @@ de omvang zit in afgeleide objecten die je nooit over de lijn moet sturen.
 > sub-pixelzeef weglaat. Scoping op bronhouder is simpeler én goedkoper.
 
 `locatie_subdiv` meesturen zou in z'n eentje meer dan de helft van het
-p2p-volume over de proxy duwen, voor geometrie die prod in seconden per
+p2p-volume door de tunnel duwen, voor geometrie die prod in seconden per
 bronhouder zelf berekent.
 
 > ⚠️ **Stap 3 kan niet vóór de post-fase.** `p2p.regeling_load` wordt niet door de
@@ -544,23 +548,26 @@ rekenwerk op prod, geen replicatie):
 # groene uitvoer. Gebeurd op 2026-09-13 (een `grep -oP` die op deze locale niet
 # werkt gaf een lege variabele).
 OCD_DB_URL="$PROD_DB_URL" python -c "import sys;sys.path.insert(0,'.');from src.db import get_conn;c=get_conn();cur=c.cursor();cur.execute('select current_database()');print(cur.fetchone())"
-#   -> moet 'railway' tonen, niet 'dso'
+#   -> moet 'railway' tonen, niet 'dso' (de prod-database heet ook op Hetzner 'railway')
 
 # subdiv voor de geraakte bronhouders
 OCD_DB_URL="$PROD_DB_URL" python -m src.cli refresh-subdiv -b gm0160   # per code
 # dan de MV's
 OCD_DB_URL="$PROD_DB_URL" python scripts/refresh_drieslag.py
 # health-MV's: zet parallellisme UIT in dezelfde sessie
-# health-MV's — parallellisme staat in het script zelf uit (kleine /dev/shm op
-# Railway). Geen kale `psql`: die staat op geen enkele PATH, zie leerpunt 7.
+# health-MV's — parallellisme staat in het script zelf uit (was nodig voor de kleine
+# /dev/shm op Railway). Geen kale `psql`: die staat op geen enkele PATH, zie leerpunt 7.
 python scripts/refresh_health_mvs.py --target prod
 ```
 
 `get_conn()` zet dat parallellisme bij een prod-DSN zelf uit, maar wie
-rechtstreeks met `psql`/`psycopg` verbindt moet het zelf doen — de
-Railway-container heeft een kleine `/dev/shm`. Gemeten 2026-08-08 op
+rechtstreeks met `psql`/`psycopg` verbindt moest het zelf doen — de
+Railway-container had een kleine `/dev/shm`. Gemeten 2026-08-08 op
 `core.mv_bronhouder_health`: mét parallellisme `could not resize shared memory
-segment … No space left on device`, zonder **16,2 s**.
+segment … No space left on device`, zonder **16,2 s**. Sinds 2026-10-28 heeft
+`ocd-postgis` op Hetzner 2 GB `/dev/shm` (`--shm-size=2g`) en 2 GB `shared_buffers`;
+het parallellisme mag daar in principe weer aan, maar `get_conn()` zet het nog uit
+tot dat gemeten is.
 
 Gemeten duur op prod (2026-08-08): drieslag **21,6 min** in acht stappen
 (`naammatch_signaal` 8,2 · niet-annoteerbaar 3,9 · gio_referentie_consistentie
@@ -1171,8 +1178,8 @@ Draaien (volledige volgorde staat in `instructieregels.nl/PLAN.md`
 ```
 
 **Stap 3 hoort hier en niet bij stap 8.** De oordelen ontstaan tegen de lokale
-DB; de CI-bouw van de site leest de Railway-DB. Zonder die sync deployt stap 8
-de vorige oordelen.
+DB; de CI-bouw van de site leest prod (via `ocd.elconteo.nl/v1/instructieregels/monitor`).
+Zonder die sync deployt stap 8 de vorige oordelen.
 
 #### De judge via Sonnet (stap 1d en 2b)
 
@@ -1507,9 +1514,9 @@ python scripts/wro_v2_naar_productie.py --bronhouder gm0402,gm0014          # dr
 python scripts/wro_v2_naar_productie.py --bronhouder gm0402,gm0014 --ja
 ```
 
-Bij veel plannen eerst de vrije ruimte op het Railway-volume controleren. Volume
-vergroten kan alleen in het dashboard; 150 GB sinds 2026-10-24, en de prod-DB stond
-toen op 84 GB. Draai na een grote overzet `ANALYZE` op `wro.wro_tekst_object_v2`,
+Bij veel plannen eerst de vrije schijfruimte op `apps-1` controleren
+(`ssh -i ~/.ssh/claude-richard-locuslegis-hetzner root@2.31.94.124 df -h /`). De schijf
+is sinds 2026-10-28 301 GB, met de prod-DB op ~84 GB; Locus en de andere apps delen hem. Draai na een grote overzet `ANALYZE` op `wro.wro_tekst_object_v2`,
 `wro.wro_tekst_link` en `v2a.wro_artikel_indeling`. Dat kost ±20 s; anders kiest de
 planner na de bulklading slechte plannen.
 
@@ -1890,11 +1897,11 @@ een integratie met conflicten in het hart van de API. De route is de kernel als
 losse feature op main zetten (vier bestanden + tooling), reviewen, testen, en
 dán beide branches opruimen.
 
-**Randvoorwaarde**: eerst vaststellen vanaf welke commit Railway de `ocd-api`
-deployt. Draait prod de kernel, dan is main niet zonder meer deploybaar; draait
+**Randvoorwaarde**: eerst vaststellen vanaf welke commit Coolify de `ocd-api`
+deployt (sinds 2026-10-28 altijd `main`, via de webhook; daarvoor Railway). Draait prod de kernel, dan is main niet zonder meer deploybaar; draait
 prod main, dan is die branch afgeschreven werk. Dat is niet vanaf de
 buitenkant te zien — de kernel is interne machinerie, geen endpoint — dus het
-is een dashboard- of `railway status`-check.
+is een check in Coolify (project `ocd`, app `ocd-api`, laatste deployment).
 
 ---
 
@@ -1994,7 +2001,8 @@ Die zet de view kort op slot; queries erop wachten. Dat is 's nachts akkoord
 (gebruikerskeuze) en scheelt fors, want `CONCURRENTLY` bouwt een volledige
 tweede kopie en verschilt die daarna. Gemeten op prod: `naammatch_signaal`
 (2,1 GB / 6,2M rijen) liep met `CONCURRENTLY` ruim twee uur en werd IO-gebonden
-— de dubbele kopie past niet in de 2 GB-geheugencap van de Railway-container.
+— de dubbele kopie paste niet in de 2 GB-geheugencap van de Railway-container
+(op Hetzner: 6 GB containerlimiet, 2 GB `shared_buffers`; niet opnieuw gemeten).
 
 Draai je overdag, terwijl viewer/bot moeten doorlezen: `--concurrently`.
 
