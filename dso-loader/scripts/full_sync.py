@@ -57,7 +57,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from src.db import get_conn  # noqa: E402
+from src.db import get_conn, is_prod_url  # noqa: E402
 
 VANDAAG = datetime.date.today().isoformat()
 LOG_PATH = ROOT / "scripts" / f"full_sync_{VANDAAG}.log"
@@ -918,7 +918,7 @@ def kies_doelwit_db(args):
         return
     dsn = dsn.strip().strip('"').strip("'")
     os.environ["OCD_DB_URL"] = dsn
-    prod = ("rlwy.net" in dsn) or ("railway" in dsn) or (args.target == "prod")
+    prod = is_prod_url(dsn) or (args.target == "prod")
     log(f"Doelwit-DB: {'PROD (direct!)' if prod else 'EXPLICIET'} → {_masker_dsn(dsn)}")
     report.insert(1, f"> **Doelwit-DB:** {'PRODUCTIE (direct)' if prod else _masker_dsn(dsn)}")
     if prod and not args.yes:

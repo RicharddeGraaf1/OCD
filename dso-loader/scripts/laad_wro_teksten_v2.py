@@ -42,6 +42,7 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(HIER, "..", ".env"))
 sys.path.insert(0, os.path.join(HIER, ".."))
 from src.config import cfg  # noqa: E402
+from src.db import is_prod_url  # noqa: E402
 
 DB = os.environ.get("DSO_DB") or "postgresql://postgres:postgres@localhost:5434/dso"
 
@@ -233,7 +234,7 @@ def main():
     a = ap.parse_args()
     if not (a.idn or a.bronhouder or a.alle):
         ap.error("geef --idn, --bronhouder of --alle")
-    if "rlwy.net" in DB or os.environ.get("OCD_DB_URL"):
+    if is_prod_url(DB) or os.environ.get("OCD_DB_URL"):
         sys.exit("STOP: dit script laadt alleen lokaal; productie gaat via een aparte overzet.")
     if not cfg.IHR_API_KEY:
         sys.exit("IHR_API_KEY ontbreekt")

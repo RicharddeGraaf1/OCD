@@ -50,9 +50,25 @@ def qualify(table: str) -> str:
     return f"{schema}.{table}"
 
 
-def _is_prod(url: str) -> bool:
-    """Herken de Railway-prod-DB (via de TCP-proxy) aan de host."""
-    return "rlwy.net" in url or "railway" in url
+def _schone_dsn(url: str) -> str:
+    return (url or "").strip().strip('"').strip("'")
+
+
+def is_prod_url(url: str) -> bool:
+    """Herken de prod-DB: de DSN uit PROD_DB_URL, of een Railway-host.
+
+    Niet alleen op de host: op Hetzner loopt prod via een SSH-tunnel en is de
+    host gewoon localhost (zie docs/railway-naar-hetzner-plan.md, B3). Wie
+    alleen op 'rlwy.net' let, ziet prod dan voor lokaal aan.
+    """
+    url = _schone_dsn(url)
+    if not url:
+        return False
+    prod = _schone_dsn(os.environ.get("PROD_DB_URL", ""))
+    return url == prod or "rlwy.net" in url or "railway" in url
+
+
+_is_prod = is_prod_url
 
 
 def get_conn() -> psycopg.Connection:

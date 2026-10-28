@@ -5026,7 +5026,9 @@ def viewer_onderwerpen(
         False,
         description="Vul artikelen zonder onderwerp uit het opschriftpad aan met het "
                     "IMOW-thema van hun juridische regels, en geef per onderwerp de "
-                    "herkomst (pad / annotatie). Zonder deze vlag blijft het antwoord "
+                    "herkomst (pad / annotatie). Geeft daarnaast in `imow_themas` de "
+                    "IMOW-thema's van álle artikelen, ook waar het pad al spreekt. "
+                    "Zonder deze vlag blijft het antwoord "
                     "gelijk aan de padindeling.",
     ),
 ):
@@ -5080,11 +5082,12 @@ def viewer_onderwerpen(
         )
         rijen = cur.fetchall()
 
-        # Annotatieroute: alleen nodig voor artikelen waar het pad zweeg. Een
-        # juridische regel hangt aan een artikel óf aan een lid; klim op tot het
-        # artikel, want dat is de eenheid van de indeling.
+        # Annotatieroute. Een juridische regel hangt aan een artikel óf aan een
+        # lid; klim op tot het artikel, want dat is de eenheid van de indeling.
+        # Altijd voor álle artikelen, ook waar het pad al spreekt: de frontend
+        # kan dan kiezen tussen pad, annotatie en hybride (`imow_themas`).
         themas_per_art: dict[str, Counter] = {}
-        if met_annotatie and any(not r["categorie"] for r in rijen):
+        if met_annotatie:
             cur.execute(
                 """
                 SELECT a.wid AS art_wid, t AS thema
@@ -5110,15 +5113,20 @@ def viewer_onderwerpen(
     types: dict[str, set] = {}
     niet_ingedeeld: set[str] = set()
     annotatie_themas: dict[str, list] = {}
+    # Per artikel alle IMOW-thema's, het meest specifieke eerst: koepelthema's
+    # achteraan, dan op aantal regels.
+    imow_themas = {
+        wid: sorted(tel, key=lambda t, tel=tel: (t in _KOEPELTHEMAS, -tel[t], t))
+        for wid, tel in themas_per_art.items()
+    }
 
     for r in rijen:
         wid = r["wid"]
         cat, sub, via = r["categorie"], r["subcategorie"], "pad"
         # Het pad gaat voor; de annotatie vult alleen gaten, en levert dan een
         # onderwerp zonder subcategorie (IMOW-thema's kennen geen tweede niveau).
-        if not cat and wid in themas_per_art:
-            tel = themas_per_art[wid]
-            gerangschikt = sorted(tel, key=lambda t: (t in _KOEPELTHEMAS, -tel[t], t))
+        if not cat and wid in imow_themas:
+            gerangschikt = imow_themas[wid]
             cat, sub, via = gerangschikt[0], None, "annotatie"
             annotatie_themas[wid] = gerangschikt
         if cat:
@@ -5171,6 +5179,10 @@ def viewer_onderwerpen(
             # Alle thema's per artikel dat via de annotatie is ingedeeld,
             # het gekozen onderwerp eerst.
             "annotatie_themas": annotatie_themas,
+            # Alle thema's van élk artikel met een geannoteerde juridische
+            # regel, ongeacht wat het pad zegt — voor de variant "alleen de
+            # IMOW-annotatie". Zelfde volgorde als hierboven.
+            "imow_themas": imow_themas,
         }
 
     return {

@@ -29,6 +29,9 @@ from collections import Counter
 import psycopg
 
 HIER = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HIER, ".."))
+from src.db import is_prod_url  # noqa: E402
+
 DB = os.environ.get("DSO_DB") or "postgresql://postgres:postgres@localhost:5434/dso"
 
 _spec = importlib.util.spec_from_file_location("bouw_indeling", os.path.join(HIER, "bouw_indeling.py"))
@@ -144,7 +147,7 @@ def main():
     ap.add_argument("--processen", type=int, default=1,
                     help="parallel over plannen; de regex-regels per tekst zijn het knelpunt (~380 teksten/s per proces)")
     a = ap.parse_args()
-    if "rlwy.net" in DB or os.environ.get("OCD_DB_URL"):
+    if is_prod_url(DB) or os.environ.get("OCD_DB_URL"):
         sys.exit("STOP: alleen lokaal; productie gaat via een overzet.")
     t0 = time.time()
     with psycopg.connect(DB, autocommit=True) as conn, conn.cursor() as cur:
