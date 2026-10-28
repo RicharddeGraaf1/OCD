@@ -113,6 +113,11 @@ De database krijgt geen publieke poort. PostGIS publiceert alleen op `127.0.0.1:
 
 ### B3. Schijf: pas groter als het nodig is
 
+> **Bijgewerkt 2026-10-28: de schijf is groter gemaakt.** `apps-1` is nu een volle CPX42 met
+> 320 GB (301 GB bruikbaar), zonder meerprijs: jullie betaalden al de CPX42-prijs, alleen de
+> schijf was blijven staan. Onomkeerbaar (terug naar CPX32 kan niet meer). De rest van B3 hieronder is
+> daarmee achterhaald, maar blijft staan als onderbouwing.
+
 Richard en Thomas vinden een grotere schijf allebei prima, maar pas als het echt nodig is. Dus
 zonder opschalen beginnen, en zo verhuizen dat er geen tweede kopie op de schijf staat:
 
@@ -410,3 +415,14 @@ oefening met Coolify.
   gepusht, o.a. een deploy-checklist). Die zijn van Richard: pushen en dan handmatig deployen in
   Coolify. Niets aan de hand voor gebruikers: hij draaide al niet.
 - Railway-project `Football-Faceoff` (Postgres en Redis kosten nog geld) mag op 2026-11-03 weg.
+
+### 2026-10-28: schijf naar 320 GB
+
+- Op verzoek van Richard, door zijn Claude in Chrome in de Hetzner Console: netjes afgesloten,
+  rescale naar CPX42 met "CPU and RAM only" **uit**, Hetzner zette de server zelf weer aan.
+  Een eerste blik met het vinkje aan gaf ten onrechte 160 GB als maximum voor elk type.
+- De partitie groeide bij het opstarten vanzelf mee: `/` is 301 GB, 15 GB in gebruik (de
+  build-cache was 's nachts door Coolify opgeruimd). Swap 4 GB nog actief, 8 vCPU, 16 GB.
+- Alle containers gezond terug, ook Locus: `app.locuslegis.nl/api/health` 200 met
+  `"database":"connected"`, plus elconteo, omgevingsbot en het Coolify-dashboard.
+- Daarmee is de schijf geen blokkade meer voor `ocd`.
