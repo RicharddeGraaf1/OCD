@@ -33,6 +33,7 @@ from tiles import router as tiles_router
 from vergunningen import _tsquery_arg
 from vergunningen import router as vergunningen_router
 from mer import router as mer_router
+from instructieregels import router as instructieregels_router
 from leefomgeving import router as leefomgeving_router
 
 load_dotenv()
@@ -211,6 +212,7 @@ app.include_router(antwoord_router, dependencies=[Depends(verify_key)])
 app.include_router(semantisch_router, dependencies=[Depends(verify_key)])
 app.include_router(vergunningen_router, dependencies=[Depends(verify_key)])
 app.include_router(mer_router, dependencies=[Depends(verify_key)])
+app.include_router(instructieregels_router, dependencies=[Depends(verify_key)])
 app.include_router(planvoorraad_router, dependencies=[Depends(verify_key)])
 app.include_router(vergunningcheck_router, dependencies=[Depends(verify_key)])
 app.include_router(ponsenkaart_router, dependencies=[Depends(verify_key)])
