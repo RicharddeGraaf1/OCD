@@ -463,7 +463,8 @@ nooit op 500. Voorbeeld: `_conv_aanwezig()` in `ocd-api/main.py`
    SSH-tunnel: `dso-loader/scripts/prod_tunnel.sh` brengt de database naar
    `127.0.0.1:15433`, en `PROD_DB_URL` in `dso-loader/.env` wijst daarheen.
    De database heeft geen publieke poort; de `DATABASE_URL` van `ocd-api` wijst
-   naar het interne adres `ocd-postgis:5432`. Scripts herkennen prod aan
+   naar het interne adres `ocd-postgis:5432`. De API zelf heet `https://ocd.elconteo.nl`
+   (tweede naam: `api.ponsenkaart.nl`). Scripts herkennen prod aan
    `is_prod_url()` in `src/db.py` (de DSN uit `PROD_DB_URL`), nooit aan de
    hostnaam: via de tunnel is dat `localhost`.
 2. Óf: laat het endpoint tegen de afwezigheid bestand zijn, zoals hierboven.

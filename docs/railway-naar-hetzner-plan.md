@@ -501,3 +501,15 @@ oefening met Coolify.
     A aangemaakt en nu ongebruikt. Laten staan of opruimen.
 - **Werkbranch**: `main` gemerged in `feat/vergunning-regelkoppeling` (lokaal `ba21768`),
   runbook bijgewerkt voor de tunnel (in Richards niet-gecommitte wijzigingen).
+
+### 2026-10-28, eind van de middag: de OCD-API krijgt zijn eigen naam
+
+- De gedeelde OCD-API heette naar één van zijn gebruikers (`api.ponsenkaart.nl`). Nu
+  **`ocd.elconteo.nl`** (besluit Richard): A-record in zone `elconteo.nl`, DNS only, eigen
+  certificaat van Let's Encrypt. `api.ponsenkaart.nl` blijft als tweede naam werken.
+- Omgezet naar `https://ocd.elconteo.nl`: de Pages-proxy's van ponsenkaart.nl, OCD-viewer.nl,
+  omgevingsdocumentenregister.nl en omgevingsvergunningenregister.nl; de workflow van
+  instructieregels.nl; `OCD_API_URL` van de omgevingsbot-backend in Coolify. Alles getest (200,
+  Action groen, chatvraag 8 s).
+- Let op: de branch `feat/normen-op-de-kaart` van OCD-viewer wijst nog naar het Railway-adres.
+  Eerst `main` mergen voordat je daarvandaan deployt.
