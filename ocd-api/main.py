@@ -2333,6 +2333,45 @@ def _build_boom(rows: list[dict]) -> list[dict]:
     return roots
 
 
+def _tekstdelen_per_divisietekst(cur, expression: str) -> dict[str, list[dict]]:
+    """Tekstdelen (IMOW-annotatie van vrije tekst) per divisietekst-wid: [{td_id, thema}].
+
+    Een tekstdeel hangt aan een Divisie of een Divisietekst. `tekstdeel.divisie_wid` is de
+    IMOW-identificatie daarvan, géén STOP-wId (joint 0 keer op tekst_element.wid), dus de join
+    loopt via de brug `p2p.divisie` (sinds 2026-09-10). Een tekstdeel op een Divisie geldt voor
+    alle divisieteksten eronder. Gescoped op het werk, niet op de wId alleen: 381 wId's komen in
+    meer dan één regeling voor (gemeten 2026-10-28). Tot 2026-10-28 las geen enkele route van
+    Regels op maat de tekstdelen.
+    """
+    cur.execute(
+        """
+        WITH RECURSIVE k AS (
+            SELECT te.wid AS doel, te.wid, te.parent_id, 0 AS d
+            FROM p2p.tekst_element te
+            WHERE te.regeling_expression = %(e)s AND te.element_type = 'Divisietekst'
+          UNION ALL
+            SELECT k.doel, p.wid, p.parent_id, k.d + 1
+            FROM k JOIN p2p.tekst_element p ON p.id = k.parent_id
+            WHERE k.d < 12
+        )
+        SELECT DISTINCT k.doel, td.identificatie AS td_id, td.thema
+        FROM k
+        JOIN p2p.divisie dv
+          ON dv.wid = k.wid
+         AND split_part(dv.regeling_expression, '@', 1) = split_part(%(e)s, '@', 1)
+        JOIN p2p.tekstdeel td
+          ON td.divisie_wid = dv.identificatie
+         AND (td.regeling_expression IS NULL
+              OR split_part(td.regeling_expression, '@', 1) = split_part(%(e)s, '@', 1))
+        """,
+        {"e": expression},
+    )
+    uit: dict[str, list[dict]] = {}
+    for r in cur.fetchall():
+        uit.setdefault(r["doel"], []).append({"td_id": r["td_id"], "thema": r["thema"] or []})
+    return uit
+
+
 def _annoteer_boom(boom: list[dict], annotaties: dict[str, dict]):
     """Hang annotaties (per regeltekst_wid) aan de juiste boom-nodes."""
     for node in boom:
@@ -2429,7 +2468,30 @@ def viewer_boom(
             """,
             (expression,),
         )
-        ga_rows = cur.fetchall()
+        ga_rows = list(cur.fetchall())
+
+        # Vrije tekst: gebiedsaanwijzingen via het tekstdeel, op de divisietekst-node.
+        td_per_wid = _tekstdelen_per_divisietekst(cur, expression)
+        td_ids = sorted({t["td_id"] for lijst in td_per_wid.values() for t in lijst})
+        if td_ids:
+            cur.execute(
+                """
+                SELECT tg.tekstdeel_id,
+                       ga.identificatie AS ga_id, ga.type AS ga_type, ga.naam AS ga_naam,
+                       ga.groep AS ga_groep, ga.locatie_id AS ga_locatie_id
+                FROM p2p.tekstdeel_gebiedsaanwijzing tg
+                JOIN p2p.gebiedsaanwijzing ga ON ga.identificatie = tg.gebiedsaanwijzing_id
+                WHERE tg.tekstdeel_id = ANY(%s)
+                """,
+                (td_ids,),
+            )
+            ga_per_td: dict[str, list[dict]] = {}
+            for r in cur.fetchall():
+                ga_per_td.setdefault(r["tekstdeel_id"], []).append(r)
+            for wid, lijst in td_per_wid.items():
+                for t in lijst:
+                    for r in ga_per_td.get(t["td_id"], []):
+                        ga_rows.append({**r, "regeltekst_wid": wid})
 
         cur.execute(
             """
@@ -5105,6 +5167,11 @@ def viewer_onderwerpen(
             )
             for r in cur.fetchall():
                 themas_per_art.setdefault(r["art_wid"], Counter())[_norm_thema(r["thema"])] += 1
+            # Vrije tekst (visies, programma's): het thema van het tekstdeel, per divisietekst.
+            for wid, lijst in _tekstdelen_per_divisietekst(cur, expr).items():
+                for t in lijst:
+                    for th in t["thema"]:
+                        themas_per_art.setdefault(wid, Counter())[_norm_thema(th)] += 1
 
     # Categorie -> subcategorie, allebei op wId-verzamelingen zodat de
     # frontend knopen kan aanwijzen. Een artikel telt in zijn categorie ook mee
