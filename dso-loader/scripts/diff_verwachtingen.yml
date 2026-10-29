@@ -14,6 +14,18 @@
 
 verwacht:
 
+  wro.wro_tekst_laadstand:
+    min: 3900
+    max: 4500
+    reden: >-
+      Lokaal staat de laadstand van ELKE poging, prod alleen van plannen die zijn
+      overgezet. wro_v2_naar_productie.py neemt alleen plannen met fout IS NULL en
+      n_teksten > 0 mee (de API leest een plan pas uit v2 als zijn laadstand-rij op
+      prod staat). Gemeten 2026-10-29: lokaal 52.221 = 48.161 met teksten (= prod)
+      + 4.058 zonder teksten + 2 met een fout. Groeit alleen bij nieuwe Wro-ladingen;
+      loopt het verschil buiten de marge, dan is er een plan met teksten niet
+      overgezet. Toegevoegd 2026-10-29.
+
   i2a.sttr_bestand_mislukt:
     alleen: lokaal
     reden: >-
@@ -45,7 +57,7 @@ verwacht:
 
   p2p.locatie_basisgeo:
     min: 0
-    max: 1500
+    max: 3000
     reden: >-
       WEZEN, geen ontbrekende koppelingen. Deze tabel heeft GEEN foreign keys,
       en lokaal wijzen 397.549 van de 1.541.412 rijen (26%) naar een locatie die
@@ -54,6 +66,13 @@ verwacht:
       is een ander probleem en hoort niet stilzwijgend meegekopieerd te worden.
       Stand 2026-09-05: 416. Zolang p2p.locatie zelf op 0 staat is een verschil
       hier dus lokale datakwaliteit en geen prod-gat.
+      MARGE VERRUIMD 2026-10-23 van 1.500 naar 3.000: de diff gaf +1.518. Getoetst
+      door aan beide kanten alleen de rijen MET bestaande locatie te tellen
+      (`count(*) filter (where exists (select 1 from p2p.locatie l where
+      l.identificatie = lb.locatie_id))`): lokaal 1.146.441 = prod 1.146.441,
+      verschil 0. De +1.518 is dus exact het verschil in wezen (397.242 lokaal
+      tegen 395.724 op prod). Loopt het verschil weer tegen de grens, doe dan
+      eerst die toets: is het verschil met bestaande locatie 0, dan is het ruis.
 
   p2pwijziging.tekst_element:
     min: 0
