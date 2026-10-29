@@ -57,9 +57,10 @@ Dit is het lastigste stuk van de verhuizing.
 | Omgevingsbot-frontend en externe ontwikkelaars (`DEV_API_KEYS`) | omgevingsbot-backend | `BACKEND_URL = https://backend-production-38d9.up.railway.app`, er is geen eigen domein |
 
 Een Railway-adres (`*.up.railway.app`) verdwijnt met de service. Alles in deze tabel moet dus om
-vóórdat Railway weg kan. De andere viewers (OCD-viewer, omgevingsdocumentenregister,
-omgevingsvergunning-register, RoM-prototype) gebruiken al `api.ponsenkaart.nl`: die gaan vanzelf
-mee met de DNS.
+vóórdat Railway weg kan. **Correctie 2026-10-28**: hier stond dat OCD-viewer,
+omgevingsdocumentenregister en omgevingsvergunning-register al `api.ponsenkaart.nl` gebruikten.
+Dat klopte niet: hun Pages-proxy wees ook naar `ocd-api-production.up.railway.app`. Omgezet op
+2026-10-28, zie [Verloop](#verloop).
 
 ### DNS
 
@@ -468,10 +469,47 @@ oefening met Coolify.
 
 - **Railway `ocd`**: TCP-proxy uit en project opheffen na een week (2026-11-04), na akkoord.
   Tot dan deployt een push naar main óók nog op Railway.
-- **GitHub Action van `instructieregels.nl`**: `PSQL_CONN` wijst nog naar Railway. Moet vóór het
-  opheffen naar de tunnel (eigen tunnelgebruiker, SSH open voor GitHub: afspraak met Thomas) of
-  naar een Scheduled Task in Coolify. Read-only rol aanmaken.
+- ~~GitHub Action van `instructieregels.nl`~~: gedaan op 2026-10-28, via de API (zie hieronder).
 - **Verbeterpunten ocd-api** (geen verhuizing): visies in `/v1/adres` een vaste volgorde geven;
   `/v1/adres` met 12 zoektermen kost 17 s (veel korte query's na elkaar), de omgevingsbot stuurt
   er zoveel mee bij een schuurvraag.
 - **Backups van ocd**: nog geen. Wekelijkse `pg_dump` naar R2 zodra die er is (V3).
+
+### 2026-10-28, middag: viewers en instructieregels
+
+- **Drie viewers liepen nog via Railway**: de Pages-proxy van OCD-viewer.nl,
+  omgevingsdocumentenregister.nl en omgevingsvergunning-register.nl wees naar
+  `ocd-api-production.up.railway.app`. Omgezet naar `https://api.ponsenkaart.nl` (`812e034`,
+  `e81a4ca`, `8b0c62f`). De laatste twee deployen via Git; OCD-viewer is direct upload en is
+  vanaf `main` gedeployd (live stond `13e3de9` = `main`). Gecontroleerd: hun `/api/health` komt
+  op Hetzner binnen. `omgevingsvergunning-register.nl` stuurt door naar
+  `omgevingsvergunningenregister.nl`.
+- **instructieregels.nl: niet meer rechtstreeks bij de database.** Besluit Richard: route B,
+  via de API, in plaats van een SSH-tunnel vanaf GitHub (route A). Zo blijft SSH op `apps-1`
+  dicht en staat er geen databasewachtwoord in GitHub.
+  - `ocd-api`: `GET /v1/instructieregels/monitor?gendate=…` (`b04ef31`), alleen met de private
+    key, alleen-lezen transactie, eigen timeout van 180 s. De query is een kopie van
+    `build/query.sql` in `ocd-api/queries/instructieregels_monitor.sql`; het endpoint stuurt de
+    SHA-1 mee (`X-Query-Sha1`).
+  - `instructieregels.nl` (`61e0f2d`): `build.sh` haalt de data bij de API en stopt als de
+    SHA-1 afwijkt van zijn eigen `query.sql`. Workflow met `secrets.OCD_API_KEY`;
+    `PSQL_CONN` verwijderd uit GitHub.
+  - Getest: lokaal via de tunnel, op prod (17 s), en een echte run van de Action (56 s,
+    groen, gedeployd). De uitvoer is tot op de byte zo groot als die van de run van 26-10 uit
+    Railway (14.429.867 en 96.349 bytes).
+  - De read-only rol `instructieregels_lezer` (alleen `core`, `irm`, `p2p`, `v2a`) is voor route
+    A aangemaakt en nu ongebruikt. Laten staan of opruimen.
+- **Werkbranch**: `main` gemerged in `feat/vergunning-regelkoppeling` (lokaal `ba21768`),
+  runbook bijgewerkt voor de tunnel (in Richards niet-gecommitte wijzigingen).
+
+### 2026-10-28, eind van de middag: de OCD-API krijgt zijn eigen naam
+
+- De gedeelde OCD-API heette naar één van zijn gebruikers (`api.ponsenkaart.nl`). Nu
+  **`ocd.elconteo.nl`** (besluit Richard): A-record in zone `elconteo.nl`, DNS only, eigen
+  certificaat van Let's Encrypt. `api.ponsenkaart.nl` blijft als tweede naam werken.
+- Omgezet naar `https://ocd.elconteo.nl`: de Pages-proxy's van ponsenkaart.nl, OCD-viewer.nl,
+  omgevingsdocumentenregister.nl en omgevingsvergunningenregister.nl; de workflow van
+  instructieregels.nl; `OCD_API_URL` van de omgevingsbot-backend in Coolify. Alles getest (200,
+  Action groen, chatvraag 8 s).
+- Let op: de branch `feat/normen-op-de-kaart` van OCD-viewer wijst nog naar het Railway-adres.
+  Eerst `main` mergen voordat je daarvandaan deployt.
