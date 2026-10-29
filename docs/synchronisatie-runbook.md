@@ -1536,6 +1536,41 @@ is sinds 2026-10-28 301 GB, met de prod-DB op ~84 GB; Locus en de andere apps de
 `wro.wro_tekst_link` en `v2a.wro_artikel_indeling`. Dat kost ±20 s; anders kiest de
 planner na de bulklading slechte plannen.
 
+### Stap 6f — Wro-tegellaag (generalisatie) *(sinds 2026-10-29)*
+
+`/v1/tiles/planobjecten` serveert z11 en hoger rechtstreeks uit `wro.planobject`, maar
+z0–z10 uit `wro.planobject_generalisatie`. Die tabel is een afgeleide en wordt door
+geen enkele loader bijgehouden. Is `wro.planobject` veranderd — `load-wro` of
+`pipeline wro` (ook via `pipeline all`); `load-wro-imro2006` raakt hem niet — dan blijven
+de lage zoomniveaus de oude plannen tonen totdat je hem herbouwt. Dat faalt nergens.
+
+Herbouw op **elke database waar `wro.planobject` veranderde**:
+
+```bash
+cd dso-loader
+PYTHONPATH=. .venv/Scripts/python scripts/vul_locatie_generalisatie.py --bron wro             # lokaal
+OCD_DB_URL="$PROD_DB_URL" PYTHONPATH=. .venv/Scripts/python \
+    scripts/vul_locatie_generalisatie.py --bron wro --workers 4                               # prod, tunnel open
+```
+
+- **Alleen de volledige herbouw.** `--bronhouder` en `--inhaal` selecteren op het
+  IMOW-prefix `nl.imow-<code>.` en matchen geen enkele Wro-identificatie
+  (`NL.IMRO.0344.…`, `NL.IMRO.EB350762`). Ze gaven "0 weg → 0 nieuw" terug, en waren
+  groen. Het script weigert die combinatie nu.
+- **Duur**, gemeten 2026-10-29 op prod met `--workers 4`: 4,2 + 4,8 + 5,0 min voor de
+  drie niveaus, plus ±2 min indexen. Samen ±16 min, voor 6,37 mln planobjecten → 14,6 mln
+  rijen en 4,7 GB. `--workers 4` laat de helft van de 8 kernen van `apps-1` vrij voor de
+  API en de andere apps.
+- **Gedurende de herbouw zijn z0–z10 leeg of half gevuld** (TRUNCATE vooraf). Daarna
+  schrijft het script een `core.load_run`-rij (`locatie-generalisatie`, scope
+  `wro:volledig`), en die bumpt de tegel-ETag. Zonder die rij hield een tegel die tijdens
+  de herbouw werd opgehaald na afloop dezelfde ETag, en kreeg de client een 304 op de
+  halve tegel.
+- **Controle**: `diff_lokaal_prod.py` (stap 7) heeft voor deze tabel geen verwachte
+  afwijking meer. Op 2026-10-29 waren lokaal en prod gelijk tot op de rij
+  (2.604.733 / 5.639.449 / 6.332.831). Elk verschil is dus een herbouw die aan één kant
+  ontbreekt.
+
 ### Stap 7 — Verificatie
 
 ```bash
@@ -2110,6 +2145,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 | `diff_dso_bronhouder_coverage.py` | maandelijks | zwaardere coverage-diff naast de preview |
 | Wro/IMRO2006 (`load-wro-imro2006`) | los, ~24 min | landelijke PDOK-herparse, niet in de sync |
 | Wro-teksten v2 (stap 6e) | na elke Wro-lading | gaat vanzelf mee via `wro_teksten_keten`; daarna `wro_v2_naar_productie.py` (droogloop eerst) |
+| Wro-tegellaag (stap 6f) | na elke lading die `wro.planobject` raakt (`load-wro`, `pipeline wro`) | `vul_locatie_generalisatie.py --bron wro`, volledig, op elke DB waar planobject veranderde; ±16 min |
 | MER-register (stap 6d) | elke sync | harvest (~5 min incrementeel) + `load-mer` lokaal + `load_to_ocd.py` naar prod; site via `publish.py`. Stond hier als "los, seconden" — dat gold alleen voor `load-mer`, waardoor de harvest en de site vijf weken stilstonden |
 | `core.gemeentegrens` | 1×/jaar | gemeente-herindelingen |
 | Vervallen regelingen markeren (stap 2b) | elke sync | droogloop eerst; `markeer_vervallen_regelingen.py` |

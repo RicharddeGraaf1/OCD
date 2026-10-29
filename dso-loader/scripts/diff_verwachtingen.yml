@@ -182,17 +182,6 @@ verwacht:
     alleen: lokaal
     reden: Geocode-cache van de vth-verrijking; het resultaat zit in de geometrie-kolommen die wél mee gaan.
 
-  wro.planobject_generalisatie:
-    alleen: lokaal
-    reden: >-
-      Vector-tile-laag voor Wro, lokaal gebouwd. Prod heeft hem niet -- de
-      Wro-tegels worden daar niet geserveerd.
-      De opmerking dat de Ow-tegenhanger "momenteel nergens draait" is per
-      2026-09-05 achterhaald: `vul_locatie_generalisatie.py` zit sinds 01-09 in
-      `fase_post` (per bronhouder, direct na locatie_subdiv) en heeft sindsdien
-      een `--inhaal`-modus voor de prod-kant. Voor Wro geldt dat niet -- daar is
-      geen afnemer, dus geen reden om hem op prod te bouwen.
-
   mer.project_regeling:
     alleen: prod
     reden: >-
