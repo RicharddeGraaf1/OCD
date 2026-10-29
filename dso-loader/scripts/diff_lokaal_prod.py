@@ -43,6 +43,12 @@ import yaml
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
+# De uitvoer bevat een pijl (U+21B3). Naar een bestand of pipe schrijft Windows in
+# cp1252 en dan valt het script om ná het tellen, zonder resultaat (2026-10-29).
+for _stroom in (sys.stdout, sys.stderr):
+    if hasattr(_stroom, "reconfigure"):
+        _stroom.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 VERWACHTINGEN = Path(__file__).resolve().parent / "diff_verwachtingen.yml"
