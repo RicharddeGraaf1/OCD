@@ -9,10 +9,13 @@ via vth.etl_run.
 
 Eigenschappen:
 - Per-record TYPE_BESLUIT-classifier op basis van titel
-- Geometrie:
+- Geometrie: elk kind van <ow:gebiedsmarkering> met een <ow:geometrie> telt
+  mee, ongeacht zijn locatietype (Adres, Punt, Vlak, GeometrieRef, Weg,
+  Perceel, Lijn, Woonplaats, Buurt, Wijk, Hectometerpaal, ...). De WKT gaat
+  onverkort naar geometrie_rd; geometrie_rd_pt/_wgs_pt zijn de pin.
     * Adres   -> POINT + adresvelden
-    * Punt    -> POINT
-    * Vlak    -> POLYGON + centroid (RD en WGS84)
+    * Perceel -> POLYGON + kadastrale aanduiding in het label
+    * Weg/Lijn-> (MULTI)LINESTRING; de pin is de mean van de hoekpunten
     * (geen)  -> label/beschrijving in tekstvelden
 - httpx Session met retry/backoff (5/15/45/90/180s, max 5 pogingen)
 - Enrichment: haalt volledige publicatie-XML op via xml_url, parset
@@ -280,6 +283,45 @@ def polygon_centroid(text: str) -> Optional[tuple[float, float]]:
     cx = sum(p[0] for p in pts) / len(pts)
     cy = sum(p[1] for p in pts) / len(pts)
     return cx, cy
+
+
+_COORD_RE = re.compile(r"(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s+(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)")
+
+
+def wkt_centroid(text: str) -> Optional[tuple[float, float]]:
+    """Benaderde centroïde van willekeurige WKT — mean van de hoekpunten.
+
+    Voor een kale POLYGON delegeert deze functie naar polygon_centroid, zodat
+    de ~884k records die vóór 2026-09-20 al een pin hadden exact dezelfde
+    coördinaat houden (buitenring, sluitpunt eruit). Voor alles wat die
+    functie niet aankan — MULTIPOLYGON, LINESTRING, MULTILINESTRING,
+    MULTIPOINT — is het de mean over alle hoekpunten. Dat is een pin op de
+    kaart, geen meetkundige waarheid: de echte geometrie staat in
+    vth.vergunningkennisgeving.geometrie_rd en daar kan ST_Centroid of
+    ST_PointOnSurface overheen wanneer precisie telt.
+    """
+    if not text:
+        return None
+    stripped = text.strip().upper()
+    if stripped.startswith("POINT"):
+        return parse_point(text)
+    if stripped.startswith("POLYGON"):
+        return polygon_centroid(text)
+    pts: list[tuple[float, float]] = []
+    seen: set[tuple[float, float]] = set()
+    for m in _COORD_RE.finditer(text):
+        try:
+            pt = (float(m.group(1)), float(m.group(2)))
+        except ValueError:
+            continue
+        if pt in seen:
+            continue
+        seen.add(pt)
+        pts.append(pt)
+    if not pts:
+        return None
+    return (sum(p[0] for p in pts) / len(pts),
+            sum(p[1] for p in pts) / len(pts))
 
 
 def parse_latlon(text: str) -> Optional[tuple[float, float]]:
@@ -732,10 +774,37 @@ def _empty_geom() -> dict[str, object]:
     }
 
 
+# Locatietypen die KOOP onder <ow:gebiedsmarkering> hangt. De lijst hieronder
+# is beschrijvend, niet beperkend: sinds 2026-09-20 bepaalt de aanwezigheid van
+# <ow:geometrie>/<ow:locatiegebied> of een kind een kandidaat is, niet zijn tag.
+# Dat scheelde 41.049 records met een geldige WKT die op de oude allowlist
+# stukliepen — waaronder alle 16.512 vergunningen die óók een STOP-
+# omgevingsdocument zijn (die leveren hun gebied als <ow:GeometrieRef>).
+# De locatietypen die de parser vóór 2026-09-20 al accepteerde. Ze houden
+# voorrang, zodat de uitbreiding geen bestaande geometrie verplaatst.
+_KLASSIEKE_TAGS = frozenset(
+    {"Adres", "Punt", "Vlak", "Postcodegebied", "PostcodeHuisnummer"}
+)
+
+GEBIEDSMARKERING_TAGS = (
+    "Adres", "Punt", "Vlak", "Postcodegebied", "PostcodeHuisnummer",
+    "GeometrieRef", "Weg", "Perceel", "Lijn", "Woonplaats",
+    "Buurt", "Wijk", "Hectometerpaal",
+)
+
+
 def _extract_candidate(child: ET.Element) -> Optional[dict[str, object]]:
-    """Extract één geometrie-kandidaat uit een Adres/Punt/Vlak-kind."""
+    """Extract één geometrie-kandidaat uit een kind van <ow:gebiedsmarkering>.
+
+    Elk locatietype dat KOOP levert draagt dezelfde twee kinderen —
+    <ow:geometrie> (WKT, RD) en <ow:locatiegebied> (WKT, WGS84). We schakelen
+    daarom op de aanwezigheid van die geometrie en niet op de naam van de
+    wrapper; een nieuw locatietype in de bron valt dan niet stil op de grond.
+    """
     tag = child.tag.split("}", 1)[-1]
-    if tag not in ("Adres", "Punt", "Vlak", "Postcodegebied", "PostcodeHuisnummer"):
+    rd_probe = child.find("ow:geometrie", NS)
+    wgs_probe = child.find("ow:locatiegebied", NS)
+    if rd_probe is None and wgs_probe is None:
         return None
     out = _empty_geom()
     out["geometrie_type"] = tag
@@ -746,12 +815,12 @@ def _extract_candidate(child: ET.Element) -> Optional[dict[str, object]]:
     out["rd_wkt"] = rd_text
     out["wgs_wkt"] = wgs_text
 
-    if rd_text and rd_text.upper().startswith("POINT"):
+    if rd_text and rd_text.upper().lstrip().startswith("POINT"):
         pt = parse_point(rd_text)
         if pt:
             out["rd_x"], out["rd_y"] = pt
-    elif rd_text and rd_text.upper().startswith("POLYGON"):
-        c = polygon_centroid(rd_text)
+    elif rd_text:
+        c = wkt_centroid(rd_text)
         if c:
             out["rd_x"], out["rd_y"] = c
 
@@ -759,8 +828,8 @@ def _extract_candidate(child: ET.Element) -> Optional[dict[str, object]]:
     ll = parse_latlon(text_of(child.find("ow:locatiepunt", NS)) or "")
     if ll:
         out["lat"], out["lon"] = ll
-    elif wgs_text and wgs_text.upper().startswith("POLYGON"):
-        c = polygon_centroid(wgs_text)
+    elif wgs_text:
+        c = wkt_centroid(wgs_text)
         if c:
             out["lon"], out["lat"] = c  # locatiegebied is lon lat
 
@@ -967,6 +1036,19 @@ def parse_gebiedsmarkering(
             c = _extract_candidate(child)
             if c:
                 cands.append(c)
+
+    # De locatietypen die sinds 2026-09-20 meedoen (GeometrieRef, Weg, Perceel,
+    # ...) mogen een klassieke kandidaat nooit verdringen. Ze zijn er om de
+    # 41.049 records te vullen die helemaal niets hadden — niet om de keuze te
+    # herzien op de ~884k records die al een pin dragen. Zonder deze regel
+    # verschuift 0,47% van de bestaande pins, tot 8 km, puur omdat de
+    # documentvolgorde een ander eerste blok oplevert.
+    #
+    # Of een GeometrieRef (het vergunningsgebied zelf) uiteindelijk beter is
+    # dan een adrespin, is een aparte vraag die een eigen meting verdient.
+    klassiek = [c for c in cands if c["geometrie_type"] in _KLASSIEKE_TAGS]
+    if klassiek:
+        cands = klassiek
 
     return select_geometry_candidate(cands, titel=titel) or _empty_geom()
 

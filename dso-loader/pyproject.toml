@@ -17,8 +17,14 @@ dependencies = [
     #   en stopt hard als hij ontbreekt (stap 1, fase_post).
     # - numpy: run_overnight.extend_categorie() rekent de nearest-centroide uit
     #   (stap 6a) — de stap die de nieuwe chunks hun onderwerp geeft.
+    # - pyyaml: diff_lokaal_prod.py en diff_schema_lokaal_prod.py lezen
+    #   scripts/diff_verwachtingen.yml (stap 7, de verificatie). Ontbrak hier tot
+    #   2026-10-02, waardoor de hoofdcontrole van stap 7 op een verse venv omviel
+    #   met ModuleNotFoundError — en "niet gedraaid" ziet er net zo groen uit als
+    #   "0 afwijkingen".
     "openpyxl>=3.1",
     "numpy>=1.26",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]

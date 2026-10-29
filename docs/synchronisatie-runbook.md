@@ -60,6 +60,15 @@ zijn eigen repo-root op `sys.path`, dus `python scripts/<naam>.py` werkt ook
 buiten `dso-loader/`. Loopt er toch eentje om op `No module named 'src'`, dan
 mist die de bootstrap — voeg hem toe in plaats van het commando aan te passen.
 
+**Geen `--help` op een script dat je niet kent — lees de kop.** *(2026-10-17,
+twee keer in één nacht.)* De scripts in `instructieregels.nl/match/` hebben grotendeels
+geen argparse: een onbekende vlag wordt genegeerd en het script **voert gewoon uit**.
+`tier1_screen.py --help | head -20` startte de screening (en zou op de BrokenPipe
+van `head` zijn omgevallen); `sync_prod.py --help` schreef 15.159 rijen naar prod
+zonder de droogloop die hieronder voorgeschreven staat. Beide keren onschadelijk
+omdat het toch de volgende stap was, maar de controle vooraf was weg. Wil je
+weten welke vlaggen er zijn: `grep -n "add_argument\|sys.argv" <script>`.
+
 ---
 
 
@@ -89,15 +98,21 @@ mist die de bootstrap — voeg hem toe in plaats van het commando aan te passen.
 
 ## 2. Rolverdeling van de twee databases
 
-| | LOKAAL (Docker, `localhost:5434/dso`) | PROD (Railway PostGIS) |
+| | LOKAAL (Docker, `localhost:5434/dso`) | PROD (`ocd-postgis` in Coolify op `apps-1`, sinds 2026-10-28) |
 |---|---|---|
 | Rol | werkbank: evals, viewer-tests, analyses, zware herbouw; **de enige plek waar geharvest wordt** | wat eindgebruikers zien; **ontvangt gegevens, draait geen loaders** |
 | Consumenten | jij | ocd-api → viewer, bot, ponsenkaart, instructieregels, vergunningenregister |
-| Bereikbaar | altijd | alleen met de **TCP-proxy tijdelijk aan** (dashboard → PostGIS → Settings → Networking) |
-| Parallelisme | normaal | `get_conn()` zet het uit (kleine `/dev/shm`) |
+| Bereikbaar | altijd | alleen via de **SSH-tunnel**: `bash scripts/prod_tunnel.sh` open laten (lokaal `127.0.0.1:15433`; `PROD_DB_URL` wijst daarheen). Een Claude-sessie zet `OCD_TUNNEL_SLEUTEL=~/.ssh/claude-richard-locuslegis-hetzner` |
+| Parallelisme | normaal | `get_conn()` zet het uit; sinds Hetzner heeft de container 2 GB `/dev/shm`, dus dat kan op termijn weer aan |
 
 Beide moeten actueel zijn. Lokaal achterlaten betekent dat je evals op stale
 data draait; prod achterlaten betekent dat de sites stale zijn.
+
+> **Sinds 2026-10-28 staat prod op Hetzner** (zie `docs/railway-naar-hetzner-plan.md`).
+> Waar hieronder "TCP-proxy aan" staat, lees: **tunnel open** (`bash scripts/prod_tunnel.sh`
+> in een eigen venster). Scripts herkennen prod aan `is_prod_url()` (de DSN uit
+> `PROD_DB_URL`), niet aan `rlwy.net`. Ververs `p2p.naammatch_signaal` nooit kaal: altijd met
+> `enable_bitmapscan = off` (via `refresh_drieslag.py`), anders duurt het uren.
 
 ---
 
@@ -120,6 +135,8 @@ data draait; prod achterlaten betekent dat de sites stale zijn.
 8. DOWNSTREAM       gebakken sites herbouwen         ~15 min
 9. NAZORG           proxy dicht, VACUUM, loggen,
                     code van de run committen op main ~15 min
+9z. SLUITSTUK       elconteo.nl/data-actualiteit:
+                    export_data_actualiteit.py + push ~2 min
 ```
 
 Stappen 0–4, 6d en 7–9 horen bij elke sync. Stap 1b en 5 zijn afwegingen. **Stap 6 draait
@@ -137,6 +154,10 @@ de grootste openstaande tijdwinst (zie §5).
 ---
 
 ### Stap 0 — Preview (read-only)
+
+`--vergelijk-prod` leest prod: open eerst de tunnel, in een eigen venster, en laat
+hem open tot en met stap 9 (`bash scripts/prod_tunnel.sh`; een Claude-sessie zet
+`OCD_TUNNEL_SLEUTEL=~/.ssh/claude-richard-locuslegis-hetzner`).
 
 ```bash
 cd c:/GIT/OCD/dso-loader
@@ -296,6 +317,15 @@ python scripts/backfill_besluit_citeertitel.py --uitvoeren --soort beide
 
 ### Stap 2 — Verdrongen versies markeren
 
+> **`0 gemarkeerd` is hier het verwachte antwoord, niet een misser**
+> *(vastgesteld 2026-10-02)*. De preview meldde 13 VERDRONGEN; dit script zette er
+> **0** op inactief. Nagekeken: alle 13 stonden al op
+> `reden_inactief='verouderde-versie'` met een tijdstempel midden in de p2p-fase —
+> de loader markeert de siblings zelf bij het laden van een nieuwe versie. Lees
+> deze stap dus als **controle**, niet als uitvoerder: een getal boven nul betekent
+> dat de loader iets heeft laten liggen. De go/no-go-tabel bij stap 0
+> ("`VERDRONGEN > 0` → stap 2 is verplicht") blijft gelden, om die controle.
+
 ```bash
 python scripts/markeer_verouderde_expressies.py
 ```
@@ -359,7 +389,7 @@ die over *alle* ingetrokken expressies loopt, niet alleen die van vandaag.
 
 ### Stap 3 — p2p-gegevens naar prod
 
-Vereist de TCP-proxy aan en `PROD_DB_URL` in `.env`.
+Vereist de **tunnel open** (`bash scripts/prod_tunnel.sh`) en `PROD_DB_URL` in `.env`.
 
 Prod draait geen loader. Wat stap 1 lokaal heeft geharvest, wordt hier
 gerepliceerd: de rijen van de nieuw geladen expressies gaan over de lijn, en
@@ -429,7 +459,7 @@ de omvang zit in afgeleide objecten die je nooit over de lijn moet sturen.
 > sub-pixelzeef weglaat. Scoping op bronhouder is simpeler én goedkoper.
 
 `locatie_subdiv` meesturen zou in z'n eentje meer dan de helft van het
-p2p-volume over de proxy duwen, voor geometrie die prod in seconden per
+p2p-volume door de tunnel duwen, voor geometrie die prod in seconden per
 bronhouder zelf berekent.
 
 > ⚠️ **Stap 3 kan niet vóór de post-fase.** `p2p.regeling_load` wordt niet door de
@@ -462,6 +492,15 @@ bronhouder zelf berekent.
 5. **Verifieer per tabel** met tellingen aan beide kanten, gefilterd op dezelfde
    expressie-set. Gelijke aantallen = klaar; dit is de tegenhanger van de
    preview-vs-uitkomst-check van stap 7.
+6. **Het wijzigingsspoor van stap 1b ook naar prod** *(toegevoegd 2026-10-29)*:
+   `repliceer_p2pwijziging_naar_prod.py` (droogloop, dan `--ja`) en daarna de
+   wijzigingsindeling **aan beide kanten** opnieuw: `bouw_indeling.py
+   --alleen-wijzigingen` lokaal én met `OCD_DB_URL="$PROD_DB_URL"`. Het stond alleen
+   in de lopende tekst van stap 1b en werd op 28/29-10 overgeslagen; de diff van
+   stap 7 vond het (6 `p2pwijziging`-tabellen AFWIJKEND, 16 nieuwe en 216 gewijzigde
+   besluiten, 1,67 mln rijen in 13,4 min). De lokale wijzigingsindeling van
+   `full_sync.py` loopt bovendien vóór stap 1b en mist dus de besluiten van die nacht
+   (17.837 → 18.030 na de herbouw).
 
 #### Gereedschap
 
@@ -518,23 +557,26 @@ rekenwerk op prod, geen replicatie):
 # groene uitvoer. Gebeurd op 2026-09-13 (een `grep -oP` die op deze locale niet
 # werkt gaf een lege variabele).
 OCD_DB_URL="$PROD_DB_URL" python -c "import sys;sys.path.insert(0,'.');from src.db import get_conn;c=get_conn();cur=c.cursor();cur.execute('select current_database()');print(cur.fetchone())"
-#   -> moet 'railway' tonen, niet 'dso'
+#   -> moet 'railway' tonen, niet 'dso' (de prod-database heet ook op Hetzner 'railway')
 
 # subdiv voor de geraakte bronhouders
 OCD_DB_URL="$PROD_DB_URL" python -m src.cli refresh-subdiv -b gm0160   # per code
 # dan de MV's
 OCD_DB_URL="$PROD_DB_URL" python scripts/refresh_drieslag.py
 # health-MV's: zet parallellisme UIT in dezelfde sessie
-# health-MV's — parallellisme staat in het script zelf uit (kleine /dev/shm op
-# Railway). Geen kale `psql`: die staat op geen enkele PATH, zie leerpunt 7.
+# health-MV's — parallellisme staat in het script zelf uit (was nodig voor de kleine
+# /dev/shm op Railway). Geen kale `psql`: die staat op geen enkele PATH, zie leerpunt 7.
 python scripts/refresh_health_mvs.py --target prod
 ```
 
 `get_conn()` zet dat parallellisme bij een prod-DSN zelf uit, maar wie
-rechtstreeks met `psql`/`psycopg` verbindt moet het zelf doen — de
-Railway-container heeft een kleine `/dev/shm`. Gemeten 2026-08-08 op
+rechtstreeks met `psql`/`psycopg` verbindt moest het zelf doen — de
+Railway-container had een kleine `/dev/shm`. Gemeten 2026-08-08 op
 `core.mv_bronhouder_health`: mét parallellisme `could not resize shared memory
-segment … No space left on device`, zonder **16,2 s**.
+segment … No space left on device`, zonder **16,2 s**. Sinds 2026-10-28 heeft
+`ocd-postgis` op Hetzner 2 GB `/dev/shm` (`--shm-size=2g`) en 2 GB `shared_buffers`;
+het parallellisme mag daar in principe weer aan, maar `get_conn()` zet het nog uit
+tot dat gemeten is.
 
 Gemeten duur op prod (2026-08-08): drieslag **21,6 min** in acht stappen
 (`naammatch_signaal` 8,2 · niet-annoteerbaar 3,9 · gio_referentie_consistentie
@@ -656,6 +698,16 @@ powershell -File scripts/refresh-koop-to-prod.ps1 -Push -Refresh -Verify -ProdUr
 > dezelfde waarde. Een teller die stilstaat terwijl `pg_stat_activity` een
 > actieve INSERT toont, betekent niet-gecommit werk en geen hang.
 
+> **De `TE VERRIJKEN`-schatting van de preview is structureel pessimistisch.**
+> Drie metingen: 19-09 voorspeld 148 min → 87 werkelijk (1,3/s); 01-10 voorspeld
+> **254 min bij 0,8/s** → **116 min bij 1,8/s** voor 12.371 kennisgevingen. De
+> schatter neemt het tempo van de laatste drie runs en komt steeds te laag uit.
+> Praktisch gevolg: `fase_vth` kapt `enrich-koop` af op **4 uur**, en op die
+> voorspelling van 254 min lijkt dat krap — in werkelijkheid zat er ruim twee uur
+> lucht in. Reken dus niet op de voorspelling als je besluit of de verrijking in
+> één run past; kijk na tien minuten naar het echte tempo
+> (`count(*) FILTER (WHERE inhoud_geladen_at IS NOT NULL)`).
+
 `-Refresh` is **verplicht**, niet cosmetisch: hij doet `VACUUM (ANALYZE)` op
 `vth.vergunningkennisgeving` (vult de visibility map) en ververst
 `dossier_doorlooptijd` / `vergunning_stats` / `vergunning_stats_type_besluit`.
@@ -751,6 +803,16 @@ Meet die dekking over **beide** tabellen. Alleen `dmn_element` tellen geeft
 geen `<semantic:decision>`, alleen uitvoeringsregels.
 
 ### Stap 5 — i2a naar prod (afweging)
+
+> **De afweging is per 2026-10-02 beslecht: repliceer elke sync.** Hier stond
+> "verschil triviaal → laten staan", en dat sprak de diff van stap 7 tegen, die
+> **0** eist op `i2a.rtr_activiteit` omdat `ocd-api/vergunningcheck.py` die tabel
+> leest. Op 19-09 werd daarom alsnog gerepliceerd, op 01-10 opnieuw (verschil toen:
+> `uitvoeringsregel` +6.035 = 1,2%, `rtr_activiteit` +11, `toepasbaar_regelbestand`
+> +2). Twee runs op rij dezelfde uitkomst, dus de drempel heeft geen functie:
+> `repliceer_i2a_naar_prod.py` kost 9,0 min, vervangt alles in één transactie en
+> laat lezers de oude stand zien tot de COMMIT. Draai hem gewoon. De
+> afweging-tekst hieronder blijft staan als historie van hoe het zo gegroeid is.
 
 i2a heeft sinds 2026-08-08 een delta (zie hierboven) en sinds 2026-08-13 ook een
 push-script: `scripts/repliceer_i2a_naar_prod.py`. Vergelijk na stap 1 de tellingen
@@ -869,6 +931,19 @@ definitie is: staat wél in `p2p.regeling`, maar op `inactief`.
 `run_overnight.py` blijft bestaan voor een volledige herbouw, maar hoort niet
 meer in een gewone sync.
 
+> **`--opruimen` heeft een tweede helft: zet de verwijdering door naar prod.**
+> *Toegevoegd 2026-10-02.* De replicatie verwijdert niets uit zichzelf, dus na een
+> lokale opruiming staan de chunks op prod nog gewoon in de vindlaag — en wijkt de
+> vingerafdruk af die stap 6c gebruikt. `2026-08-06-categorie-naar-productie.py`
+> kán het wel: hij meldt *"prod opgeschoond: N chunks verwijderd die lokaal weg
+> zijn"* en bevestigt daarna opnieuw de pariteit. Draai hem dus ná elke opruiming.
+>
+> Gemeten 2026-10-02 op de 14 expressies die in die sync inactief werden:
+> lokaal 1.672.062 → 1.653.877 chunks (−18.185), chunks op inactieve expressies van
+> 18.185 naar 0, en via de cascade `chunk_annotatie` −20.520 en `chunk_categorie`
+> −13.585. Prod daarna exact gelijk. De droogloop gaf **14 verweesde expressies**,
+> niet de 39.846 van de naïeve variant — de scherpe definitie houdt stand.
+
 #### Maar dan wél de twee chunk-lagen erbij — anders is de sync half
 
 **Ontdekt 2026-08-13, en het is de keerzijde van bovenstaand advies.**
@@ -974,6 +1049,77 @@ Het script controleert eerst een vingerafdruk over `v2a.tekst_embedding` aan
 beide kanten en stopt als die verschilt — anders zouden de `chunk_id`'s naar
 andere tekst wijzen. Zonder `--ja` doet hij alleen die controle.
 
+#### En de indeling erbij — dit stond hier niet, en de diff van 01-10 vond het
+
+*Toegevoegd 2026-10-02.* `2026-08-06-categorie-naar-productie.py` zet
+`tekst_embedding`, `chunk_categorie` en `chunk_annotatie` over. Hij raakt
+`v2a.pad_categorie`, `v2a.artikel_indeling` en `v2a.wijziging_indeling` **niet**,
+en die drie stonden daardoor na een volledig groene sync op prod achter: +35,
++120 en +909. Er bestond al gereedschap voor — `indeling_naar_productie.py` —
+maar het stond in geen enkele stap, dus niemand riep het aan. Alleen de
+tabelbrede diff van stap 7 zag het.
+
+Wat het kost als je het overslaat: ~120 artikelen zonder categorie in
+omgevingsdocumentenregister.nl, en dat is stil — het filter toont wat het kent.
+Zelfde soort onvolledigheid als het chunk-lagen-geval hierboven.
+
+```bash
+python scripts/indeling_naar_productie.py            # droogloop
+python scripts/indeling_naar_productie.py --ja       # pad_categorie + artikel_indeling
+
+# wijziging_indeling gaat NIET mee — die bouw je rechtstreeks op prod, want de
+# twee p2pwijziging-mirrors lopen uiteen (zie de kop van het script):
+OCD_DB_URL="$PROD_DB_URL" python scripts/bouw_indeling.py --alleen-wijzigingen
+```
+
+Gemeten 2026-10-02: kopiëren 150.112 + 10.643 rijen in ~3,5 min (0 wezen bij het
+opzoeken van `tekst_element_id` op de natuurlijke sleutel), `--alleen-wijzigingen`
+op prod 16.408 artikelen.
+
+> ⚠️ **Twee dingen om te weten vóór je `indeling_naar_productie.py` draait.**
+>
+> **1. Hij is niet herhaalbaar zolang er `*_oud`-tabellen staan.** Een
+> `ALTER TABLE ... RENAME` hernoemt de **indexen niet**, dus na een eerdere swap
+> bezit `v2a.artikel_indeling_oud` nog de namen `artikel_indeling_regeling_idx`,
+> `_wid_idx`, `_cat_idx`, `_type_idx`, `_pad_idx` en `artikel_indeling_pkey`.
+> De DDL (`2026-08-add-pad-categorie.sql`) maakt die namen opnieuw aan en valt dan
+> om op `DuplicateTable: relation "artikel_indeling_regeling_idx" already exists`.
+> Gebeurd op 2026-10-02. Indexnamen leven in de schema-namespace, tabelnamen ook —
+> vandaar de botsing; de `wissel_om`-functie in het script zélf gebruikt daarom al
+> gesuffixte namen (`ai_regeling_idx{i}`), de DDL niet.
+>
+> Oplossing zonder iets weg te gooien — de `_oud`-kopie blijft intact:
+> ```sql
+> ALTER INDEX v2a.artikel_indeling_regeling_idx RENAME TO artikel_indeling_regeling_idx_oudnaam;
+> -- idem voor _wid_idx, _cat_idx, _type_idx, _pad_idx en artikel_indeling_pkey
+> ```
+> Structureel hoort de DDL gesuffixte indexnamen te krijgen, of `wissel_om` moet
+> de indexen meehernoemen. **Let op**: op 2026-10-02 stonden beide `_oud`-tabellen
+> op **0 rijen** — als rollback-kopie waren ze dus al waardeloos.
+>
+> **Dit is geen eenmalige reparatie maar een vaste voorstap** *(vastgesteld
+> 2026-10-08, drie keer op rij)*. Na élke swap bezit de nieuwe `_oud` de kale
+> namen opnieuw: de DDL maakt ze aan op de verse tabel, `wissel_om` hernoemt de
+> levende naar `_oud` mét haar indexen, en de volgende run botst weer. Op 08-10
+> moest het twee keer in één nacht (`*_oudnaam2`, `*_oudnaam3`). Doe de rename
+> dus standaard vóór `indeling_naar_productie.py`, generiek — ook
+> `pad_categorie_pkey` op `pad_categorie_oud` hoort erbij:
+> ```python
+> cur.execute("select indexname from pg_indexes where schemaname='v2a' "
+>             "and tablename in ('artikel_indeling_oud','pad_categorie_oud') "
+>             "and indexname not like '%oudnaam%'")
+> for (ix,) in cur.fetchall():
+>     cur.execute(f"ALTER INDEX v2a.{ix} RENAME TO {ix}_oudnaam<n>")
+> ```
+> Tot de DDL of `wissel_om` is aangepast is dit de stap; zonder hem faalt de
+> indeling-overzet op `DuplicateTable`.
+>
+> **2. De DDL begint met `DROP TABLE IF EXISTS v2a.artikel_indeling` en wordt
+> gecommit vóór het laden.** Tussen die commit en de swap is de tabel op prod dus
+> leeg. Faalt het script daarbinnen, dan staat het register zonder categorieën tot
+> je opnieuw draait. Niet gevaarlijk (de uitkomst is deterministisch uit lokaal),
+> maar draai dit niet ongezien.
+
 ### Stap 6b — Doorwerkingsmeting instructieregels.nl
 
 De monitor op instructieregels.nl toont per instructieregel of hij is uitgewerkt
@@ -999,6 +1145,19 @@ inventaris en staan dan op "Onbepaalbaar"; nieuwe omgevingsplan-teksten tellen
 helemaal niet mee. De site ziet er precies even actueel uit als daarvoor — dit
 is dezelfde soort stille onvolledigheid als G-98.
 
+> **Draai de screening (1a) niet naast een post-fase of een `refresh-v2a`**
+> *(gemeten 2026-10-08)*. `tier1_screen.py` leest per regel de hele
+> embeddingtabel (1,65 mln × 768 floats) en de lokale PostGIS heeft 128 MB
+> `shared_buffers`. Om 03:56 stonden de generalisatie-INSERT van een tweede
+> p2p-pas, de screening-query én een embed-INSERT alle drie op `IO/DataFileRead`,
+> met daarnaast autovacuums op `locatie_subdiv` (>1,5 u) en
+> `locatie_generalisatie`: container-CPU 5%, GPU 1%, geen locks — pure
+> schijf-thrash. De generalisatie van ws0651 kostte daardoor lokaal **2 u 5 min**
+> (op prod, alleen, 15,6 min), de screening zakte van 3,1 naar 11 s/regel en de
+> embed van 5 regelingen duurde 3 uur. Na het stoppen van de screening (hervatbaar:
+> gescreende regels staan in `screening_hit`) liep de rest in minuten af. Volgorde
+> dus: eerst de post-fase en de embed-refresh, dán 0a/0b/1a.
+
 **Eerst kijken of het nodig is:**
 
 ```bash
@@ -1018,8 +1177,15 @@ Draaien (volledige volgorde staat in `instructieregels.nl/PLAN.md`
                            condities ze weer oppakken
 1a. tier1_screen.py        embeddings + landelijke top-K screening
 1b. match/cellen.sql       screening_hit -> screening_cel (bewijs-hash)
-1c. fase2_fill.py          indicatief oordeel per provincie
-1d. judge_fanout_export.py judge per unieke bewijs-set, op SONNET
+1c. fase2_fanout.py export|laad  indicatief oordeel per provincie, via SONNET-
+                           subagents (niet fase2_fill.py: die oordeelt met lokale
+                           qwen, en dat mag sinds 13-09 niet meer). Werkmap is vast
+                           (data/judge/fase2/): zet de vorige eerst opzij als
+                           fase2-<datum>, anders weigert de export
+1d. judge_fanout_export.py judge per unieke bewijs-set, op SONNET; --dir
+                           data/judge/tier2-<datum> (doel: --pijplijn doel --dir
+                           data/judge/doel-<datum>). Omgeslagen .txt maken met
+                           match/batch_naar_txt.py <werkmap>
     -> N subagents            <- de lange stap; zie hieronder
     judge_fanout_laad.py
 2a. doel_screen.py         relevantie + screening voor de tier-2-instrumenten
@@ -1028,10 +1194,22 @@ Draaien (volledige volgorde staat in `instructieregels.nl/PLAN.md`
 ```
 
 **Stap 3 hoort hier en niet bij stap 8.** De oordelen ontstaan tegen de lokale
-DB; de CI-bouw van de site leest de Railway-DB. Zonder die sync deployt stap 8
-de vorige oordelen.
+DB; de CI-bouw van de site leest prod (via `ocd.elconteo.nl/v1/instructieregels/monitor`).
+Zonder die sync deployt stap 8 de vorige oordelen.
 
 #### De judge via Sonnet (stap 1d en 2b)
+
+> **Geef de agents een omgeslagen tekstversie, niet de JSON** *(sinds
+> 2026-10-08)*. Een `kandidaten`-veld is één JSON-regel van tot 6.000 tekens;
+> een agent die zo'n regel afgekapt leest, oordeelt op halve kandidaten en komt
+> stelselmatig op 'nee' of 'onbepaalbaar' uit — onzichtbaar, want de natelling
+> kijkt alleen naar sleutels. Schrijf per batch een `batch-NN.txt` met per set
+> `SLEUTEL:`, eventueel `SYSTEEM:`, `INSTRUCTIE:` en `KANDIDATEN:` in regels van
+> ≤110 tekens (`textwrap.fill`) en laat de agent dié lezen; de `.json` blijft de
+> referentie voor `judge_fanout_laad.py`. Met die vorm deed elke agent een batch
+> van ~32 sets in minder dan 30 s, 313/313 en 175/175 zonder herstelronde. Zelfde
+> advies voor de hertaling (stap 6bis): daar bleken 290 van 3.809 teksten langer
+> dan 2.000 tekens en die kregen een herstelronde met omgeslagen invoer.
 
 ```bash
 python match/judge_fanout_export.py           # werkvoorraad -> data/judge/batch-NN.json
@@ -1057,6 +1235,27 @@ Drie dingen die er niet toevallig zo in zitten:
    zwaarder: een ontbrekende hertaling is een leeg veld, een ontbrekend oordeel
    is een instructieregel die op de site als "Onbepaalbaar" verschijnt zonder
    dat iets klaagt.
+4. **De natelling ziet geen sjabloonwerk — kijk zelf naar de onderbouwingen**
+   *(2026-10-17)*. Twee van de tien tier2-batches gaven 26 resp. 21 van de 33 sets
+   woordelijk dezelfde 'nee'-onderbouwing bij 30–31 verschillende instructies; één
+   meldde "met een script" te hebben geschreven. Achteraf: op **07-10 hadden 9 van
+   de 10 batches dit patroon**, en de natelling meldde 313/313. Herdaan met de eis
+   hieronder: 33/33 resp. 31/33 dezelfde oordelen (2× ja → deels) — de oordelen
+   stonden dus grotendeels, de onderbouwing was hol. Toets per batch na het laden:
+   ```python
+   c = collections.Counter(r['onderbouwing'] for r in rows)
+   c.most_common(1)[0][1]   # > ~1/4 van de batch = herdoen
+   ```
+   en zet in de agentprompt: *"onderbouwing specifiek voor die set — wat eist de
+   instructie, wat regelen de kandidaten (niet); genereer oordelen niet met een
+   script of sjabloon"*. Met die zin gaven alle tien doel-batches 356/356 unieke
+   onderbouwingen. Een herdane batch: zet de oude uitvoer weg onder een naam
+   **buiten** de `out-*.jsonl`-glob van het laadscript (bijv. `sjabloon-NN.jsonl`),
+   anders laadt hij hem alsnog mee.
+5. **Elke agent een eigen werkmap** (`tmp-NN/` naast de batches), en noem die in de
+   prompt. Zonder dat schreef op 17-10 een hertaal-agent zijn deelbestanden in een
+   gedeelde tijdelijke map, waar een andere agent er één van overschreef; hij
+   herstelde het zelf, de sleutelcontrole bleef schoon, maar het is geluk.
 
 `tier2_fill.py` blijft bestaan voor een lokale run zonder abonnement, en is de
 referentie voor de prompt.
@@ -1138,6 +1337,12 @@ sleutel, dus een echte tekst zonder hertaling. `hertaal_fanout_laad.py` toetst
 daarom de sleutelset (elke `bron_hash` uit de invoer precies één niet-lege,
 geldige regel terug), schrijft bij een gat `batch-herstel.json` en eindigt met
 exitcode 1. Draai daar een extra subagent op en herhaal tot het dicht is.
+
+> **Geef de agents meteen de omgeslagen `.txt`, niet pas in een herstelronde**
+> *(2026-10-17)*. Per item `SLEUTEL:` + `TEKST:` met `textwrap.fill(…, 110)`, plus een
+> eigen `tmp-NN/` per agent. Resultaat bij 3.870 teksten: 3.870/3.870 in de eerste
+> ronde, geen herstel (07-10: 290 teksten in een herstelronde). De `.json` blijft de
+> referentie voor de natelling.
 
 > **Draai de export niet opnieuw in een map waar al `out-*.jsonl` staat.** De
 > batches zijn óók de referentie voor de natelling; een tweede export schrijft ze
@@ -1256,7 +1461,7 @@ Commissie ┘   (SQLite, gitignored) ├─► load_to_ocd.py ────► pr
 `build_regeling_links.py` en de twee verrijkers lezen **prod**, niet de SQLite:
 de regeling-koppeling zit in `mer.project_regeling` en de canonieke bevoegd-gezag-
 naam in `core.bronhouder`. Daarom hoort deze stap **ná stap 3/4** (p2p en vth op
-prod) en **vóór stap 9** (die zet de TCP-proxy weer dicht).
+prod) en **vóór stap 9** (die sluit de tunnel).
 
 ```bash
 cd C:/GIT/MER-register.nl
@@ -1270,7 +1475,7 @@ cd C:/GIT/OCD/dso-loader
 python -m src.cli load-mer                  # SQLite → LOKALE OCD, schema mer (seconden)
 
 cd C:/GIT/MER-register.nl
-export MER_PROD_URL="$OCD_PROD_URL"         # Railway-TCP-proxy moet open staan
+export MER_PROD_URL="$OCD_PROD_URL"         # tunnel moet open staan (prod_tunnel.sh)
 python harvest/load_to_ocd.py               # SQLite → PROD, schema mer (idempotente upsert)
 python harvest/build_regeling_links.py      # → prod mer.project_regeling (zacht, met zekerheid)
 ```
@@ -1325,9 +1530,9 @@ python scripts/wro_v2_naar_productie.py --bronhouder gm0402,gm0014          # dr
 python scripts/wro_v2_naar_productie.py --bronhouder gm0402,gm0014 --ja
 ```
 
-Bij veel plannen eerst de vrije ruimte op het Railway-volume controleren. Volume
-vergroten kan alleen in het dashboard; 150 GB sinds 2026-10-24, en de prod-DB stond
-toen op 84 GB. Draai na een grote overzet `ANALYZE` op `wro.wro_tekst_object_v2`,
+Bij veel plannen eerst de vrije schijfruimte op `apps-1` controleren
+(`ssh -i ~/.ssh/claude-richard-locuslegis-hetzner root@2.31.94.124 df -h /`). De schijf
+is sinds 2026-10-28 301 GB, met de prod-DB op ~84 GB; Locus en de andere apps delen hem. Draai na een grote overzet `ANALYZE` op `wro.wro_tekst_object_v2`,
 `wro.wro_tekst_link` en `v2a.wro_artikel_indeling`. Dat kost ±20 s; anders kiest de
 planner na de bulklading slechte plannen.
 
@@ -1337,6 +1542,18 @@ planner na de bulklading slechte plannen.
 python scripts/preview_sync.py --vergelijk-prod    # moet nu ~0 te laden tonen
 python scripts/diff_lokaal_prod.py                 # moet 0 AFWIJKEND tonen (~20 min)
 ```
+
+> **"~0" kan tijdens de nacht groeien, en dat is G-98 in het klein** *(gemeten
+> 2026-10-08)*. De sweep van 21:58 zag 2.013 regelingen in de DSO-lijst en laadde
+> er 15, exact de preview. De verificatie-preview om 01:25 zag **2.016** en 5 te
+> laden: drie met registratiedata van 10, 11 en 17 september (dus "oud", maar pas
+> die nacht in de lijst gekomen) en twee van die dag. De sync was niet fout; de
+> bron bewoog. Besluit toen: een tweede p2p-pas (`--skip-i2a --skip-vth
+> --skip-embed`, eigen label), daarna stap 2/3/6/6c voor die scope met expliciete
+> `--sinds` (zolang de tweede run open staat wijst "laatste geslaagde sync" naar de
+> vorige). Reken er dus niet op dat de preview aan het eind 0 zegt; lees het
+> getal, en beslis of een tweede pas de resterende uren waard is. Vijf regelingen
+> kostten ruim 2 uur, vooral door de generalisatie van één waterschap.
 
 > **De tabelbrede diff is sinds 2026-08-29 onderdeel van deze stap.** Hij telt
 > élke tabel in `core`, `p2p`, `p2pwijziging`, `v2a`, `i2a`, `irm`, `mer`, `vth`,
@@ -1352,6 +1569,14 @@ python scripts/diff_lokaal_prod.py                 # moet 0 AFWIJKEND tonen (~20
 > zet hem dan **met reden** in het verwachtingenbestand — een controle die ruis
 > geeft wordt niet gelezen, en dat is precies hoe "0 fouten" jarenlang valse
 > geruststelling gaf.
+>
+> ⚠️ **`diff_lokaal_prod.py` heeft `pyyaml` nodig en dat staat in geen enkele
+> dependency-declaratie** (gevonden 2026-10-02: `ModuleNotFoundError: No module
+> named 'yaml'`, ook `diff_schema_lokaal_prod.py` gebruikt hem; `pyproject.toml`
+> noemt hem niet). Op een verse of herbouwde venv is de hoofdcontrole van stap 7
+> dus niet uit te voeren — en omdat hij hier als laatste stap staat, is "niet
+> gedraaid" precies zo onzichtbaar als "0 afwijkingen". Pip-install lost het op;
+> `pyyaml` hoort bij de dependencies.
 
 En verder:
 
@@ -1388,7 +1613,11 @@ En verder:
 - `audit.sync_run` — `klaar_op` gevuld (anders toont het dashboard een
   spook-sync).
 - `core.load_run` — geen rij op `running` blijven staan.
-- `/v1/load-status` en `/v1/data-health` op de prod-API.
+- `/v1/load-status` en `/v1/data-health` op de prod-API (header `X-API-Key`,
+  `OCD_API_KEY_PUBLIC` uit `.env`). **Niet tijdens `diff_lokaal_prod.py`**: die
+  telt op prod elke tabel en spoelt de 2 GB-cache, waarna beide endpoints na ~23 s
+  een 500 geven (statement-timeout). Gemeten 17-10: tijdens de diff 500, erna 200
+  in 0,1 s.
 
 ### Stap 8 — Downstream
 
@@ -1460,6 +1689,21 @@ registry is de waarheid.
 `--db-source` bepaalt waar de gebakken builds hun data lezen: `local` (default,
 vers direct na de sync) of `prod`.
 
+> **Controleer de sites op inhoud, niet op exitcode** *(2026-10-02)*. Alle drie de
+> deploys melden `✨ Deployment complete`, ook als de build oude data bakte. Wat
+> wél bewijst dat het nieuwe erop staat: vergelijk de bytegrootte van een gebakken
+> artefact met wat de build net schreef. Gemeten die ochtend: `oordeel.json` live
+> op 99.109 bytes = de build, `mer-data.js` op 3.616.696 bytes = de build van
+> 07:16, en annotatieconformiteit byte-identiek aan zijn verse `pages.dev`-URL.
+> Die laatste vergelijking (custom domein vs. de `pages.dev` van déze deploy) is
+> ook de manier om de zone-cache uit te sluiten.
+>
+> **Niet schrikken van `Python was not found` in de instructieregels-build.**
+> `build/build.sh` doet `python3 … || python …`; op Windows slaat `python3` op de
+> Microsoft-Store-shim, die luidruchtig faalt waarna de fallback het werk doet.
+> `oordeel.json` wordt direct erna geschreven. Cosmetisch, maar het leest in een
+> log als een afgebroken stap.
+
 De poort van `publish.py` laat alleen door als de laatste sync-run "0 fouten"
 meldde. Zie de kanttekening in §5: die poort meet exceptions, geen
 volledigheid.
@@ -1487,14 +1731,16 @@ sync-status moet (en dat is vaker dan je denkt) de doorwerkingspoort ongemerkt
 meesleuren.
 
 Voor instructieregels is een `wrangler`-deploy overigens niet de enige weg: de
-repo deployt sinds 04-08 ook op elke push naar `main` (GitHub Actions bouwt dan
-uit de Railway-DB via `secrets.PSQL_CONN`). Wie na stap 6b iets in die repo
+repo deployt sinds 04-08 ook op elke push naar `main` (GitHub Actions haalt de
+data sinds 2026-10-28 op bij `ocd.elconteo.nl/v1/instructieregels/monitor`, met
+`secrets.OCD_API_KEY`; wijzig je `build/query.sql`, kopieer hem dan naar
+`ocd-api/queries/instructieregels_monitor.sql`, anders stopt de build). Wie na stap 6b iets in die repo
 commit, publiceert dus al.
 
 ### Stap 9 — Nazorg
 
-- **TCP-proxy weer UIT** in het Railway-dashboard. De DB-proxy hoort dicht te
-  staan tussen operaties door.
+- **Tunnel sluiten** (Ctrl+C in het venster van `prod_tunnel.sh`). Tot Railway is
+  opgeheven: ook de TCP-proxy van Railway dicht laten.
 - `VACUUM` op de lokale DB als er geprund is (dead tuples; lokaal 86,5 GB
   tegenover 59 GB op prod).
 - Sync-rapport + preview-uitkomst vastleggen; vault `log.md` bijwerken en
@@ -1505,6 +1751,31 @@ commit, publiceert dus al.
   die maanden blijft hangen. Zie de repo-hygiëne hieronder.
 - **Nooit tijdens een lopende run**: een `git checkout` wisselt de code onder
   de draaiende processen. Wacht tot het rapport geschreven is.
+
+#### Sluitstuk — de publieke actualiteitspagina bijwerken *(sinds 2026-10-02)*
+
+**Dit is de allerlaatste handeling van elke sync**, ná het committen. De pagina
+[elconteo.nl/omgevingswet/data-actualiteit](https://elconteo.nl/omgevingswet/data-actualiteit/)
+toont per run de deltas op de stroomkaart, het tijdverloop van de fasen en de
+groei over alle runs. Ze leest `runs.json` naast de pagina; zonder deze stap
+blijft ze op de vorige run staan en zegt ze dus iets onwaars over de actualiteit.
+
+```bash
+cd c:/GIT/OCD/dso-loader
+python scripts/export_data_actualiteit.py          # audit.sync_run + core.load_run → runs.json
+cd c:/GIT/Conteo_website
+git add public/omgevingswet/data-actualiteit/runs.json
+git commit -m "data-actualiteit: run <nr> (<datum>)"
+git push                                            # = deploy van elconteo.nl; alleen public/ gaat online
+```
+
+Controle: `curl -s https://elconteo.nl/omgevingswet/data-actualiteit/runs.json | grep -o '"label": *"[^"]*"' | tail -3`
+moet het nieuwe run-label tonen. (Hier stond `tail -c 400`; dat vindt het label
+niet meer sinds de fasen-lijsten achter de runs staan — 17-10.) Draaiden er twee
+runs parallel (hoofdrun + vth), dan staat de vth-aangroei op de run die het
+láátst sloot: de delta is het verschil met de vorige run-id-snapshot. De export koppelt fasen aan een run als ze
+binnen 24 uur na `gestart_op` startten; draai hem dus pas als stap 6 t/m 8
+klaar zijn, anders ontbreken die fasen in het tijdverloop.
 
 ### Stap 10 — Wijzigingsspoor opruimen (periodiek, niet elke sync)
 
@@ -1642,11 +1913,11 @@ een integratie met conflicten in het hart van de API. De route is de kernel als
 losse feature op main zetten (vier bestanden + tooling), reviewen, testen, en
 dán beide branches opruimen.
 
-**Randvoorwaarde**: eerst vaststellen vanaf welke commit Railway de `ocd-api`
-deployt. Draait prod de kernel, dan is main niet zonder meer deploybaar; draait
+**Randvoorwaarde**: eerst vaststellen vanaf welke commit Coolify de `ocd-api`
+deployt (sinds 2026-10-28 altijd `main`, via de webhook; daarvoor Railway). Draait prod de kernel, dan is main niet zonder meer deploybaar; draait
 prod main, dan is die branch afgeschreven werk. Dat is niet vanaf de
 buitenkant te zien — de kernel is interne machinerie, geen endpoint — dus het
-is een dashboard- of `railway status`-check.
+is een check in Coolify (project `ocd`, app `ocd-api`, laatste deployment).
 
 ---
 
@@ -1746,7 +2017,8 @@ Die zet de view kort op slot; queries erop wachten. Dat is 's nachts akkoord
 (gebruikerskeuze) en scheelt fors, want `CONCURRENTLY` bouwt een volledige
 tweede kopie en verschilt die daarna. Gemeten op prod: `naammatch_signaal`
 (2,1 GB / 6,2M rijen) liep met `CONCURRENTLY` ruim twee uur en werd IO-gebonden
-— de dubbele kopie past niet in de 2 GB-geheugencap van de Railway-container.
+— de dubbele kopie paste niet in de 2 GB-geheugencap van de Railway-container
+(op Hetzner: 6 GB containerlimiet, 2 GB `shared_buffers`; niet opnieuw gemeten).
 
 Draai je overdag, terwijl viewer/bot moeten doorlezen: `--concurrently`.
 
