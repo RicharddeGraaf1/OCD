@@ -492,6 +492,15 @@ bronhouder zelf berekent.
 5. **Verifieer per tabel** met tellingen aan beide kanten, gefilterd op dezelfde
    expressie-set. Gelijke aantallen = klaar; dit is de tegenhanger van de
    preview-vs-uitkomst-check van stap 7.
+6. **Het wijzigingsspoor van stap 1b ook naar prod** *(toegevoegd 2026-10-29)*:
+   `repliceer_p2pwijziging_naar_prod.py` (droogloop, dan `--ja`) en daarna de
+   wijzigingsindeling **aan beide kanten** opnieuw: `bouw_indeling.py
+   --alleen-wijzigingen` lokaal én met `OCD_DB_URL="$PROD_DB_URL"`. Het stond alleen
+   in de lopende tekst van stap 1b en werd op 28/29-10 overgeslagen; de diff van
+   stap 7 vond het (6 `p2pwijziging`-tabellen AFWIJKEND, 16 nieuwe en 216 gewijzigde
+   besluiten, 1,67 mln rijen in 13,4 min). De lokale wijzigingsindeling van
+   `full_sync.py` loopt bovendien vóór stap 1b en mist dus de besluiten van die nacht
+   (17.837 → 18.030 na de herbouw).
 
 #### Gereedschap
 
@@ -1168,8 +1177,15 @@ Draaien (volledige volgorde staat in `instructieregels.nl/PLAN.md`
                            condities ze weer oppakken
 1a. tier1_screen.py        embeddings + landelijke top-K screening
 1b. match/cellen.sql       screening_hit -> screening_cel (bewijs-hash)
-1c. fase2_fill.py          indicatief oordeel per provincie
-1d. judge_fanout_export.py judge per unieke bewijs-set, op SONNET
+1c. fase2_fanout.py export|laad  indicatief oordeel per provincie, via SONNET-
+                           subagents (niet fase2_fill.py: die oordeelt met lokale
+                           qwen, en dat mag sinds 13-09 niet meer). Werkmap is vast
+                           (data/judge/fase2/): zet de vorige eerst opzij als
+                           fase2-<datum>, anders weigert de export
+1d. judge_fanout_export.py judge per unieke bewijs-set, op SONNET; --dir
+                           data/judge/tier2-<datum> (doel: --pijplijn doel --dir
+                           data/judge/doel-<datum>). Omgeslagen .txt maken met
+                           match/batch_naar_txt.py <werkmap>
     -> N subagents            <- de lange stap; zie hieronder
     judge_fanout_laad.py
 2a. doel_screen.py         relevantie + screening voor de tier-2-instrumenten
