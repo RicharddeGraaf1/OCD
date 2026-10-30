@@ -8,6 +8,7 @@ Flow:
 5. Parse ZIP: IO-*/GML → locatie geometries
 """
 
+import re
 import time
 import zipfile
 from pathlib import Path
@@ -99,10 +100,37 @@ def _find_regelingen_for_overheid(overheid_code: str, naam: str,
     return results
 
 
-def _download_regeling(regeling_id: str) -> Path | None:
-    """Download a regeling as ZIP via the Ozon Download API."""
-    zip_name = regeling_id.replace("/", "_").strip("_") + ".zip"
-    dest = cfg.DOWNLOAD_DIR / "ow" / zip_name
+_ZIP_EXPRESSIE = re.compile(r"<(?:\w+:)?FRBRExpression>\s*(/akn/nl/act/[^<\s]+)\s*<")
+
+
+def zip_bevat_expressie(zip_path: Path, expression_id: str) -> bool:
+    """Staat `expression_id` als FRBRExpression in de XML van de ZIP (GML niet meegelezen)?"""
+    with zipfile.ZipFile(zip_path) as z:
+        for info in z.infolist():
+            naam = info.filename.lower()
+            if not naam.endswith(".xml") or info.file_size > 20_000_000:
+                continue
+            if expression_id in _ZIP_EXPRESSIE.findall(z.read(info).decode("utf-8", "ignore")):
+                return True
+    return False
+
+
+def _download_regeling(regeling_id: str, expression_id: str | None = None) -> Path | None:
+    """Download a regeling as ZIP via the Ozon Download API.
+
+    De Download API levert altijd de vigerende versie van het work. Zonder
+    `expression_id` is de cache per work, en dan blijft de eerste download
+    voor altijd staan: op 2026-10-29 kregen 151 vigerende regelingen hun GIO's
+    en locatie-basisgeo uit een ZIP van een eerdere versie (de cache was van
+    15 mei). Mét `expression_id` is de cache per expressie, en wordt na het
+    downloaden gecontroleerd dat de ZIP die expressie ook bevat; zo niet, dan
+    is er None (de DSO is intussen een versie verder, en de volgende sync laadt
+    die).
+    """
+    zip_name = regeling_id.replace("/", "_").strip("_")
+    if expression_id:
+        zip_name += "__" + re.sub(r"[^A-Za-z0-9]+", "_", expression_id.split("@", 1)[-1]).strip("_")
+    dest = cfg.DOWNLOAD_DIR / "ow" / (zip_name + ".zip")
 
     if dest.exists():
         console.print(f"    [dim]Using cached {dest.name}[/dim]")
@@ -150,6 +178,12 @@ def _download_regeling(regeling_id: str) -> Path | None:
                 f.write(chunk)
 
     console.print(f"    [green]Downloaded {dest.name} ({dest.stat().st_size / 1e6:.1f} MB)[/green]")
+    if expression_id and not zip_bevat_expressie(dest, expression_id):
+        # Niet bewaren: onder deze naam zou hij de volgende keer als de goede gelden.
+        dest.unlink()
+        console.print(f"    [yellow]ZIP bevat {expression_id} niet (DSO levert een andere "
+                      f"versie); GIO-stap voor deze expressie overgeslagen[/yellow]")
+        return None
     return dest
 
 

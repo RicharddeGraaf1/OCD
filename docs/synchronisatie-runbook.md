@@ -501,6 +501,10 @@ bronhouder zelf berekent.
    besluiten, 1,67 mln rijen in 13,4 min). De lokale wijzigingsindeling van
    `full_sync.py` loopt bovendien vóór stap 1b en mist dus de besluiten van die nacht
    (17.837 → 18.030 na de herbouw).
+   Reken bij elke sync op **~1,67 mln rijen en ~14 min**, ook als er weinig veranderde:
+   de loader herlaadt elk relevant besluit (nieuwe identity-id's), en de vingerafdruk
+   ziet dat als gewijzigd. Gemeten 29/30-10: 194 + 38 relevant = 4 nieuw + 228
+   gewijzigd. Geen fout, wel de grootste vaste post van deze stap.
 
 #### Gereedschap
 
@@ -707,6 +711,24 @@ powershell -File scripts/refresh-koop-to-prod.ps1 -Push -Refresh -Verify -ProdUr
 > lucht in. Reken dus niet op de voorspelling als je besluit of de verrijking in
 > één run past; kijk na tien minuten naar het echte tempo
 > (`count(*) FILTER (WHERE inhoud_geladen_at IS NOT NULL)`).
+
+> **De lopende dag laadt nooit meer mee** *(sinds 2026-10-29)*. `fase_vth` en de
+> preview laden tot en met **gisteren**. De watermark is `max(processed_date)`, en een
+> sync die deze fase na middernacht bereikte, verwerkte de lopende dag vóór KOOP er iets
+> voor publiceerde: `ok`, 0 records, en geen run kwam er nog langs. Zo verloren gegaan
+> en hersteld: 24-07-2026 (1.348) en 29-10-2026 (1.743). Controle op eerdere gaten:
+> werkdagen in `vth.etl_run` met `record_count = 0` waarvan `started_at` op of vóór
+> de dag zelf ligt.
+>
+> **Een herstelde dag in het verleden gaat er niet vanzelf naar prod.** De push neemt
+> `prod max(datum_publicatie) − 3 d`, dus een oude dag valt er altijd buiten. Daarvoor
+> is er sinds 29-10 een bovengrens:
+>
+> ```bash
+> python -m src.cli load-koop --from 2026-07-24 --to 2026-07-24 --force   # lokaal
+> python -m src.cli enrich-koop --loop --sleep 60 --stop-after-empty 2     # fase_vth sloeg hem over ("al bij")
+> powershell -File scripts/refresh-koop-to-prod.ps1 -Push -Refresh -Verify -ProdUrl "<PROD_DB_URL>" -Since 2026-07-24 -Until 2026-07-24
+> ```
 
 `-Refresh` is **verplicht**, niet cosmetisch: hij doet `VACUUM (ANALYZE)` op
 `vth.vergunningkennisgeving` (vult de visibility map) en ververst
@@ -1885,6 +1907,27 @@ Twee dingen om te weten voordat je hem hergebruikt:
 
 Controleer het resultaat met `diff_lokaal_prod.py` (runbook stap 7) — dat is de
 tegenhanger die deze afspraak afdwingbaar maakt.
+
+### GIO-ZIP per expressie *(sinds 2026-10-29)*
+
+De GIO-stap van `api_loader` (GIO's, GIO-basisgeo, locatie-basisgeo) downloadt de
+OW-ZIP. Tot 29-10 was die cache per **work** en werd een eenmaal gedownloade ZIP nooit
+ververst: elke nieuwe versie van een bestaand plan kreeg de GIO's van de eerste download
+(cache van 15 mei). Een scan van de 1.967 ZIP's vond **151 vigerende regelingen** met een
+ZIP van een andere versie. Nu is de cache per expressie en wordt de ZIP na het downloaden
+gecontroleerd op die expressie.
+
+Herstel per expressie (aanvullend, herhaalbaar), lokaal:
+
+```bash
+MSYS_NO_PATHCONV=1 python scripts/herlaad_gio_zip.py --expressie <frbr_expression> [--expressie …] --ja
+```
+
+`MSYS_NO_PATHCONV=1` is in Git Bash nodig: anders wordt `/akn/...` een Windows-pad. Voor
+expressies van de lopende run brengt `repliceer_p2p_naar_prod.py` het mee naar prod; voor
+de 148 historische gevallen is het een backfill met een eigen pad naar prod (§3a), nog
+open. Elk herstel zet wezen bij in `p2p.locatie_basisgeo` — toets de diff daar op rijen
+mét bestaande locatie.
 
 ## 3b. Repo-hygiëne: één branch, `main`
 
