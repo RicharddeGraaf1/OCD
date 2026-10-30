@@ -171,7 +171,13 @@ Na deze stappen draait er nog niets anders, maar staat alles klaar.
   (alleen die bucket, lezen en schrijven); de sleutel die nu in `.env` van ponsenkaart staat,
   mag alleen Pages en kan niet bij R2. In Coolify een S3-bestemming met die sleutel, en per
   database een dagelijkse `pg_dump`. Eén keer een restore testen. Verplicht vóór RichFit en Bundle of Recipes (B1).
-  Voor `ocd` (84 GB, opnieuw op te bouwen uit de lokale database) is een wekelijkse dump genoeg.
+  **`ocd` krijgt geen backup** (besluit Richard, 2026-10-30): prod en de lokale database vangen
+  elkaar op. Prod is volledig afgeleid van lokaal (elke sync, en de restore van 28-10 bewees de
+  herbouw); de oordelen en hertalingen die lokaal met Sonnet zijn gemaakt, staan via de sync ook op
+  prod. Wat bij dit besluit op één plek blijft: de gouden set en de vth-tabellen van
+  `feat/vergunning-regelkoppeling` (alleen lokaal), en de MER-store `harvest/data/mer.db` (laptop).
+  Het R2-deel van V3 geldt dus alleen nog voor RichFit en Bundle of Recipes, en kost geld zodra
+  R2 een betaalmethode vraagt; voor die twee nog te kiezen.
 - [ ] **V4. TTL omlaag.** Een dag van tevoren de TTL van elk domein dat verhuist naar 300 s. Op
   Cloudflare: `api.ponsenkaart.nl`, `www.omgevingsbot.nl`, `bundleofrecipes.nl`,
   `api.elconteo.nl`. Op TransIP: `rich-fit.nl` en `www`. Zie [DNS](#dns).
@@ -473,7 +479,7 @@ oefening met Coolify.
 - **Verbeterpunten ocd-api** (geen verhuizing): visies in `/v1/adres` een vaste volgorde geven;
   `/v1/adres` met 12 zoektermen kost 17 s (veel korte query's na elkaar), de omgevingsbot stuurt
   er zoveel mee bij een schuurvraag.
-- **Backups van ocd**: nog geen. Wekelijkse `pg_dump` naar R2 zodra die er is (V3).
+- **Backups van ocd**: geen, bewust; zie V3 (besluit 2026-10-30).
 
 ### 2026-10-28, middag: viewers en instructieregels
 
