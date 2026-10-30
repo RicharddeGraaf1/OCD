@@ -22,6 +22,7 @@ Volgorde:
   1b. REFRESH v2a.mv_element_hash (element→content-hash voor hertalingen, ~10s)
   1c. REFRESH p2p.gio_locatie (GIO ↔ locatie-koppeling)
   1d. REFRESH p2p.ala_punt (activiteit-op-locatie voor de punt-endpoints, ~2s)
+  1e. REFRESH p2p.mv_regel_op_locatie (regel-op-locatie voor de API, ~9s op prod)
   2. REFRESH p2p.naammatch_signaal (~4 min; draait met enable_bitmapscan
      uit — zie PLANNER_PER_STAP, zonder dat wordt het ruim twee uur)
   3. REFRESH p2p.naammatch_signaal_intra (~10s; hangt af van #2)
@@ -64,6 +65,14 @@ STAPPEN = [
     ("p2p.ala_punt",
      "p2p.ala_punt",
      "SELECT COUNT(*) AS n FROM p2p.ala_punt"),
+    # ~9s op prod. Voedt de regel-op-locatie-route van de API (ocd-api/main.py,
+    # query 1 bij een punt), en draagt het tekstelement-id (te_id). Stond tot
+    # 2026-10-30 in geen enkele stap: hij liep op de stand van de laatste restore
+    # (nieuwe regelingen ontbraken, ingetrokken bleven staan), en na een
+    # id-herstel wees hij naar andere tekst. Zie docs/id-drift-tekst-element.md.
+    ("p2p.mv_regel_op_locatie",
+     "p2p.mv_regel_op_locatie",
+     "SELECT COUNT(*) AS n FROM p2p.mv_regel_op_locatie"),
     ("p2p.naammatch_signaal",
      "p2p.naammatch_signaal",
      "SELECT COUNT(*) AS n FROM p2p.naammatch_signaal"),

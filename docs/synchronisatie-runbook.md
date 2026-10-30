@@ -533,7 +533,8 @@ Vier dingen waar hij op let, elk omdat het bij de eerste run misging:
   **Let op: dat gelijk-zijn geldt niet overal** *(gevonden 2026-10-30)*. Bij 13 regelingen
   uit de sync van 01-08, toen prod nog zelf laadde, zijn 11.766 tekstelement-id's tussen
   lokaal en prod verwisseld. Wat daar per id naar prod gaat, wijst naar andere tekst: alle
-  8.721 chunks van die regelingen en 396 verwijzingen in de tekst. Zie
+  8.721 chunks van die regelingen en 396 verwijzingen in de tekst. **Hersteld op 30-10**
+  met `scripts/herstel_id_drift_prod.py`, net als 67 ALA-rijen en 11 normwaarden. Zie
   [id-drift-tekst-element.md](id-drift-tekst-element.md) (vault G-175).
 - **Generated kolommen weglaten.** `tekst_element.inhoud_plain` is stored
   generated; die invoegen is een harde fout. De staging-tabel wordt daarom uit

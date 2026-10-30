@@ -70,7 +70,7 @@ regelingen opnieuw aanbood, liet dat zien: 10.689 overgeslagen, en daarna een un
 op `activiteit_locatieaanduiding` (`uq_ala_natural`). Die tabel heeft dezelfde soort drift.
 Die is hier niet uitgezocht.
 
-## Herstel (voorstel, niet uitgevoerd)
+## Herstel — oorspronkelijk voorstel (uitgevoerd, zie hieronder)
 
 Prod gelijktrekken met lokaal voor de 13 regelingen. Lokaal is de waarheid en de id-set is
 identiek:
@@ -87,3 +87,53 @@ identiek:
 Afdwingen in plaats van onthouden: `diff_lokaal_prod.py` zou per regeling een
 vingerafdruk over `(id, eid)` van `tekst_element` kunnen vergelijken, en niet alleen een
 telling. Dan valt id-drift bij de eerstvolgende sync op.
+
+## Herstel, uitgevoerd 2026-10-30
+
+Script: `dso-loader/scripts/herstel_id_drift_prod.py` (droogloop-default, één transactie per
+stap, natellen vóór de COMMIT). Logs in `c:/tmp/id-drift-2026-10-30/`.
+
+**Eerst de impact op alle andere tabellen in kaart.** Wat aan een tekstelement-id hangt:
+
+| | koppeling | bij het herstel |
+|---|---|---|
+| `tekst_element.parent_id` | FK, cascade | gaat mee (lokale boom, lokale id's) |
+| `tekst_inline_referentie` | FK, cascade | gewist en lokaal terug |
+| `v2a.artikel_indeling` | FK, **cascade** | wordt door het wissen meegewist → lokaal terug (inhoud was al gelijk) |
+| `v2a.tekst_embedding` | id zonder FK | klopt daarna vanzelf (droeg al de lokale id's) |
+| MV's met `te.id`: drieslag, `mv_element_hash`, `mv_bronhouder_health`, **`mv_regel_op_locatie`** | rekenen met het id | op prod opnieuw berekend |
+| views (`element_hertaling`, `v_vrijetekst_health`, …) | live | niets |
+| `irm.*` | regel-identificatie en chunk-id's | niets |
+
+**1. Tekstelementen (13 regelingen).** Droogloop vóór: 11.766 tekstelementen, 792 afwijkende
+verwijzingssleutels (396 weg + 396 verkeerd), 8.721 chunks, boom en indeling 0. Echt: 11.766
+weg (met cascade), 11.766 met het lokale id terug, plus 7.156 verwijzingen en 6.017
+indelingsrijen. Vóór de COMMIT was er op alle vijf onderdelen 0 afwijking. Dat kostte 17 s.
+Daarna `mv_element_hash` (38 s). Landelijke nameting: **0 van de 889.729 tekstelementen met
+een ander id**.
+
+**2. De andere tabellen met een eigen id**, vergeleken op inhoud per id (hele tabel):
+
+| tabel | rijen | zelfde inhoud, ander id | actie |
+|---|---|---|---|
+| `tekst_inline_referentie` | 624.921 | 0 (na stap 1) | — |
+| `activiteit_locatieaanduiding` | 408.723 | **67** | `--rijtabel`: 67 weg, 67 terug met lokaal id |
+| `normwaarde` | 28.262 | **11** | idem: 11 |
+| `kaartlaag` | 1.241 | 0 | — |
+
+Naar die rijen verwijst niets. Het herstel is daar dus alleen nodig voor replicatie per id: bij
+ALA botste die (`uq_ala_natural`), bij normwaarde zou hij stil een andere rij overschrijven,
+want die tabel heeft geen natuurlijke unieke sleutel. De andere tabellen met een eigen id
+(vindlaag, i2a, wijzigingsspoor) worden in hun geheel mét id's gespiegeld en zijn gelijk.
+MER laadt op prod zelf, en tussen de databases gaat daar niets per id.
+
+**3. Bijvangst: `p2p.mv_regel_op_locatie` werd nooit ververst.** Deze MV draagt `te_id`, en de
+API joint erop (`ocd-api/main.py`, de regel-op-locatie-route van bot en viewer). Hij stond in
+geen enkele sync-stap. Prod liep dus op de stand van de restore van 28-10 (392.743 rijen over
+1.425 regelingen), lokaal nog ouder (378.788 over 1.403). Nieuwe regelingen ontbraken en
+ingetrokken regelingen bleven zichtbaar. Na het id-herstel wees hij bovendien naar andere
+tekst. Ververst op beide kanten: **394.156 rijen over 1.421 regelingen**, 9 s op prod. Hij
+staat nu als stap 1e in `refresh_drieslag.py`, dus elke sync neemt hem mee.
+
+**Nog open:** de vingerafdruk op `(id, eid)` in `diff_lokaal_prod.py`, zodat id-drift bij de
+volgende sync vanzelf opvalt in plaats van bij toeval.
