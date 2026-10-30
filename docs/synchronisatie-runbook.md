@@ -1994,11 +1994,24 @@ Herstel per expressie (aanvullend, herhaalbaar), lokaal:
 MSYS_NO_PATHCONV=1 python scripts/herlaad_gio_zip.py --expressie <frbr_expression> [--expressie …] --ja
 ```
 
-`MSYS_NO_PATHCONV=1` is in Git Bash nodig: anders wordt `/akn/...` een Windows-pad. Voor
-expressies van de lopende run brengt `repliceer_p2p_naar_prod.py` het mee naar prod; voor
-de 148 historische gevallen is het een backfill met een eigen pad naar prod (§3a), nog
-open. Elk herstel zet wezen bij in `p2p.locatie_basisgeo` — toets de diff daar op rijen
-mét bestaande locatie.
+`MSYS_NO_PATHCONV=1` is in Git Bash nodig: anders wordt `/akn/...` een Windows-pad. Een
+lijst kan met `--bestand` (één expressie per regel). Voor expressies van de lopende run
+brengt `repliceer_p2p_naar_prod.py` het mee naar prod. Voor herstel van **bestaande**
+regelingen is er een eigen pad:
+
+```bash
+python scripts/backfill_gio_zip_prod.py --bestand expressies.txt          # droogloop
+python scripts/backfill_gio_zip_prod.py --bestand expressies.txt --ja
+OCD_DB_URL="$PROD_DB_URL" python scripts/refresh_drieslag.py              # daarna, plus health
+```
+
+Het raakt alleen wat de GIO-stap schrijft (GIO's, GIO-basisgeo, locatie-basisgeo met
+bestaande locatie) en lost de verwijzingen op prod zelf op. Gebruik hiervoor **niet**
+`repliceer_p2p_naar_prod.py --expressies`. Op 2026-10-30 herschreef die voor 147
+regelingen 207.558 ongewijzigde locaties in 2,8 uur, viel daarna om op id-drift
+(`uq_ala_natural`) en rolde alles terug. Het gerichte script deed hetzelfde werk in
+2 minuten. Elk herstel zet wezen bij in `p2p.locatie_basisgeo`. Toets de diff daar op
+rijen mét bestaande locatie.
 
 ## 3b. Repo-hygiëne: één branch, `main`
 

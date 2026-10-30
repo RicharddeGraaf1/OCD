@@ -15,6 +15,7 @@ herhaalde run is onschadelijk.
 Gebruik:
     python scripts/herlaad_gio_zip.py --expressie /akn/nl/act/gm0203/2020/omgevingsplan/nld@1073
     python scripts/herlaad_gio_zip.py --expressie <a> --expressie <b> --ja
+    python scripts/herlaad_gio_zip.py --bestand expressies.txt --ja   # één per regel
 
 Zonder --ja alleen de lijst met wat er zou gebeuren. Schrijft naar de lokale DB;
 de weg naar prod is repliceer_p2p_naar_prod.py (voor expressies van deze run).
@@ -30,9 +31,15 @@ from src.db import get_conn  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--expressie", action="append", required=True)
+    ap.add_argument("--expressie", action="append", default=[])
+    ap.add_argument("--bestand", help="bestand met één frbr_expression per regel")
     ap.add_argument("--ja", action="store_true")
     args = ap.parse_args()
+    if args.bestand:
+        with open(args.bestand, encoding="utf-8") as f:
+            args.expressie += [r.strip() for r in f if r.strip()]
+    if not args.expressie:
+        ap.error("geef --expressie of --bestand")
 
     from src.loaders.gio_zip import process_zip
     from src.loaders.inline_referentie import resolve_target_soort
@@ -40,7 +47,8 @@ def main():
 
     conn = get_conn()
     cur = conn.cursor()
-    for expr in args.expressie:
+    for i, expr in enumerate(args.expressie, 1):
+        print(f"[{i}/{len(args.expressie)}]", flush=True)
         cur.execute("SELECT frbr_work, inactief FROM p2p.regeling WHERE frbr_expression = %s", (expr,))
         r = cur.fetchone()
         if not r:
@@ -52,13 +60,18 @@ def main():
         if not args.ja:
             print(f"ZOU DOEN   {expr}")
             continue
-        zip_path = _download_regeling(r["frbr_work"], expr)
-        if not zip_path:
-            print(f"GEEN ZIP   {expr}")
+        try:
+            zip_path = _download_regeling(r["frbr_work"], expr)
+            if not zip_path:
+                print(f"GEEN ZIP   {expr}")
+                continue
+            stats = process_zip(zip_path, conn, regeling_expression=expr)
+            res = resolve_target_soort(conn, regeling_expression=expr)
+            conn.commit()
+        except Exception as e:  # één regeling mag de rest niet tegenhouden
+            conn.rollback()
+            print(f"FOUT       {expr}: {type(e).__name__}: {str(e)[:200]}")
             continue
-        stats = process_zip(zip_path, conn, regeling_expression=expr)
-        res = resolve_target_soort(conn, regeling_expression=expr)
-        conn.commit()
         print(f"GEDAAN     {expr}: {stats} · resolve {res}")
     conn.close()
 
