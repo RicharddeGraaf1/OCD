@@ -150,8 +150,11 @@ def _download_regeling(regeling_id: str, expression_id: str | None = None) -> Pa
         return None
     uuid = resp.json()["verzoekIdentificatie"]
 
-    # Step 2: Poll status
-    for _ in range(60):  # max 60 polls (5 min)
+    # Step 2: Poll status. Grote verordeningen (pv23, ~2026-10-30) staan na 5 min
+    # nog niet klaar; daarna haalde stap 3 een lege URL op en viel om op een
+    # JSONDecodeError. Nu max 20 min, en zonder BESCHIKBAAR netjes None.
+    status = ""
+    for _ in range(240):  # max 240 polls (20 min)
         time.sleep(5)
         status_resp = httpx.get(
             f"{DOWNLOAD_BASE}/status/{uuid}",
@@ -164,6 +167,10 @@ def _download_regeling(regeling_id: str, expression_id: str | None = None) -> Pa
         elif status == "MISLUKT":
             console.print(f"    [red]Download failed for {regeling_id}[/red]")
             return None
+    if status != "BESCHIKBAAR":
+        console.print(f"    [red]Download niet klaar na 20 min ({status or 'geen status'}) "
+                      f"voor {regeling_id}[/red]")
+        return None
 
     # Step 3: Get download URL
     dl_resp = httpx.get(f"{DOWNLOAD_BASE}/download/{uuid}", headers=_api_headers(), timeout=30)
