@@ -186,12 +186,13 @@ def preview_vth() -> dict:
         tempo = sum(r["n_verwerkt"] for r in runs) / sum(r["sec"] for r in runs)
     conn.close()
 
-    vandaag = datetime.date.today()
+    # Zelfde grens als full_sync._fase_vth_werk: tot en met gisteren.
+    tot = datetime.date.today() - datetime.timedelta(days=1)
     vanaf = (datetime.date.fromisoformat(laatste) + datetime.timedelta(days=1)
-             if laatste else vandaag - datetime.timedelta(days=7))
+             if laatste else tot - datetime.timedelta(days=6))
     dagen = []
     d = vanaf
-    while d <= vandaag:
+    while d <= tot:
         query = (f'dt.type="omgevingsvergunning" AND dt.modified>={d.isoformat()} '
                  f'AND dt.modified<{(d + datetime.timedelta(days=1)).isoformat()}')
         try:

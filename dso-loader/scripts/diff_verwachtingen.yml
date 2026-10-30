@@ -57,7 +57,7 @@ verwacht:
 
   p2p.locatie_basisgeo:
     min: 0
-    max: 3000
+    max: 6000
     reden: >-
       WEZEN, geen ontbrekende koppelingen. Deze tabel heeft GEEN foreign keys,
       en lokaal wijzen 397.549 van de 1.541.412 rijen (26%) naar een locatie die
@@ -73,6 +73,13 @@ verwacht:
       verschil 0. De +1.518 is dus exact het verschil in wezen (397.242 lokaal
       tegen 395.724 op prod). Loopt het verschil weer tegen de grens, doe dan
       eerst die toets: is het verschil met bestaande locatie 0, dan is het ruis.
+      MARGE VERRUIMD 2026-10-30 van 3.000 naar 6.000: de diff gaf +3.024, na het
+      herstel van de GIO-ZIP van Uithoorn (gm0451) die lokaal 1.288 wezen bij
+      `locatie_basisgeo` zette (`scripts/herlaad_gio_zip.py`). Toets: met
+      bestaande locatie lokaal 1.148.663 = prod 1.148.663, wezen 398.748 tegen
+      395.724. De backfill van de 148 andere regelingen met een ZIP van een andere
+      versie (docs/sync-2026-10-29.md, bevinding 3) zal er meer bijzetten; toets
+      dan opnieuw in plaats van de marge blind op te hogen.
 
   p2pwijziging.tekst_element:
     min: 0

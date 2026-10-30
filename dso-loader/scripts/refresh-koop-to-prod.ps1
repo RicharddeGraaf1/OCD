@@ -63,11 +63,16 @@
 .EXAMPLE
   # Eerste inhaalslag (prod staat op 19 mei): forceer de ondergrens.
   .\refresh-koop-to-prod.ps1 -Push -ProdUrl 'postgresql://...' -Since 2026-05-16
+
+.EXAMPLE
+  # Eén herstelde dag in het verleden (load-koop --force lokaal) naar prod.
+  .\refresh-koop-to-prod.ps1 -Push -Refresh -ProdUrl 'postgresql://...' -Since 2026-07-24 -Until 2026-07-24
 #>
 [CmdletBinding()]
 param(
     [string]$ProdUrl,
     [string]$Since,
+    [string]$Until,
     [int]$OverlapDays = 3,
     [string]$LocalUrl = "postgresql://postgres:postgres@localhost:5434/dso",
     [string]$LoaderDir = "c:\GIT\OCD\dso-loader",
@@ -187,10 +192,16 @@ WHERE table_schema='vth' AND table_name='vergunningkennisgeving'
 
     # Delta lokaal exporteren (CSV met expliciete kolomlijst).
     $deltaFile = Join-Path $WorkDir 'koop_delta.csv'
-    Info "Delta exporteren uit lokaal (datum_publicatie >= $since)..."
-    & $psql $LocalUrl -v ON_ERROR_STOP=1 -c "\copy (SELECT $colList FROM $TABLE WHERE datum_publicatie >= '$since') TO '$deltaFile' WITH (FORMAT csv, HEADER true)"
+    # -Until begrenst de delta van boven (inclusief). Voor een losse herstelde dag
+    # in het verleden: zonder grens stuurt -Since alles vanaf die dag opnieuw.
+    # Aanleiding 2026-10-29: 24-07 stond lokaal op 0 en was hersteld (+1.348),
+    # maar de watermark van prod (max datum - 3 d) kwam er nooit meer langs.
+    $filter = "datum_publicatie >= '$since'"
+    if($Until){ $filter += " AND datum_publicatie <= '$Until'" }
+    Info "Delta exporteren uit lokaal ($filter)..."
+    & $psql $LocalUrl -v ON_ERROR_STOP=1 -c "\copy (SELECT $colList FROM $TABLE WHERE $filter) TO '$deltaFile' WITH (FORMAT csv, HEADER true)"
     if($LASTEXITCODE -ne 0){ throw "delta-export faalde (exit $LASTEXITCODE)" }
-    $nDelta = (& $psql $LocalUrl -tAqc "SELECT count(*) FROM $TABLE WHERE datum_publicatie >= '$since';").Trim()
+    $nDelta = (& $psql $LocalUrl -tAqc "SELECT count(*) FROM $TABLE WHERE $filter;").Trim()
     $mb = [math]::Round((Get-Item $deltaFile).Length/1MB,1)
     Info "Delta: $nDelta rijen, $mb MB."
 

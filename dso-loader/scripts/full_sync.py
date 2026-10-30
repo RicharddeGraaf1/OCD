@@ -524,21 +524,26 @@ def _fase_vth_werk() -> int:
     cur = conn.cursor()
     laatste = q1(cur, "SELECT max(processed_date)::text m FROM vth.etl_run WHERE status='ok'")
     conn.close()
-    vandaag = datetime.date.today()
+    # Tot en met gisteren, nooit de lopende dag. De watermark is
+    # max(processed_date), dus een dag die vóór KOOP's publicatie wordt verwerkt
+    # staat daarna op 'ok' met 0 records en komt nooit meer langs. Een sync die
+    # na middernacht deze fase bereikt deed precies dat: 29-10-2026 (gestart
+    # 02:22) en 24-07-2026 (08:30), twee werkdagen met 0 kennisgevingen.
+    tot = datetime.date.today() - datetime.timedelta(days=1)
     if laatste:
         vanaf = datetime.date.fromisoformat(laatste) + datetime.timedelta(days=1)
     else:
-        vanaf = vandaag - datetime.timedelta(days=7)
+        vanaf = tot - datetime.timedelta(days=6)
 
     regels = []
     n_fout = 0
-    if vanaf > vandaag:
+    if vanaf > tot:
         regels.append("- KOOP-kennisgevingen: al bij (geen nieuwe dagen)")
         ok1 = ok2 = True
     else:
         ok1 = subproc([py, "-m", "src.cli", "load-koop",
-                       "--from", vanaf.isoformat(), "--to", vandaag.isoformat()],
-                      f"load-koop {vanaf}..{vandaag}")
+                       "--from", vanaf.isoformat(), "--to", tot.isoformat()],
+                      f"load-koop {vanaf}..{tot}")
         ok2, meting_enrich = gemeten_subproc(
             [py, "-m", "src.cli", "enrich-koop", "--loop",
              "--sleep", "60", "--stop-after-empty", "2"],
@@ -549,7 +554,7 @@ def _fase_vth_werk() -> int:
         # De geometrie-backfill is rekenwerk en draait in fase_post — anders
         # zit er een rekenstap tussen twee harvest-stappen (enrich → load-ovg).
         regels.append(
-            f"- KOOP-kennisgevingen {vanaf}..{vandaag}: load {'ok' if ok1 else 'FOUT'} "
+            f"- KOOP-kennisgevingen {vanaf}..{tot}: load {'ok' if ok1 else 'FOUT'} "
             f"(geometrie-backfill draait in post)")
         regels.append(meting_enrich)
 

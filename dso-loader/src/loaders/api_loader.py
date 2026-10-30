@@ -435,15 +435,17 @@ def load_documentstructuur(conn, regeling_uri: str, expression_id: str):
     # jarenlang het geval omdat gio_zip alleen aan losse backfill-scripts hing:
     # 17.582 dode verwijzingen over 125 regelingen (vault gaps.md G-119).
     #
-    # De ZIP is gecached per work, en de Download API levert toch altijd de
-    # vigerende versie — voor een regeling die we zojuist als vigerend hebben
-    # geladen is dat precies de goede. Best-effort: een mislukte GIO-stap mag
+    # De ZIP is gecached per expressie en gecontroleerd op die expressie. Tot
+    # 2026-10-29 was de cache per work, met de aanname dat de Download API toch
+    # de vigerende versie levert; maar een eenmaal gedownloade ZIP werd nooit
+    # ververst, zodat elke nieuwe versie de GIO's van de eerste download kreeg
+    # (151 vigerende regelingen). Best-effort: een mislukte GIO-stap mag
     # het laden van de tekst niet ongedaan maken, dus de fout wordt gelogd en
     # de resolve draait alsnog (die koppelt dan wat er al ligt).
     try:
         from src.loaders.gio_zip import process_zip
         from src.loaders.ow_loader import _download_regeling
-        zip_path = _download_regeling(regeling_uri)   # regeling_uri is het work
+        zip_path = _download_regeling(regeling_uri, expression_id)   # regeling_uri is het work
         if zip_path:
             process_zip(zip_path, conn, regeling_expression=expression_id)
     except Exception as e:
@@ -1461,7 +1463,20 @@ def load_via_api(overheid_code: str, naam: str,
                     # documenten hybride zijn, en vangt hij ook de soorten die we
                     # nog niet zijn tegengekomen.
                     if leeg:
-                        extra = load_divisieannotaties(conn, regeling_uri, bronhouder_code, expression_id)
+                        # Een echt artikelstructuur-document zonder annotaties (bij de
+                        # bron leeg, zoals de voorbeschermingsregels gm0342 van
+                        # 2026-10-13) krijgt hier een 400 "Deze regeling ondersteunt
+                        # geen Divisie-objecten". Dat is het antwoord "geen vrije
+                        # tekst", geen omgevallen annotatielaag; tot 2026-10-29 telde
+                        # hij als fout in het sync-rapport.
+                        try:
+                            extra = load_divisieannotaties(conn, regeling_uri, bronhouder_code, expression_id)
+                        except httpx.HTTPStatusError as e:
+                            if e.response.status_code != 400:
+                                raise
+                            console.print("    [dim]geen annotaties bij de bron (ook geen "
+                                          "divisie-objecten)[/dim]")
+                            extra = {"tekstdelen": 0}
                         if extra["tekstdelen"]:
                             console.print(
                                 f"    [yellow]0 regels — vrijetekst-terugval gaf "
