@@ -10,6 +10,7 @@ Endpoints:
     GET  /v1/vergunningen/pins      — lightweight pin-only voor kaartweergave
     GET  /v1/vergunningen/facets    — filter-counters (per filter-waarde)
     GET  /v1/vergunningen/stats     — totaal + laatste-ingest, voor header
+    GET  /v1/vergunningen/zaken     — rond een punt, gebundeld per zaak (OCD-viewer)
     GET  /v1/vergunningen/{koop_id} — volledige record-details
 
 Filter-conventie (gedeeld door list / pins / facets):
@@ -43,6 +44,7 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 
 from db import get_conn
+from vergunning_zaken import bundel_tot_zaken, zaak_sleutel
 
 router = APIRouter(prefix="/v1/vergunningen", tags=["vergunningen"])
 
@@ -1256,6 +1258,152 @@ def doorlooptijd(
         min_bg=min_bg_eff,
         min_bg_verlaagd=min_bg_eff < min_bg,
         took_ms=took,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Zaken rond een punt — vergunningen-tab in de OCD-viewer
+# ─────────────────────────────────────────────────────────────────────
+
+ZAKEN_MAX_STRAAL_M = 1_000
+# Bovengrens op kennisgevingen binnen de straal. Rond Broekhem 33 (Valkenburg)
+# liggen er 66 binnen ~350 m; in een binnenstad op 1 km meer. Wordt de grens
+# geraakt, dan vallen de oudste weg en meldt de respons `afgetopt`.
+ZAKEN_MAX_RIJEN = 2_000
+
+
+class ZaakStap(BaseModel):
+    koop_id: str
+    datum: date
+    soort: str = Field(
+        description="ontvangst | ontwerp | verlenging | melding | besluit | ingetrokken | buiten_behandeling | overig"
+    )
+    titel: str
+    preferred_url: str | None
+    pdf_url: str | None
+
+
+class Zaak(BaseModel):
+    zaak_id: str = Field(description="bg_naam|zaaknummer, of de koop_id als er geen zaaknummer is")
+    zaaknummer: str | None
+    bg_naam: str
+    publicatieblad: str | None
+    activiteit_code: str | None
+    onderwerp: str | None = Field(
+        None, description="Uit de titel afgeleid; None als niet herkenbaar — toon dan `titel`"
+    )
+    titel: str = Field(description="Titel van de nieuwste kennisgeving")
+    adres: str | None
+    woonplaats: str | None
+    x: float | None = Field(None, description="RD (EPSG:28992)")
+    y: float | None = Field(None, description="RD (EPSG:28992)")
+    afstand_m: int | None
+    op_adres: bool = Field(description="Hoort bij de opgegeven postcode + huisnummer")
+    fase: Literal["lopend", "besloten", "gestopt", "onbekend"]
+    fase_label: str
+    uitkomst: str | None = Field(
+        None, description="Alleen als de bron hem noemt. 'Besloten' zegt niets over verleend of geweigerd."
+    )
+    datum: date = Field(description="Publicatiedatum van de nieuwste kennisgeving")
+    doorlooptijd_dagen: int | None = Field(
+        None, description="Tussen de kennisgevingen van ontvangst en besluit; niet de wettelijke beslistermijn"
+    )
+    is_afwijk: bool = Field(description="Tekst-signaal afwijkvergunning (BOPA), gaps#G-84")
+    dossier_url: str | None = Field(None, description="Gecontroleerde deeplink naar het dossier bij het BG")
+    stappen: list[ZaakStap]
+
+
+class ZakenResponse(BaseModel):
+    zaken: list[Zaak]
+    n_kennisgevingen: int
+    afgetopt: bool = Field(description="True als er meer kennisgevingen binnen de straal lagen dan opgehaald")
+    straal_m: int
+    took_ms: int
+
+
+_ZAAK_COLS = """
+    koop_id, publicatieblad, bg_naam, titel, datum_publicatie, activiteit_code,
+    type_besluit, ST_X(geometrie_rd_pt) AS x, ST_Y(geometrie_rd_pt) AS y,
+    straatnaam, huisnummer, postcode, woonplaats, zaaknummer_bg,
+    preferred_url, pdf_url, afwijk_status, beschrijving
+"""
+
+
+@router.get(
+    "/zaken",
+    response_model=ZakenResponse,
+    summary="Kennisgevingen rond een RD-punt, gebundeld per zaak",
+)
+def zaken_rond_punt(
+    x: float = Query(..., description="RD x (EPSG:28992)"),
+    y: float = Query(..., description="RD y (EPSG:28992)"),
+    r: int = Query(350, ge=10, le=ZAKEN_MAX_STRAAL_M, description="Straal in meter"),
+    vanaf: date | None = Query(None, description="Alleen zaken met een bericht op of na deze datum"),
+    postcode: str | None = Query(None, description="Markeert zaken op dit adres (op_adres)"),
+    huisnummer: str | None = Query(None, description="Markeert zaken op dit adres (op_adres)"),
+):
+    """Wat speelt er hier? Filteren op fase en activiteit doet de viewer zelf.
+
+    Twee stappen. Eerst de kennisgevingen binnen de straal; de OFFSET 0-barrière
+    laat Postgres eerst de GiST-scan doen en dán pas sorteren, zie
+    list_vergunningen. Daarna de overige kennisgevingen van die zaken op
+    zaaknummer: een ontvangstbericht kan buiten de straal of de periode vallen
+    terwijl de rest van de zaak erbinnen ligt, en dan klopt de tijdlijn niet.
+    """
+    t0 = time.perf_counter()
+    punt = "ST_SetSRID(ST_MakePoint(%s, %s), 28992)"
+    where = [f"ST_DWithin(geometrie_rd_pt, {punt}, %s)"]
+    params: list[Any] = [x, y, r]
+    if vanaf:
+        where.append("datum_publicatie >= %s")
+        params.append(vanaf)
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT * FROM (SELECT {_ZAAK_COLS}, "
+            f"ST_Distance(geometrie_rd_pt, {punt}) AS afstand_m "
+            f"FROM vth.vergunningkennisgeving WHERE {' AND '.join(where)} OFFSET 0) s "
+            "ORDER BY datum_publicatie DESC, koop_id DESC LIMIT %s",
+            [x, y, *params, ZAKEN_MAX_RIJEN + 1],
+        )
+        rijen = [dict(rij) for rij in cur.fetchall()]
+        afgetopt = len(rijen) > ZAKEN_MAX_RIJEN
+        rijen = rijen[:ZAKEN_MAX_RIJEN]
+
+        sleutels = {zaak_sleutel(rij) for rij in rijen}
+        ruwe_nummers = sorted({rij["zaaknummer_bg"] for rij in rijen if rij["zaaknummer_bg"]})
+        if ruwe_nummers:
+            cur.execute(
+                f"SELECT {_ZAAK_COLS} FROM vth.vergunningkennisgeving "
+                "WHERE zaaknummer_bg = ANY(%s) AND NOT koop_id = ANY(%s)",
+                [ruwe_nummers, [rij["koop_id"] for rij in rijen]],
+            )
+            # Zaaknummers zijn per bevoegd gezag; de sleutel houdt die apart.
+            rijen += [dict(rij) for rij in cur.fetchall() if zaak_sleutel(rij) in sleutels]
+
+        zaken = bundel_tot_zaken(rijen, date.today(), postcode, huisnummer)
+
+        koop_ids = [stap["koop_id"] for zaak in zaken for stap in zaak["stappen"]]
+        if koop_ids:
+            cur.execute(
+                "SELECT DISTINCT ON (koop_id) koop_id, inzage_url FROM vth.vergunning_deeplink "
+                "WHERE koop_id = ANY(%s) AND werkt ORDER BY koop_id, gevonden_at DESC",
+                [koop_ids],
+            )
+            deeplinks = {rij["koop_id"]: rij["inzage_url"] for rij in cur.fetchall()}
+            for zaak in zaken:
+                # Nieuwste bericht eerst: dat is doorgaans het besluit zelf.
+                zaak["dossier_url"] = next(
+                    (deeplinks[s["koop_id"]] for s in reversed(zaak["stappen"]) if s["koop_id"] in deeplinks),
+                    None,
+                )
+
+    return ZakenResponse(
+        zaken=[Zaak(**zaak) for zaak in zaken],
+        n_kennisgevingen=len(rijen),
+        afgetopt=afgetopt,
+        straal_m=r,
+        took_ms=int((time.perf_counter() - t0) * 1000),
     )
 
 
