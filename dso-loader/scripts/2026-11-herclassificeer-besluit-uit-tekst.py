@@ -4,8 +4,8 @@ Achtergrond
 -----------
 `classify_type_besluit` kijkt alleen naar de titel. "Kennisgeving besluit op
 aanvraag het renoveren van de woning" bevat geen uitkomstwoord en valt door naar
-de regel `aanvraag`. Gemeten 2026-11-02 op de lokale DB: 43.739 besluiten staan
-zo als `aanvraag`, en 14.145 als `kennisgeving`. De uitkomst staat meestal gewoon
+de regel `aanvraag`. Gemeten 2026-11-02 op de lokale DB: 43.701 besluiten met tekst
+staan zo als `aanvraag`, en 14.147 als `kennisgeving`. De uitkomst staat meestal gewoon
 in de tekst ("De vergunning is verleend"), maar de tweede trap draaide alleen op
 `overig`.
 
