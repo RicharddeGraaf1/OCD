@@ -15,8 +15,10 @@ staan als `aanvraag`, en 14.163 als `kennisgeving`. Hier toetsen we de titel
 daarom zelf nog een keer na; zo klopt de tab ook zonder herclassificatie, en er
 verandert niets aan de data.
 
-**"Besloten" is niet "verleend".** Die kennisgevingen melden dát er besloten is,
-niet wat. De uitkomst noemen we alleen als `type_besluit` hem kent.
+**"Besloten" is niet "verleend".** De titel van zulke berichten noemt geen uitkomst.
+De tekst doet dat vaak wel, maar `type_besluit` weet dat pas na de herclassificatie
+(dso-loader/scripts/2026-11-herclassificeer-besluit-uit-tekst.py). De uitkomst noemen
+we alleen als `type_besluit` hem kent; daarna verschijnt hij hier vanzelf.
 """
 
 from __future__ import annotations
@@ -31,7 +33,10 @@ from typing import Any, Iterable
 # hetzelfde zaaknummer) gepubliceerd.
 LOPEND_MAX_DAGEN = 365
 
-_BESLUIT = re.compile(r"\b(besluit|toestemming)\b", re.IGNORECASE)
+_BESLUIT = re.compile(r"\bbesluit\b", re.IGNORECASE)
+# Alleen als het bericht nog niet als aanvraag staat: "Aanvraag om toestemming"
+# is geen besluit, "Toestemming voor het plaatsen van een dakkapel" wel.
+_TOESTEMMING = re.compile(r"\btoestemming\b", re.IGNORECASE)
 # 'aangevraagd' hoort hier bewust niet bij: "Besluit aangevraagde
 # omgevingsvergunning" is een besluit.
 _ONTVANGST = re.compile(r"\b(ontvang\w*|ingekomen|ingediend\w*|binnengekomen)\b", re.IGNORECASE)
@@ -88,7 +93,9 @@ def soort_van(type_besluit: str | None, titel: str | None) -> str | None:
     if type_besluit == "aanvraag":
         return "besluit" if heeft_besluit else "ontvangst"
     # kennisgeving, overig, NULL: alleen een besluit als de titel het zegt.
-    return "besluit" if heeft_besluit and type_besluit != "rectificatie" else None
+    if type_besluit == "rectificatie":
+        return None
+    return "besluit" if heeft_besluit or _TOESTEMMING.search(t) else None
 
 
 # ── Onderwerp en adres uit de titel ──────────────────────────────────────
@@ -142,22 +149,72 @@ def onderwerp_uit_titel(titel: str | None, straatnaam: str | None = None) -> str
     return rest[0].upper() + rest[1:]
 
 
-# `beschrijving` is de eerste keus: schoon en door de bronhouder zelf geschreven
-# ("vernieuwen van de voorgevelpui"), gevuld bij 389.425 van de 640.431 records
-# sinds 2025. Amsterdam zet het onderwerp alleen daar, niet in de titel. Een lap
-# tekst is geen onderwerp, vandaar de lengtegrens.
+# `beschrijving` is de eerste keus, maar geen schoon veld. Amsterdam zet er het
+# kale onderwerp in ("vernieuwen van de voorgevelpui") en heeft dat nergens anders;
+# andere bronhouders zetten er een sjabloon in ("Betreft: Beschikking op aanvraag
+# op locatie Willem II-laan 4, 6371JC Landgraaf") of plakken er van alles omheen
+# ("Gemeente Huizen - Z.452847 - het inrichten van een bouwplaats"). In een
+# steekproef van 7.564 records begon zo'n 25% met "Betreft", en had 30% een postcode.
 _MAX_ONDERWERP = 160
 _LIDWOORD_VOORAAN = re.compile(r"^(?:het|een|de)\s+", re.IGNORECASE)
+_BESCHRIJVING_PREFIX = re.compile(
+    r"^(?:betreft\s*:|toelichting\s*:|onderwerp\s*:|omschrijving\s*:"
+    r"|gemeente\s+[^-–:]{2,40}[-–:]"
+    r"|[A-Z]{0,3}[.\s]?\d[\w./-]*\d\s*[-–:]|\d{5,}\s)\s*",
+    re.IGNORECASE,
+)
+_BESCHRIJVING_SLOT = re.compile(
+    r"\s*(?:\[[^\]]*\]|\(\s*\d{1,2}\s+\w+\s+\d{4}\s*\)|,?\s*ontvangen\s+op\b.*)\s*$",
+    re.IGNORECASE,
+)
+_LOCATIEWOORD = re.compile(r"\s+(?:op|voor|aan|nabij)\s+(?:de\s+)?locatie\b|\s+locatie\s+", re.IGNORECASE)
+# Een procesbericht, geen onderwerp: dan moet het onderwerp er nog ergens in zitten.
+_PROCESWOORD = re.compile(
+    r"^(?:bekendmaking|verleend\w*|binnengekomen|ingekomen|ingediend\w*|gedeputeerde|gemeente"
+    r"|owo\b|de\s+volgende|rectificatie|intrekk\w*|verlenging|\()",
+    re.IGNORECASE,
+)
+
+
+def _schone_beschrijving(tekst: str | None, straatnaam: str | None) -> str | None:
+    t = " ".join((tekst or "").split())
+    if not t:
+        return None
+    # Twee keer: "Betreft: Gemeente Huizen - het plaatsen ...".
+    t = _BESCHRIJVING_PREFIX.sub("", _BESCHRIJVING_PREFIX.sub("", t))
+    while (kort := _BESCHRIJVING_SLOT.sub("", t)) != t:
+        t = kort
+    if _GENERIEK.match(t) or _PROCESWOORD.match(t):
+        # "Aanvraag omgevingsvergunning voor het plaatsen van ..."
+        return onderwerp_uit_titel(t, straatnaam)
+    loc = _LOCATIEWOORD.search(t)
+    if loc:
+        t = t[: loc.start()]
+    if straatnaam:
+        i = t.lower().find(straatnaam.lower())
+        if i > 0:
+            t = t[:i]
+    pc = _POSTCODE.search(t)
+    if pc:
+        # Het stuk vóór de postcode is het adres: terug naar de komma ervoor.
+        t = t[: pc.start()].rstrip(" ,")
+        if "," in t and re.search(r"\d", t.rsplit(",", 1)[1]):
+            t = t.rsplit(",", 1)[0]
+    t = _BESCHRIJVING_SLOT.sub("", t.rstrip(" ,;:"))
+    t = _LIDWOORD_VOORAAN.sub("", _SLOT_VOORZETSEL.sub("", t).strip())
+    # Het adres kan midden in een haakje zijn afgeknipt.
+    if t.count("(") > t.count(")"):
+        t = t[: t.rindex("(")].rstrip()
+    if len(t) < 6 or len(t) > _MAX_ONDERWERP or _GENERIEK.match(t):
+        return None
+    return t[0].upper() + t[1:]
 
 
 def onderwerp_van(rij: dict[str, Any], straatnaam: str | None = None) -> str | None:
     """Onderwerp uit `beschrijving`, anders uit de titel."""
-    b = " ".join((rij.get("beschrijving") or "").split()).rstrip(" .,;:")
-    if b:
-        b = _LIDWOORD_VOORAAN.sub("", b)
-    if b and len(b) <= _MAX_ONDERWERP and not _GENERIEK.match(b):
-        return b[0].upper() + b[1:]
-    return onderwerp_uit_titel(rij.get("titel"), straatnaam)
+    return _schone_beschrijving(rij.get("beschrijving"), straatnaam) or onderwerp_uit_titel(
+        rij.get("titel"), straatnaam
+    )
 
 
 def normaliseer_zaaknummer(z: str | None) -> str | None:

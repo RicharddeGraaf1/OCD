@@ -32,6 +32,8 @@ VANDAAG = date(2026, 11, 2)
         ("kennisgeving", "Kennisgeving WET BODEMBESCHERMING", None),
         ("overig", "Besluit voor het bouwen van een erker aan de Thorbeckestraat 1", "besluit"),
         ("overig", "Beslissing op bezwaar voor het project nieuwbouw woningen", None),
+        ("overig", "Toestemming voor het plaatsen van een dakkapel aan de voorzijde van de gevel", "besluit"),
+        ("aanvraag", "Aanvraag om toestemming voor het plaatsen van een dakkapel", "ontvangst"),
         ("aanvraag", "Buiten behandeling laten aanvraag omgevingsvergunning voor Madeliefpad", "buiten_behandeling"),
         ("buiten_behandeling", "Besluit buiten behandelingstelling, Broekhem 77", "buiten_behandeling"),
         ("ingetrokken", "Intrekken aanvraag omgevingsvergunning Lansiersveld 6", "ingetrokken"),
@@ -96,6 +98,56 @@ def test_onderwerp_beschrijving_gaat_voor_de_titel():
     titel = "Aanvraag omgevingsvergunning voor het kappen van een boom, Dorpsstraat 1"
     assert onderwerp_van({"titel": titel, "beschrijving": "Omgevingsvergunning"}) == "Kappen van een boom"
     assert onderwerp_van({"titel": titel, "beschrijving": "x" * 200}) == "Kappen van een boom"
+
+
+@pytest.mark.parametrize(
+    "beschrijving, straat, onderwerp",
+    [
+        # Sjablonen zonder onderwerp: door naar de titel.
+        ("Betreft: Besluit op locatie Broekhem 77, 6301 HE Valkenburg", "Broekhem", None),
+        ("Betreft: Beschikking op aanvraag op locatie Willem II-laan 4, 6371JC Landgraaf", "Willem II-laan", None),
+        ("Betreft: Aanvraag op locatie Prinsessenweg 62, 3433AG Nieuwegein", "Prinsessenweg", None),
+        ("Betreft: Beschikking verlenging beslistermijn op locatie Babelweg 15, 4357 BT Domburg", "Babelweg", None),
+        ("Aanvraag omgevingsvergunning", None, None),
+        ("(omgevingsvergunning)", None, None),
+        # Onderwerp met rommel eromheen.
+        (
+            "Betreft: het vervangen van dakkapel op het voor- en achterdakvlak [Z2025-00000208], Willemstraat 211, 2983ES Ridderkerk",
+            "Willemstraat",
+            "Vervangen van dakkapel op het voor- en achterdakvlak",
+        ),
+        (
+            "Betreft: het plaatsen van een dakkapel op locatie Galgeplek 11, 6662VS Elst, ontvangen op 2 maart 2026",
+            "Galgeplek",
+            "Plaatsen van een dakkapel",
+        ),
+        (
+            "het plaatsen van vier dugouts over twee velden, Sportlaan 12A, 9781CL Bedum (5 maart 2026)",
+            None,
+            "Plaatsen van vier dugouts over twee velden",
+        ),
+        ("Z2025-00001725 - uitbreiding bedrijfshal", None, "Uitbreiding bedrijfshal"),
+        ("Gemeente Huizen - Z.452847 - het tijdelijk inrichten van een bouwplaats", None, "Tijdelijk inrichten van een bouwplaats"),
+        ("Aanvraag omgevingsvergunning voor het plaatsen van tussenwanden, Eurodreef 1, 5431VG Cuijk", "Eurodreef", "Plaatsen van tussenwanden"),
+        # Komma's in het onderwerp zelf blijven staan.
+        (
+            "verbouwen van een bijgebouw naar mantelzorgwoning, plaatsen paardenverblijf",
+            None,
+            "Verbouwen van een bijgebouw naar mantelzorgwoning, plaatsen paardenverblijf",
+        ),
+    ],
+)
+def test_beschrijving_schoonmaken(beschrijving, straat, onderwerp):
+    assert onderwerp_van({"beschrijving": beschrijving, "titel": None}, straat) == onderwerp
+
+
+def test_sjabloon_in_beschrijving_valt_terug_op_de_titel():
+    # Valkenburg: de titel heeft het onderwerp, de beschrijving alleen een sjabloon.
+    rij = {
+        "beschrijving": "Betreft: Besluit op locatie Broekhem 1, 6301 HD Valkenburg",
+        "titel": "Kennisgeving besluit op aanvraag het renoveren van de woning (gemeentelijk monument), Broekhem 1, 6301 HD Valkenburg",
+    }
+    assert onderwerp_van(rij, "Broekhem") == "Renoveren van de woning (gemeentelijk monument)"
 
 
 def test_adres_zonder_titelwoorden_uit_de_straatnaam():
