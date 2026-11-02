@@ -9,7 +9,8 @@
 > **Status**: in uitvoering, 2026-10-27. Besluiten B1–B4 genomen, V1, V2 en V5 (op V5.2 na)
 > klaar. woordjacht-API en omgevingsbot live op Coolify sinds 2026-10-27, **ocd** (database,
 > ollama-embed, ocd-api op `api.ponsenkaart.nl`) sinds 2026-10-28. Football-Faceoff: data over,
-> app bouwt niet. Nog te doen: RichFit, Bundle of Recipes, Railway opruimen. Zie [Verloop](#verloop).
+> app bouwt niet. **RichFit** live op Coolify sinds 2026-10-30. Nog te doen: Bundle of Recipes
+> (klaargezet, wacht op de deploy key van Iris). Railway is leeg. Zie [Verloop](#verloop).
 > **Vorige afweging**: [prod-restore-en-hosting-afweging.md](prod-restore-en-hosting-afweging.md) (2026-06-06, toen gekozen voor Railway-resize).
 
 ## Waarom
@@ -519,3 +520,48 @@ oefening met Coolify.
   Action groen, chatvraag 8 s).
 - Let op: de branch `feat/normen-op-de-kaart` van OCD-viewer wijst nog naar het Railway-adres.
   Eerst `main` mergen voordat je daarvandaan deployt.
+
+### 2026-10-30: RichFit verhuisd, Bundle of Recipes klaargezet
+
+- **Besluit Richard**: V3 (backups) is geen voorwaarde meer voor RichFit en Bundle; beide hebben
+  weinig data. Iris is akkoord met de verhuizing van Bundle of Recipes.
+- **RichFit.** Project `richfit` in Coolify: `richfit-postgres` (`postgres:18-alpine`, 256 MB,
+  database en gebruiker `richfit`) en app `richfit` uit `RicharddeGraaf1/RichFitApp` (`main`,
+  Dockerfile, poort 8080, 512 MB, health-check `/`, volume `richfit-data` op `/app/data`).
+  Auto-deploy aan (push naar `main` rolt uit). Variabelen van Railway overgenomen, `RICHFIT_DB_*` naar de nieuwe
+  database. Live stond op Railway al `main` (Flyway V10/V11 toegepast), dus geen migratie bij
+  de overstap.
+  - Het databasewachtwoord geeft de API van Coolify niet terug (token zonder `root`); gelezen met
+    `docker exec <db> printenv POSTGRES_PASSWORD` op `apps-1`.
+  - **Overzetten**: Railway-app gestopt (`railway down`), `pg_dump --no-owner --no-acl` via
+    `railway ssh`, schema `public` leeg, terugzetten met `ON_ERROR_STOP`. Alle 15 tabellen gelijk
+    (o.a. 53 `day_plan`, 85 `workout_item`, 2 gebruikers). Een proefoverzetting een uur eerder
+    had 11 `day_plan`: de definitieve kopie vlak voor de DNS-wissel was dus nodig.
+  - Start in 6,5 s, 292 MB. **DNS** bij TransIP: `@` ALIAS en `www` CNAME vervangen door A
+    `2.31.94.124` (door Richard). Na een herstart een certificaat van Let's Encrypt voor beide
+    namen (tot 2027-01-28). De `_railway-verify`-TXT-records kunnen weg.
+- **Bundle of Recipes.** Project `bundle-of-recipes` in Coolify, branch **`deploy/railway`**
+  (wat live draait; 5 commits vóór `main`). Bron: een **deploy key** (`coolify-apps1`, alleen
+  lezen) die Iris aan haar repo toevoegt; Richard heeft geen beheerrechten. Deployen dus
+  handmatig, zoals met `railway up`.
+  - `bundle-postgres` (`postgres:18-alpine`, 256 MB, database en gebruiker `bundle`); proef-
+    overzetting gelukt, 6 tabellen gelijk (1 gebruiker, 1 bundel, 0 recepten).
+  - `bundle-scraper` (Railpack, `/scraper`, poort 8081, `RAILPACK_START_CMD` met `--host 0.0.0.0`
+    i.p.v. `::`), `bundle-backend` (Dockerfile, `/backend`, poort 8080, 768 MB), beide met vaste
+    containernaam en **zonder publiek domein**; `bundle-frontend` (Railpack, `/frontend`, poort
+    3000) met `BACKEND_URL=http://bundle-backend:8080` als **build**-variabele (Next.js bakt hem in).
+  - **Nog te doen**: deploy key door Iris, bouwen en testen op het sslip-adres, DNS
+    `bundleofrecipes.nl` `@` CNAME naar A `2.31.94.124` (DNS only). De data hoeft niet meer
+    over: Railway was sinds de proefkopie ongewijzigd, die kopie is de eindstand.
+- **Railway afgesloten** (besluit Richard): projecten `richfit` en `bundle-of-recipes` op
+  2026-10-30 verwijderd (`railway delete`, definitief op 2026-11-01), de andere vier waren al
+  ingepland. Bundle is offline tot hij op Coolify draait. Eindstanden van beide databases staan
+  lokaal in `~/RichFit-backups/` en `~/BundleOfRecipes-backups/` (`railway-eindstand-*.sql`).
+  Abonnement opzeggen doet Richard zelf in het dashboard.
+- **Opgeruimd**: `railway.toml`/`.railwayignore` in omgevingsbot.nl (`4a89620`), `railway.json` en
+  de workflow `deploy.yml` in FootballFaceoff (`2f08568`), `ocd-api/railway.toml` (`048e21d`). Geen `RAILWAY_TOKEN`-secrets meer op GitHub.
+  Coolify leest die bestanden niet: het heeft eigen build- en startcommando's.
+  **Blijft bewust**: `"railway" in url` in `is_prod_url()`, want de prod-database op Hetzner heet
+  nog steeds `railway`. De `_railway-verify`-TXT-records van `api.elconteo.nl` en `api.ponsenkaart.nl`
+  zijn weg (2026-11-02). Nog open: dat record van `bundleofrecipes.nl` na de Bundle-overstap, en
+  Railway in ARCHITECTUUR.md, PONSENKAART-DEPLOY.md en de runbooks.
