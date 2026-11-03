@@ -2384,6 +2384,206 @@ def _annoteer_boom(boom: list[dict], annotaties: dict[str, dict]):
             _annoteer_boom(node["kinderen"], annotaties)
 
 
+def _lege_annotatie() -> dict:
+    return {
+        "activiteiten": [],
+        "gebiedsaanwijzingen": [],
+        "normwaarden": [],
+        "regels": [],
+        "werkingsgebieden": [],
+    }
+
+
+def _annotaties_regeling(cur, expression: str, wids: list[str] | None = None) -> tuple[dict[str, dict], set[str]]:
+    """Annotaties per regeltekst_wid: activiteiten, gebiedsaanwijzingen, normwaarden, de
+    juridische regels zelf (type, idealisatie, thema's) en hun werkingsgebieden.
+
+    Met `wids` alleen die regelteksten; zonder de hele regeling.
+    """
+    # Twee vormen van de query i.p.v. "x IS NULL OR ...": dat OR-filter kan de index niet gebruiken.
+    filter_wids = "WHERE jr.regeltekst_wid = ANY(%s)" if wids is not None else ""
+    params_wids = (wids,) if wids is not None else ()
+
+    cur.execute(
+        f"""
+        SELECT jr.regeltekst_wid,
+               jr.regel_type,
+               jr.idealisatie,
+               jr.thema,
+               a.naam           AS activiteit_naam,
+               a.groep          AS activiteit_groep,
+               ala.kwalificatie,
+               ala.locatie_id   AS ala_locatie_id
+        FROM p2p.juridische_regel jr
+        JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                                 AND te.regeling_expression = %s
+        LEFT JOIN p2p.activiteit_locatieaanduiding ala
+               ON ala.juridische_regel_id = jr.identificatie
+        LEFT JOIN p2p.activiteit a
+               ON a.identificatie = ala.activiteit_id
+        {filter_wids}
+        """,
+        (expression, *params_wids),
+    )
+    act_rows = cur.fetchall()
+
+    cur.execute(
+        f"""
+        SELECT jr.regeltekst_wid,
+               ga.identificatie  AS ga_id,
+               ga.type           AS ga_type,
+               ga.naam           AS ga_naam,
+               ga.groep          AS ga_groep,
+               ga.locatie_id     AS ga_locatie_id
+        FROM p2p.juridische_regel jr
+        JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                                 AND te.regeling_expression = %s
+        JOIN p2p.juridische_regel_gebiedsaanwijzing jrga
+               ON jrga.juridische_regel_id = jr.identificatie
+        JOIN p2p.gebiedsaanwijzing ga
+               ON ga.identificatie = jrga.gebiedsaanwijzing_id
+        {filter_wids}
+        """,
+        (expression, *params_wids),
+    )
+    ga_rows = list(cur.fetchall())
+
+    # Vrije tekst: gebiedsaanwijzingen via het tekstdeel, op de divisietekst-node.
+    td_per_wid = _tekstdelen_per_divisietekst(cur, expression)
+    if wids is not None:
+        td_per_wid = {w: l for w, l in td_per_wid.items() if w in wids}
+    td_ids = sorted({t["td_id"] for lijst in td_per_wid.values() for t in lijst})
+    if td_ids:
+        cur.execute(
+            """
+            SELECT tg.tekstdeel_id,
+                   ga.identificatie AS ga_id, ga.type AS ga_type, ga.naam AS ga_naam,
+                   ga.groep AS ga_groep, ga.locatie_id AS ga_locatie_id
+            FROM p2p.tekstdeel_gebiedsaanwijzing tg
+            JOIN p2p.gebiedsaanwijzing ga ON ga.identificatie = tg.gebiedsaanwijzing_id
+            WHERE tg.tekstdeel_id = ANY(%s)
+            """,
+            (td_ids,),
+        )
+        ga_per_td: dict[str, list[dict]] = {}
+        for r in cur.fetchall():
+            ga_per_td.setdefault(r["tekstdeel_id"], []).append(r)
+        for wid, lijst in td_per_wid.items():
+            for t in lijst:
+                for r in ga_per_td.get(t["td_id"], []):
+                    ga_rows.append({**r, "regeltekst_wid": wid})
+
+    cur.execute(
+        f"""
+        SELECT jr.regeltekst_wid,
+               n.naam            AS norm_naam,
+               n.type_norm,
+               n.eenheid,
+               nw.kwantitatieve_waarde,
+               nw.kwalitatieve_waarde,
+               nw.locatie_id     AS nw_locatie_id
+        FROM p2p.juridische_regel jr
+        JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
+                                 AND te.regeling_expression = %s
+        JOIN p2p.juridische_regel_norm jrn
+               ON jrn.juridische_regel_id = jr.identificatie
+        JOIN p2p.norm n
+               ON n.identificatie = jrn.norm_id
+        LEFT JOIN p2p.normwaarde nw
+               ON nw.norm_id = n.identificatie
+        {filter_wids}
+        """,
+        (expression, *params_wids),
+    )
+    nw_rows = cur.fetchall()
+
+    # Groepeer annotaties per regeltekst_wid
+    annot: dict[str, dict] = {}
+    locatie_ids: set[str] = set()
+    werk_per_wid: dict[str, list[str]] = {}
+
+    for row in act_rows:
+        wid = row["regeltekst_wid"]
+        annot.setdefault(wid, _lege_annotatie())
+        regel = {
+            "type": row["regel_type"],
+            "idealisatie": row["idealisatie"],
+            "themas": row["thema"] or [],
+        }
+        if regel not in annot[wid]["regels"]:
+            annot[wid]["regels"].append(regel)
+        # Het werkingsgebied van de regel: met activiteit, of rechtstreeks op de regel
+        # (dan is activiteit_id leeg). Elke regel in de DSO heeft er minstens één.
+        if row["ala_locatie_id"] and row["ala_locatie_id"] not in werk_per_wid.setdefault(wid, []):
+            werk_per_wid[wid].append(row["ala_locatie_id"])
+        if row["activiteit_naam"]:
+            entry = {
+                "naam": row["activiteit_naam"],
+                "groep": row["activiteit_groep"],
+                "kwalificatie": row["kwalificatie"],
+                "locatie_id": row["ala_locatie_id"],
+            }
+            if entry not in annot[wid]["activiteiten"]:
+                annot[wid]["activiteiten"].append(entry)
+        if row["ala_locatie_id"]:
+            locatie_ids.add(row["ala_locatie_id"])
+
+    for row in ga_rows:
+        wid = row["regeltekst_wid"]
+        annot.setdefault(wid, _lege_annotatie())
+        entry = {
+            "id": row["ga_id"],
+            "type": row["ga_type"],
+            "naam": row["ga_naam"],
+            "groep": row["ga_groep"],
+            "locatie_id": row["ga_locatie_id"],
+        }
+        if entry not in annot[wid]["gebiedsaanwijzingen"]:
+            annot[wid]["gebiedsaanwijzingen"].append(entry)
+        locatie_ids.add(row["ga_locatie_id"])
+
+    for row in nw_rows:
+        wid = row["regeltekst_wid"]
+        annot.setdefault(wid, _lege_annotatie())
+        entry = {
+            "naam": row["norm_naam"],
+            "type_norm": row["type_norm"],
+            "eenheid": row["eenheid"],
+            "waarde": (
+                float(row["kwantitatieve_waarde"])
+                if row["kwantitatieve_waarde"] is not None
+                else row["kwalitatieve_waarde"]
+            ),
+            "locatie_id": row["nw_locatie_id"],
+        }
+        if entry not in annot[wid]["normwaarden"]:
+            annot[wid]["normwaarden"].append(entry)
+        if row.get("nw_locatie_id"):
+            locatie_ids.add(row["nw_locatie_id"])
+
+    # Naam en soort van de werkingsgebieden: los opgehaald, dat is goedkoper dan een join op
+    # elke rij hierboven (p2p.locatie draagt de geometrie).
+    werk_ids = sorted({i for lijst in werk_per_wid.values() for i in lijst})
+    locs: dict[str, dict] = {}
+    if werk_ids:
+        cur.execute(
+            "SELECT identificatie, noemer, locatie_type FROM p2p.locatie WHERE identificatie = ANY(%s)",
+            (werk_ids,),
+        )
+        locs = {r["identificatie"]: r for r in cur.fetchall()}
+    for wid, lijst in werk_per_wid.items():
+        annot[wid]["werkingsgebieden"] = [
+            {
+                "locatie_id": i,
+                "naam": (locs.get(i) or {}).get("noemer"),
+                "type": (locs.get(i) or {}).get("locatie_type"),
+            }
+            for i in lijst
+        ]
+
+    return annot, locatie_ids
+
+
 @app.get("/v1/viewer/regeling/{expression:path}/boom", dependencies=[Depends(verify_key)])
 def viewer_boom(
     expression: str,
@@ -2423,152 +2623,8 @@ def viewer_boom(
         )
         boom = _build_boom(cur.fetchall())
 
-        # B: annotaties — activiteiten, gebiedsaanwijzingen, normwaarden
-        #
-        # Optimalisatie: als x/y meegegeven, zoek eerst welke locatie_ids
-        # het punt raken (GIST index), en filter daarna. Voorkomt dat
-        # ST_Intersects op elke rij in de join wordt berekend.
-        # Geen locatie-filtering op de boom-annotaties. De boom toont
-        # alle annotaties van de regeling — het is aan de frontend om
-        # bij klik op de kaart te highlighten welke locaties relevant zijn.
-        # Dit bespaart een dure ST_Intersects query (~2s op grote gemeenten).
-
-        cur.execute(
-            f"""
-            SELECT jr.regeltekst_wid,
-                   a.naam           AS activiteit_naam,
-                   a.groep          AS activiteit_groep,
-                   ala.kwalificatie,
-                   ala.locatie_id   AS ala_locatie_id
-            FROM p2p.juridische_regel jr
-            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-                                     AND te.regeling_expression = %s
-            LEFT JOIN p2p.activiteit_locatieaanduiding ala
-                   ON ala.juridische_regel_id = jr.identificatie
-            LEFT JOIN p2p.activiteit a
-                   ON a.identificatie = ala.activiteit_id
-            """,
-            (expression,),
-        )
-        act_rows = cur.fetchall()
-
-        cur.execute(
-            """
-            SELECT jr.regeltekst_wid,
-                   ga.identificatie  AS ga_id,
-                   ga.type           AS ga_type,
-                   ga.naam           AS ga_naam,
-                   ga.groep          AS ga_groep,
-                   ga.locatie_id     AS ga_locatie_id
-            FROM p2p.juridische_regel jr
-            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-                                     AND te.regeling_expression = %s
-            JOIN p2p.juridische_regel_gebiedsaanwijzing jrga
-                   ON jrga.juridische_regel_id = jr.identificatie
-            JOIN p2p.gebiedsaanwijzing ga
-                   ON ga.identificatie = jrga.gebiedsaanwijzing_id
-            """,
-            (expression,),
-        )
-        ga_rows = list(cur.fetchall())
-
-        # Vrije tekst: gebiedsaanwijzingen via het tekstdeel, op de divisietekst-node.
-        td_per_wid = _tekstdelen_per_divisietekst(cur, expression)
-        td_ids = sorted({t["td_id"] for lijst in td_per_wid.values() for t in lijst})
-        if td_ids:
-            cur.execute(
-                """
-                SELECT tg.tekstdeel_id,
-                       ga.identificatie AS ga_id, ga.type AS ga_type, ga.naam AS ga_naam,
-                       ga.groep AS ga_groep, ga.locatie_id AS ga_locatie_id
-                FROM p2p.tekstdeel_gebiedsaanwijzing tg
-                JOIN p2p.gebiedsaanwijzing ga ON ga.identificatie = tg.gebiedsaanwijzing_id
-                WHERE tg.tekstdeel_id = ANY(%s)
-                """,
-                (td_ids,),
-            )
-            ga_per_td: dict[str, list[dict]] = {}
-            for r in cur.fetchall():
-                ga_per_td.setdefault(r["tekstdeel_id"], []).append(r)
-            for wid, lijst in td_per_wid.items():
-                for t in lijst:
-                    for r in ga_per_td.get(t["td_id"], []):
-                        ga_rows.append({**r, "regeltekst_wid": wid})
-
-        cur.execute(
-            """
-            SELECT jr.regeltekst_wid,
-                   n.naam            AS norm_naam,
-                   n.type_norm,
-                   n.eenheid,
-                   nw.kwantitatieve_waarde,
-                   nw.kwalitatieve_waarde,
-                   nw.locatie_id     AS nw_locatie_id
-            FROM p2p.juridische_regel jr
-            JOIN p2p.tekst_element te ON te.wid = jr.regeltekst_wid
-                                     AND te.regeling_expression = %s
-            JOIN p2p.juridische_regel_norm jrn
-                   ON jrn.juridische_regel_id = jr.identificatie
-            JOIN p2p.norm n
-                   ON n.identificatie = jrn.norm_id
-            LEFT JOIN p2p.normwaarde nw
-                   ON nw.norm_id = n.identificatie
-            """,
-            (expression,),
-        )
-        nw_rows = cur.fetchall()
-
-    # Groepeer annotaties per regeltekst_wid
-    annot: dict[str, dict] = {}
-    locatie_ids: set[str] = set()
-
-    for row in act_rows:
-        wid = row["regeltekst_wid"]
-        annot.setdefault(wid, {"activiteiten": [], "gebiedsaanwijzingen": [], "normwaarden": []})
-        if row["activiteit_naam"]:
-            entry = {
-                "naam": row["activiteit_naam"],
-                "groep": row["activiteit_groep"],
-                "kwalificatie": row["kwalificatie"],
-                "locatie_id": row["ala_locatie_id"],
-            }
-            if entry not in annot[wid]["activiteiten"]:
-                annot[wid]["activiteiten"].append(entry)
-        if row["ala_locatie_id"]:
-            locatie_ids.add(row["ala_locatie_id"])
-
-    for row in ga_rows:
-        wid = row["regeltekst_wid"]
-        annot.setdefault(wid, {"activiteiten": [], "gebiedsaanwijzingen": [], "normwaarden": []})
-        entry = {
-            "id": row["ga_id"],
-            "type": row["ga_type"],
-            "naam": row["ga_naam"],
-            "groep": row["ga_groep"],
-            "locatie_id": row["ga_locatie_id"],
-        }
-        if entry not in annot[wid]["gebiedsaanwijzingen"]:
-            annot[wid]["gebiedsaanwijzingen"].append(entry)
-        locatie_ids.add(row["ga_locatie_id"])
-
-    for row in nw_rows:
-        wid = row["regeltekst_wid"]
-        annot.setdefault(wid, {"activiteiten": [], "gebiedsaanwijzingen": [], "normwaarden": []})
-        entry = {
-            "naam": row["norm_naam"],
-            "type_norm": row["type_norm"],
-            "eenheid": row["eenheid"],
-            "waarde": (
-                float(row["kwantitatieve_waarde"])
-                if row["kwantitatieve_waarde"] is not None
-                else row["kwalitatieve_waarde"]
-            ),
-            "locatie_id": row["nw_locatie_id"],
-        }
-        if entry not in annot[wid]["normwaarden"]:
-            annot[wid]["normwaarden"].append(entry)
-        if row.get("nw_locatie_id"):
-            locatie_ids.add(row["nw_locatie_id"])
+        # B: annotaties — activiteiten, gebiedsaanwijzingen, normwaarden, juridische regels
+        annot, locatie_ids = _annotaties_regeling(cur, expression)
 
     # Hang annotaties aan de boom
     _annoteer_boom(boom, annot)
@@ -2587,6 +2643,62 @@ def viewer_boom(
         "boom": boom,
         "locatie_ids": sorted(locatie_ids),
     }
+
+
+@app.get("/v1/viewer/regeling/{expression:path}/artikel-annotaties", dependencies=[Depends(verify_key)])
+def viewer_artikel_annotaties(
+    expression: str,
+    wid: str = Query(..., description="wId van het artikel of van een lid eronder"),
+):
+    """Annotaties van één artikel, inclusief zijn leden. Voor regelingen waarvan de hele boom
+    te groot is om op te halen (Bal, Bkl): de vorm is die van `annotaties` in de boom.
+
+    De koppeling loopt via de documentstructuur (parent_id), niet via de tekst van de wId: een
+    lid kan een andere GUID en een ander pad hebben dan zijn artikel.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH RECURSIVE omhoog AS (
+                SELECT id, parent_id, wid, element_type
+                FROM p2p.tekst_element
+                WHERE regeling_expression = %s AND wid = %s
+              UNION ALL
+                SELECT t.id, t.parent_id, t.wid, t.element_type
+                FROM p2p.tekst_element t
+                JOIN omhoog o ON t.id = o.parent_id
+                WHERE o.element_type NOT IN ('Artikel', 'Divisietekst')
+            ),
+            artikel AS (
+                SELECT id, wid FROM omhoog
+                WHERE element_type IN ('Artikel', 'Divisietekst')
+                LIMIT 1
+            ),
+            omlaag AS (
+                SELECT id, wid FROM artikel
+              UNION ALL
+                SELECT t.id, t.wid
+                FROM p2p.tekst_element t
+                JOIN omlaag o ON t.parent_id = o.id
+            )
+            SELECT (SELECT wid FROM artikel) AS artikel_wid, wid
+            FROM omlaag
+            WHERE wid IS NOT NULL
+            """,
+            (expression, wid),
+        )
+        rijen = cur.fetchall()
+        if not rijen:
+            raise HTTPException(404, "Artikel niet gevonden in deze regeling")
+        annot, _ = _annotaties_regeling(cur, expression, [r["wid"] for r in rijen])
+
+    samen = _lege_annotatie()
+    for per_wid in annot.values():
+        for soort, lijst in per_wid.items():
+            for item in lijst:
+                if item not in samen[soort]:
+                    samen[soort].append(item)
+    return {"artikel_wid": rijen[0]["artikel_wid"], "annotaties": samen}
 
 
 # ── Gedeelde frontend-asset: <ocd-regeltekst> STOP-weergavecomponent ──

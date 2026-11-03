@@ -1079,3 +1079,54 @@ class TestObjectenNormSleutels:
         for w in d["normwaarden"]:
             assert w["norm_id"] in norm_ids
             assert "waarde_in_regeltekst" in w
+
+
+class TestArtikelAnnotaties:
+    """Elke juridische regel heeft een werkingsgebied; de API moet dat ook doorgeven zonder activiteit."""
+
+    AMSTERDAM = "/akn/nl/act/gm0363/2020/omgevingsplan/nld@2026-09-07;13035940"
+
+    def _boom(self):
+        r = client.get(f"/v1/viewer/regeling/{self.AMSTERDAM}/boom")
+        if r.status_code == 404:
+            pytest.skip("Deze versie van het omgevingsplan staat niet in de database")
+        assert r.status_code == 200
+        return r.json()["boom"]
+
+    def _knopen(self, boom):
+        for k in boom:
+            yield k
+            yield from self._knopen(k.get("kinderen") or [])
+
+    def test_boom_geeft_regels_en_werkingsgebieden(self):
+        annotaties = [k["annotaties"] for k in self._knopen(self._boom()) if k.get("annotaties")]
+        assert annotaties
+        assert all(a["regels"] for a in annotaties if a["activiteiten"])
+        met_gebied = [a for a in annotaties if a["werkingsgebieden"]]
+        assert met_gebied
+        assert all(w["locatie_id"] for a in met_gebied for w in a["werkingsgebieden"])
+
+    def test_regel_zonder_activiteit_heeft_werkingsgebied(self):
+        kaal = [
+            k["annotaties"] for k in self._knopen(self._boom())
+            if k.get("annotaties") and k["annotaties"]["regels"] and not k["annotaties"]["activiteiten"]
+        ]
+        assert kaal, "dit omgevingsplan heeft regels zonder activiteit"
+        assert all(a["werkingsgebieden"] for a in kaal)
+
+    def test_artikel_annotaties_gelijk_aan_boom(self):
+        artikelen = [k for k in self._knopen(self._boom()) if k["type"] == "Artikel" and k.get("kinderen")]
+        art = next(k for k in artikelen if any((c.get("annotaties") or {}).get("regels") for c in k["kinderen"]))
+        lid = next(c for c in art["kinderen"] if (c.get("annotaties") or {}).get("regels"))
+        # Via het artikel en via een lid: hetzelfde antwoord.
+        via_art = client.get(f"/v1/viewer/regeling/{self.AMSTERDAM}/artikel-annotaties", params={"wid": art["wid"]}).json()
+        via_lid = client.get(f"/v1/viewer/regeling/{self.AMSTERDAM}/artikel-annotaties", params={"wid": lid["wid"]}).json()
+        assert via_art["artikel_wid"] == art["wid"] == via_lid["artikel_wid"]
+        assert via_art["annotaties"] == via_lid["annotaties"]
+        assert set(i["locatie_id"] for i in lid["annotaties"]["werkingsgebieden"]) <= set(
+            i["locatie_id"] for i in via_art["annotaties"]["werkingsgebieden"])
+
+    def test_artikel_annotaties_onbekend(self):
+        r = client.get(f"/v1/viewer/regeling/{self.AMSTERDAM}/artikel-annotaties", params={"wid": "bestaat_niet"})
+        assert r.status_code == 404
+
