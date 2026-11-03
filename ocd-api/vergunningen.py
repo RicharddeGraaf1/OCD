@@ -10,7 +10,7 @@ Endpoints:
     GET  /v1/vergunningen/pins      — lightweight pin-only voor kaartweergave
     GET  /v1/vergunningen/facets    — filter-counters (per filter-waarde)
     GET  /v1/vergunningen/stats     — totaal + laatste-ingest, voor header
-    GET  /v1/vergunningen/zaken     — rond een punt, gebundeld per zaak (OCD-viewer)
+    GET  /v1/vergunningen/zaken     — rond een punt of in een kaartbeeld, gebundeld per zaak (OCD-viewer)
     GET  /v1/vergunningen/{koop_id} — volledige record-details
 
 Filter-conventie (gedeeld door list / pins / facets):
@@ -44,7 +44,7 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 
 from db import get_conn
-from vergunning_zaken import bundel_tot_zaken, zaak_sleutel
+from vergunning_zaken import bundel_tot_zaken, lees_rd_bbox, zaak_sleutel
 
 router = APIRouter(prefix="/v1/vergunningen", tags=["vergunningen"])
 
@@ -1262,12 +1262,15 @@ def doorlooptijd(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Zaken rond een punt — vergunningen-tab in de OCD-viewer
+# Zaken rond een punt of in een kaartbeeld — vergunningen-tab in de OCD-viewer
 # ─────────────────────────────────────────────────────────────────────
 
 ZAKEN_MAX_STRAAL_M = 1_000
-# Bovengrens op kennisgevingen binnen de straal. Rond Broekhem 33 (Valkenburg)
-# liggen er 66 binnen ~350 m; in een binnenstad op 1 km meer. Wordt de grens
+# De viewer haalt op tot 6 km2 in beeld en vraagt een marge erbij (factor ~2).
+# Gemeten 2026-11-03 in een liggend beeld van 5 km2: Amsterdam-Dam ~6.000
+# kennisgevingen, Valkenburg ~400.
+ZAKEN_MAX_BEELD_M2 = 15_000_000
+# Bovengrens op kennisgevingen binnen de straal of het beeld. Wordt de grens
 # geraakt, dan vallen de oudste weg en meldt de respons `afgetopt`.
 ZAKEN_MAX_RIJEN = 2_000
 
@@ -1316,8 +1319,8 @@ class Zaak(BaseModel):
 class ZakenResponse(BaseModel):
     zaken: list[Zaak]
     n_kennisgevingen: int
-    afgetopt: bool = Field(description="True als er meer kennisgevingen binnen de straal lagen dan opgehaald")
-    straal_m: int
+    afgetopt: bool = Field(description="True als er meer kennisgevingen in het gebied lagen dan opgehaald")
+    straal_m: int | None = Field(description="De gebruikte straal; None bij een opvraging met rd_bbox")
     took_ms: int
 
 
@@ -1332,28 +1335,43 @@ _ZAAK_COLS = """
 @router.get(
     "/zaken",
     response_model=ZakenResponse,
-    summary="Kennisgevingen rond een RD-punt, gebundeld per zaak",
+    summary="Kennisgevingen rond een RD-punt of in een RD-kaartbeeld, gebundeld per zaak",
 )
 def zaken_rond_punt(
-    x: float = Query(..., description="RD x (EPSG:28992)"),
-    y: float = Query(..., description="RD y (EPSG:28992)"),
-    r: int = Query(350, ge=10, le=ZAKEN_MAX_STRAAL_M, description="Straal in meter"),
+    x: float = Query(..., description="RD x (EPSG:28992); ook het punt waartoe afstand_m telt"),
+    y: float = Query(..., description="RD y (EPSG:28992); ook het punt waartoe afstand_m telt"),
+    r: int = Query(350, ge=10, le=ZAKEN_MAX_STRAAL_M, description="Straal in meter; genegeerd bij rd_bbox"),
+    rd_bbox: str | None = Query(
+        None,
+        description=(
+            "Kaartbeeld als 'xmin,ymin,xmax,ymax' in RD (EPSG:28992), hooguit 15 km2. "
+            "Vervangt de straal. Let op: `bbox` bij de andere endpoints is WGS84."
+        ),
+    ),
     vanaf: date | None = Query(None, description="Alleen zaken met een bericht op of na deze datum"),
     postcode: str | None = Query(None, description="Markeert zaken op dit adres (op_adres)"),
     huisnummer: str | None = Query(None, description="Markeert zaken op dit adres (op_adres)"),
 ):
     """Wat speelt er hier? Filteren op fase en activiteit doet de viewer zelf.
 
-    Twee stappen. Eerst de kennisgevingen binnen de straal; de OFFSET 0-barrière
+    Twee stappen. Eerst de kennisgevingen in het gebied; de OFFSET 0-barrière
     laat Postgres eerst de GiST-scan doen en dán pas sorteren, zie
     list_vergunningen. Daarna de overige kennisgevingen van die zaken op
-    zaaknummer: een ontvangstbericht kan buiten de straal of de periode vallen
+    zaaknummer: een ontvangstbericht kan buiten het gebied of de periode vallen
     terwijl de rest van de zaak erbinnen ligt, en dan klopt de tijdlijn niet.
     """
     t0 = time.perf_counter()
     punt = "ST_SetSRID(ST_MakePoint(%s, %s), 28992)"
-    where = [f"ST_DWithin(geometrie_rd_pt, {punt}, %s)"]
-    params: list[Any] = [x, y, r]
+    if rd_bbox is not None:
+        try:
+            beeld = lees_rd_bbox(rd_bbox, ZAKEN_MAX_BEELD_M2)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Ongeldige rd_bbox: {exc}") from exc
+        where = ["geometrie_rd_pt && ST_MakeEnvelope(%s, %s, %s, %s, 28992)"]
+        params: list[Any] = list(beeld)
+    else:
+        where = [f"ST_DWithin(geometrie_rd_pt, {punt}, %s)"]
+        params = [x, y, r]
     if vanaf:
         where.append("datum_publicatie >= %s")
         params.append(vanaf)
@@ -1402,7 +1420,7 @@ def zaken_rond_punt(
         zaken=[Zaak(**zaak) for zaak in zaken],
         n_kennisgevingen=len(rijen),
         afgetopt=afgetopt,
-        straal_m=r,
+        straal_m=None if rd_bbox is not None else r,
         took_ms=int((time.perf_counter() - t0) * 1000),
     )
 

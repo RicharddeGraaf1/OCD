@@ -299,6 +299,19 @@ def _zelfde_adres(rij: dict[str, Any], postcode: str | None, huisnummer: str | N
     )
 
 
+def lees_rd_bbox(tekst: str, max_m2: float) -> tuple[float, float, float, float]:
+    """"xmin,ymin,xmax,ymax" in RD naar getallen. ValueError als het niet klopt."""
+    delen = [float(d) for d in tekst.split(",")]
+    if len(delen) != 4:
+        raise ValueError("verwacht vier getallen: xmin,ymin,xmax,ymax")
+    xmin, ymin, xmax, ymax = delen
+    if not (xmin < xmax and ymin < ymax):
+        raise ValueError("xmin moet kleiner zijn dan xmax en ymin kleiner dan ymax")
+    if (xmax - xmin) * (ymax - ymin) > max_m2:
+        raise ValueError(f"kaartbeeld groter dan {max_m2 / 1_000_000:g} km2")
+    return xmin, ymin, xmax, ymax
+
+
 def bundel_tot_zaken(
     rijen: list[dict[str, Any]],
     vandaag: date,

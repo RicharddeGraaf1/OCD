@@ -12,6 +12,7 @@ import pytest
 from vergunning_zaken import (
     bepaal_fase,
     bundel_tot_zaken,
+    lees_rd_bbox,
     normaliseer_zaaknummer,
     onderwerp_uit_titel,
     onderwerp_van,
@@ -19,6 +20,25 @@ from vergunning_zaken import (
 )
 
 VANDAAG = date(2026, 11, 2)
+
+
+def test_rd_bbox_leest_vier_getallen():
+    assert lees_rd_bbox("185000,320000,186000.5,321000", 15e6) == (185000, 320000, 186000.5, 321000)
+
+
+@pytest.mark.parametrize(
+    "tekst",
+    ["", "1,2,3", "1,2,3,4,5", "a,b,c,d", "186000,320000,185000,321000", "185000,321000,186000,320000"],
+)
+def test_rd_bbox_weigert_onzin(tekst):
+    with pytest.raises(ValueError):
+        lees_rd_bbox(tekst, 15e6)
+
+
+def test_rd_bbox_weigert_te_groot_beeld():
+    # 4 x 4 km = 16 km2.
+    with pytest.raises(ValueError, match="15 km2"):
+        lees_rd_bbox("185000,320000,189000,324000", 15e6)
 
 
 @pytest.mark.parametrize(
