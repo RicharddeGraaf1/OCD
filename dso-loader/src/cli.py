@@ -484,15 +484,33 @@ def load_gemeentegrens_historisch_cmd():
 @click.option("--gemeente", "-g", default=None,
               help="CBS-code(s), comma-separated. Default: alle bronhouders.")
 def load_wro_imro2006_cmd(gemeente):
-    """Laad missende IMRO2006/Artikel-10-plannen met indicatieve ambtsgebied-
-    geometrie (uit de planvoorraad-diff; metadata+teksten uit IHR)."""
+    """Laad missende plannen uit de planvoorraad-diff: metadata, teksten en grens uit
+    de IHR; zonder grens in de IHR het ambtsgebied."""
     from src.loaders.wro_imro2006 import load_imro2006_ambtsgebied
     from src.run_log import load_run
     codes = [c.strip() for c in gemeente.split(",")] if gemeente else None
     with load_run("pdok-bestemmingsplannen", scope=f"imro2006:{gemeente or 'alle'}") as run:
         n = load_imro2006_ambtsgebied(codes)
         run.set(n_verwerkt=n)
-    console.print(f"[green]{n} IMRO2006-plannen geladen (ambtsgebied-geometrie)[/green]")
+    console.print(f"[green]{n} plannen geladen[/green]")
+
+
+@cli.command("load-wro-plangrenzen")
+@click.option("--gemeente", "-g", default=None,
+              help="CBS-code(s), comma-separated. Default: alle bronhouders.")
+@click.option("--droog", is_flag=True, help="Alleen tellen, niets wegschrijven.")
+def load_wro_plangrenzen_cmd(gemeente, droog):
+    """Vervang het ambtsgebied door de echte plangrens uit de IHR (G-177)."""
+    from src.loaders.wro_plangrens import neem_plangrenzen_over
+    from src.run_log import load_run
+    codes = [c.strip() for c in gemeente.split(",")] if gemeente else None
+    if droog:
+        console.print(neem_plangrenzen_over(codes, droog=True))
+        return
+    with load_run("pdok-bestemmingsplannen", scope=f"plangrens:{gemeente or 'alle'}") as run:
+        tel = neem_plangrenzen_over(codes)
+        run.set(n_verwerkt=tel["bijgewerkt"])
+    console.print(f"[green]{tel}[/green]")
 
 
 @cli.command("load-gemeentegrenzen")

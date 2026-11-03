@@ -20,10 +20,10 @@ from src.rate_limiter import limiter
 console = Console()
 
 
-def _ihr_get(path: str, params: dict | None = None) -> dict:
-    headers = {"X-Api-Key": cfg.IHR_API_KEY}
+def _ihr_get(path: str, params: dict | None = None, headers: dict | None = None) -> dict:
+    alle_headers = {"X-Api-Key": cfg.IHR_API_KEY, **(headers or {})}
     with limiter:
-        resp = httpx.get(f"{cfg.IHR_BASE}{path}", headers=headers,
+        resp = httpx.get(f"{cfg.IHR_BASE}{path}", headers=alle_headers,
                          params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
