@@ -493,9 +493,20 @@ def load_wro_plans(cbs_codes: dict[str, str] | None = None, met_teksten: bool = 
 
     met_teksten=False: alleen plannen en planobjecten; de teksten laadt de aanroeper
     (pipeline/wro.py doet dat zelf, zodat --no-teksten ook echt geen teksten laadt)."""
+    # Tot 2026-10-29 registreerde deze lading zich niet in core.load_run. Daardoor was
+    # niet na te gaan wanneer de planobjecten voor het laatst geladen waren, en schoof
+    # de ETag van /v1/tiles/planobjecten (max(finished_at)) na een lading niet mee.
+    from src.run_log import load_run
+    scope = f"planobjecten:{len(cbs_codes)} gemeenten" if cbs_codes else f"planobjecten:{cfg.POC_CBS_CODE}"
+    with load_run("pdok-bestemmingsplannen", scope=scope) as run:
+        _load_wro_plans(cbs_codes, met_teksten, run)
+
+
+def _load_wro_plans(cbs_codes: dict[str, str] | None, met_teksten: bool, run) -> None:
     conn = get_conn()
     try:
         n_plans = _load_bestemmingsplangebied(conn, cbs_codes)
+        run.set(n_verwerkt=n_plans)
 
         if n_plans == 0:
             console.print("[yellow]No plans found[/yellow]")

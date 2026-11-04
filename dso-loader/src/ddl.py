@@ -598,6 +598,10 @@ CREATE TABLE IF NOT EXISTS wro.planobject (
 );
 CREATE INDEX IF NOT EXISTS idx_planobject_instrument ON wro.planobject(instrument_idn);
 CREATE INDEX IF NOT EXISTS idx_planobject_geom ON wro.planobject USING GIST(geometrie);
+-- Zonder deze index is elke DELETE op planobject een volledige scan per rij (de
+-- FK-controle van specificeert_id). Zie scripts/2026-10-29-add-planobject-specificeert-index.sql.
+CREATE INDEX IF NOT EXISTS idx_planobject_specificeert ON wro.planobject(specificeert_id)
+    WHERE specificeert_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS wro.wro_tekst_object (
     identificatie       TEXT PRIMARY KEY,

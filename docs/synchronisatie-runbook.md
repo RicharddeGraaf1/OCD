@@ -1550,7 +1550,9 @@ Losse aanroep, bijvoorbeeld na een PDOK-herparse:
 python -m src.cli load-wro-teksten -g 0402,0014    # bronhouders; zonder -g: alle plannen
 ```
 
-**Naar productie** gaat apart, per plan idempotent. Het script schat de omvang en
+**Naar productie** gaat apart, per plan idempotent, en pas **nadat de planobjecten op
+prod staan** (stap 6f, punt 1). Het script controleert een steekproef van de
+planobject-id's en stopt als die ontbreken. Het schat de omvang en
 weigert boven `--max-mb`:
 
 ```bash
@@ -1563,6 +1565,75 @@ Bij veel plannen eerst de vrije schijfruimte op `apps-1` controleren
 is sinds 2026-10-28 301 GB, met de prod-DB op ~84 GB; Locus en de andere apps delen hem. Draai na een grote overzet `ANALYZE` op `wro.wro_tekst_object_v2`,
 `wro.wro_tekst_link` en `v2a.wro_artikel_indeling`. Dat kost ±20 s; anders kiest de
 planner na de bulklading slechte plannen.
+
+### Stap 6f — Wro-planobjecten naar prod en de tegellaag *(sinds 2026-10-29)*
+
+Na elke lading die `wro.planobject` raakt — `load-wro` of `pipeline wro` (ook via
+`pipeline all`); `load-wro-imro2006` raakt hem niet — in deze volgorde:
+
+1. **Planobjecten naar prod** (vóór het prod-deel van stap 6e):
+
+   ```bash
+   cd dso-loader
+   python scripts/wro_planobject_naar_productie.py          # droogloop: nieuw / gewijzigd / verdwenen
+   python scripts/wro_planobject_naar_productie.py --ja
+   ```
+
+   Tot 2026-10-29 bestond deze route niet. De planobjecten waren alleen via de
+   volledige restore op prod gekomen, en een Wro-lading bleef daarna lokaal.
+   - De vergelijking per plan (attributen-hash plus aantal objecten) kost ±5 min.
+     `--inhoud` vergelijkt ook de objecten zelf, incl. geometrie, en leest dan beide
+     tabellen volledig. Die is voor na een loaderfix die bestaande plannen herschreef,
+     want een plan-idn verandert per versie en daar is "nieuw" dus meestal genoeg.
+   - Een plan dat blijft bestaan wordt **ge-upsert, niet verwijderd**:
+     `ruimtelijk_instrument` cascadeert naar `wro_tekst_object` (de oude teksten waar
+     de API op terugvalt), `wro_bronbestand` en `wro_geleideformulier`. Alleen de
+     planobjecten van het plan gaan eruit en er opnieuw in, in één transactie per plan.
+   - Verdwenen plannen worden alleen gemeld. Ze gaan pas weg met `--verwijder-verdwenen`,
+     en dan inclusief de v2-teksttabellen, die geen FK op het plan hebben.
+   - Grens: `--max-objecten` (standaard 500.000). Daarboven eerst `df -h /` op `apps-1`.
+   - Vereist `idx_planobject_specificeert` (aan beide kanten aangelegd op 2026-10-29).
+     Zonder die index is elke `DELETE` op `wro.planobject` een volledige tabelscan per
+     rij, vanwege de FK-controle van `specificeert_id`: een plan van 68 objecten stond na 5
+     min nog op `DataFileRead`.
+   - Toets van de route, 2026-10-29: `NL.IMRO.0014.UP659Reitdp2015GV-gv01` met
+     `--idn … --forceer --ja` herschreven, daarna gaf `--inhoud` 0 verschillen, en de 9
+     oude teksten, 23 koppelingen en 219 v2-teksten op prod waren onaangeroerd.
+
+2. **Teksten naar prod**: het prod-deel van stap 6e.
+
+3. **Tegellaag herbouwen**, op beide kanten. `/v1/tiles/planobjecten` serveert z11 en
+   hoger rechtstreeks uit `wro.planobject`, maar z0–z10 uit
+   `wro.planobject_generalisatie`. Die tabel is een afgeleide en wordt door geen enkele
+   loader bijgehouden: zonder herbouw tonen de lage zoomniveaus de oude plannen. Dat
+   faalt nergens.
+
+Herbouw op **elke database waar `wro.planobject` veranderde** (na punt 1 dus beide):
+
+```bash
+cd dso-loader
+PYTHONPATH=. .venv/Scripts/python scripts/vul_locatie_generalisatie.py --bron wro             # lokaal
+OCD_DB_URL="$PROD_DB_URL" PYTHONPATH=. .venv/Scripts/python \
+    scripts/vul_locatie_generalisatie.py --bron wro --workers 4                               # prod, tunnel open
+```
+
+- **Alleen de volledige herbouw.** `--bronhouder` en `--inhaal` selecteren op het
+  IMOW-prefix `nl.imow-<code>.` en matchen geen enkele Wro-identificatie
+  (`NL.IMRO.0344.…`, `NL.IMRO.EB350762`). Ze gaven "0 weg → 0 nieuw" terug, en waren
+  groen. Het script weigert die combinatie nu.
+- **Duur**, gemeten 2026-10-29 op prod met `--workers 4`: 4,2 + 4,8 + 5,0 min voor de
+  drie niveaus, plus ±2 min indexen. Samen ±16 min, voor 6,37 mln planobjecten → 14,6 mln
+  rijen en 4,7 GB. `--workers 4` laat de helft van de 8 kernen van `apps-1` vrij voor de
+  API en de andere apps.
+- **Gedurende de herbouw zijn z0–z10 leeg of half gevuld** (TRUNCATE vooraf). Daarna
+  schrijft het script een `core.load_run`-rij (`locatie-generalisatie`, scope
+  `wro:volledig`), en die bumpt de tegel-ETag. Zonder die rij hield een tegel die tijdens
+  de herbouw werd opgehaald na afloop dezelfde ETag, en kreeg de client een 304 op de
+  halve tegel.
+- **Controle**: `diff_lokaal_prod.py` (stap 7) heeft voor deze tabel geen verwachte
+  afwijking meer. Op 2026-10-29 waren lokaal en prod gelijk tot op de rij
+  (2.604.733 / 5.639.449 / 6.332.831). Elk verschil is dus een herbouw die aan één kant
+  ontbreekt.
 
 ### Stap 7 — Verificatie
 
@@ -2172,6 +2243,7 @@ meet ook de `publish.py`-poort iets zinnigs.
 | `diff_dso_bronhouder_coverage.py` | maandelijks | zwaardere coverage-diff naast de preview |
 | Wro/IMRO2006 (`load-wro-imro2006`) | los, ~24 min | landelijke PDOK-herparse, niet in de sync |
 | Wro-teksten v2 (stap 6e) | na elke Wro-lading | gaat vanzelf mee via `wro_teksten_keten`; daarna `wro_v2_naar_productie.py` (droogloop eerst) |
+| Wro-planobjecten + tegellaag (stap 6f) | na elke lading die `wro.planobject` raakt (`load-wro`, `pipeline wro`) | `wro_planobject_naar_productie.py` (droogloop eerst, ±5 min vergelijken) → stap 6e naar prod → `vul_locatie_generalisatie.py --bron wro` op beide kanten (±16 min) |
 | MER-register (stap 6d) | elke sync | harvest (~5 min incrementeel) + `load-mer` lokaal + `load_to_ocd.py` naar prod; site via `publish.py`. Stond hier als "los, seconden" — dat gold alleen voor `load-mer`, waardoor de harvest en de site vijf weken stilstonden |
 | `core.gemeentegrens` | 1×/jaar | gemeente-herindelingen |
 | Vervallen regelingen markeren (stap 2b) | elke sync | droogloop eerst; `markeer_vervallen_regelingen.py` |

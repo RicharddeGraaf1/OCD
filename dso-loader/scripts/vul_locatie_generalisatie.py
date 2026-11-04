@@ -59,6 +59,7 @@ from rich.console import Console
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from src.db import get_conn
+from src.run_log import load_run
 
 # Windows kiest cp1252 zodra stdout geen terminal is, en dan valt dit script om
 # op zijn eigen voortgangsregel: de pijl in "1.234 weg -> 5.678 nieuw" is niet
@@ -434,6 +435,17 @@ def main(
 ) -> None:
     cfg = BRONNEN[bron]
 
+    # De per-bronhouder-routes selecteren op het IMOW-prefix `nl.imow-<code>.`.
+    # Wro-identificaties zien er anders uit (`NL.IMRO.0344.…`, en een deel zelfs
+    # zonder CBS-code: `NL.IMRO.EB350762`), dus voor Wro matchte het patroon
+    # niets: de run meldde "0 weg → 0 nieuw" en was groen. Voor Wro is er alleen
+    # de volledige herbouw (~15 min, gemeten 2026-10-29).
+    if bron == "wro" and (bronhouder or inhaal):
+        console.print(
+            "[red]--bronhouder en --inhaal werken alleen voor --bron ow.[/red] "
+            "Voor Wro: volledige herbouw, zonder die opties.")
+        raise SystemExit(2)
+
     if inhaal:
         prod = os.getenv("PROD_DB_URL")
         if not prod:
@@ -485,6 +497,18 @@ def main(
         bouw_bronhouders(cfg, niveaus, list(bronhouder))
         return
 
+    # Registreren in core.load_run is hier geen boekhouding: ocd-api/tiles.py
+    # leidt de ETag van elke tegel af van max(finished_at). Zonder rij houdt een
+    # tegel die tijdens de herbouw (leeg of half) is opgehaald na afloop dezelfde
+    # ETag, en krijgt de client bij revalidatie een 304 op de halve tegel.
+    scope = f"{bron}:volledig" + (f":steekproef-{steekproef}" if steekproef else "")
+    with load_run("locatie-generalisatie", scope=scope) as run:
+        run.set(n_verwerkt=_volledig(cfg, niveau, steekproef, vanaf_blok, behoud, workers))
+
+
+def _volledig(cfg: dict[str, str], niveau: int | None, steekproef: int | None,
+              vanaf_blok: int, behoud: bool, workers: int) -> int:
+    """Volledige herbouw over ctid-chunks. Geeft het aantal rijen na afloop."""
     conn = get_conn()
     try:
         paginas = _paginas(conn, cfg)
@@ -527,7 +551,9 @@ def main(
                            sum(ST_NPoints(geometrie)) AS punten
                       FROM {cfg['doel']} GROUP BY niveau ORDER BY niveau"""
             )
+            totaal = 0
             for r in cur.fetchall():
+                totaal += r["n"]
                 console.print(
                     f"[bold]niveau {r['niveau']}[/bold]: {r['n']:,} rijen, "
                     f"{r['punten']:,} punten"
@@ -537,6 +563,7 @@ def main(
             )
             console.print(f"[bold]omvang[/bold]: {cur.fetchone()['s']}")
         conn.commit()
+        return totaal
     finally:
         conn.close()
 
