@@ -12,6 +12,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from src.loaders import koop_vergunning as kv  # noqa: E402
 from src.loaders.koop_vergunning import (  # noqa: E402
     classify_type_besluit,
     classify_type_besluit_uit_tekst,
@@ -123,3 +124,26 @@ if __name__ == "__main__":
             print(f"FOUT {fn.__name__}{e}")
             alle.append(fn.__name__)
     sys.exit(1 if alle else 0)
+
+
+def test_tekst_akkoord_en_verlenen_zijn_verleend():
+    # Echte zinnen, gmb-2026-368788 en Noord-Brabant/Helmond/Laarbeek.
+    for tekst in (
+        "De gemeente heeft op 27 juli 2026 een besluit genomen op de aanvraag. De vergunning is Akkoord.",
+        "Gedeputeerde Staten van Noord-Brabant, maken bekend dat zij een omgevingsvergunning verlenen.",
+        "Het college maakt bekend dat het heeft besloten de volgende omgevingsvergunning te verlenen.",
+        "Het college van gemeente Laarbeek maakt bekend dat het een omgevingsvergunning verleent.",
+    ):
+        assert kv.classify_type_besluit_uit_tekst(tekst) == "verleend", tekst
+
+
+def test_akkoord_in_voorwaardelijke_bijzin_is_geen_besluit():
+    assert kv.classify_type_besluit_uit_tekst("U kunt pas bouwen als de vergunning is akkoord.") is None
+
+
+def test_titel_meldt_besluit():
+    assert kv.titel_meldt_besluit("Kennisgeving besluit op aanvraag het renoveren van de woning, Broekhem 1")
+    assert kv.titel_meldt_besluit("Besluit aangevraagde omgevingsvergunning grondverzet - Otterspoorbroek 9")
+    assert not kv.titel_meldt_besluit("Kennisgeving ontvangst aanvraag besluit, Broekhem 1")
+    assert not kv.titel_meldt_besluit("Aanvraag omgevingsvergunning, Lage Witsiebaan 90")
+    assert not kv.titel_meldt_besluit(None)

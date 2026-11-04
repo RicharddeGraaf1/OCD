@@ -176,7 +176,12 @@ _TEKST_BESLUIT_RULES: list[tuple[re.Pattern[str], str]] = [
                 r"(te\s+)?verklaar", re.IGNORECASE), "vergunningvrij"),
     # verlening
     (re.compile(r"\b(de\s+)?(omgevings)?vergunning\s+(is|zijn|wordt)\s+"
-                r"(verleend|toegekend)\b", re.IGNORECASE), "verleend"),
+                r"(verleend|toegekend|akkoord)\b", re.IGNORECASE), "verleend"),
+    # "maakt bekend dat het heeft besloten de volgende omgevingsvergunning te verlenen",
+    # "maken bekend dat zij een omgevingsvergunning verlenen" (o.a. Noord-Brabant, Helmond).
+    (re.compile(r"\bbekend\s+dat\s+\w+\s+(heeft\s+besloten\s+)?(de\s+volgende\s+|een\s+)"
+                r"(omgevings)?vergunning\s+(te\s+)?(verlenen|verleent)\b",
+                re.IGNORECASE), "verleend"),
     (re.compile(r"\b(heeft|hebben)\s+(zij\s+|wij\s+)?(een\s+|de\s+)?(omgevings)?"
                 r"vergunning\s+verleend\b", re.IGNORECASE), "verleend"),
     # Bijzin-woordvolgorde: "...dat zij een omgevingsvergunning HEBBEN VERLEEND"
@@ -214,12 +219,27 @@ def _raakt_buiten_bijzin(pat: re.Pattern[str], kop: str) -> bool:
     return False
 
 
+_TITEL_BESLUIT = re.compile(r"\bbesluit\b", re.IGNORECASE)
+_TITEL_ONTVANGST = re.compile(r"\b(ontvang\w*|ingekomen|ingediend\w*|binnengekomen)\b", re.IGNORECASE)
+
+
+def titel_meldt_besluit(titel: Optional[str]) -> bool:
+    """Noemt de titel een besluit zonder uitkomst? ("Kennisgeving besluit op aanvraag ...")
+
+    De titelregels labelen zo'n bericht als `aanvraag` of `kennisgeving`, omdat er
+    geen uitkomstwoord in staat. Dan moet de tekst uitsluitsel geven. Dezelfde toets
+    staat in ocd-api/vergunning_zaken.py; de API en de loader delen geen code.
+    """
+    return bool(titel and _TITEL_BESLUIT.search(titel) and not _TITEL_ONTVANGST.search(titel))
+
+
 def classify_type_besluit_uit_tekst(tekst: str) -> Optional[str]:
     """Tweede trap: leid type_besluit af uit de body-tekst.
 
     Retourneert None als de tekst geen eenduidige uitkomst geeft — dan blijft
     de titel-classificatie staan. Bedoeld voor records die op de titel
-    'overig' scoren; niet om een titel-uitkomst te overschrijven.
+    'overig' scoren of een besluit zonder uitkomst melden (titel_meldt_besluit);
+    niet om een titel-uitkomst te overschrijven.
     """
     if not tekst:
         return None
@@ -1466,6 +1486,10 @@ def _enrich_one_batch(limit: int,
             tekst_type = None
             if row["type_besluit"] == "overig":
                 tekst_type = classify_type_besluit_uit_tekst(tekst)
+            elif row["type_besluit"] in ("aanvraag", "kennisgeving") and titel_meldt_besluit(row["titel"]):
+                tekst_type = classify_type_besluit_uit_tekst(tekst)
+                if tekst_type == "aanvraag":
+                    tekst_type = None
 
             # If address fields are empty, try parsing the title as a fallback.
             addr: dict = {}

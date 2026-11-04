@@ -1079,3 +1079,134 @@ class TestObjectenNormSleutels:
         for w in d["normwaarden"]:
             assert w["norm_id"] in norm_ids
             assert "waarde_in_regeltekst" in w
+
+
+class TestArtikelAnnotaties:
+    """Elke juridische regel heeft een werkingsgebied; de API moet dat ook doorgeven zonder activiteit."""
+
+    AMSTERDAM = "/akn/nl/act/gm0363/2020/omgevingsplan/nld@2026-09-07;13035940"
+
+    def _boom(self):
+        r = client.get(f"/v1/viewer/regeling/{self.AMSTERDAM}/boom")
+        if r.status_code == 404:
+            pytest.skip("Deze versie van het omgevingsplan staat niet in de database")
+        assert r.status_code == 200
+        return r.json()["boom"]
+
+    def _knopen(self, boom):
+        for k in boom:
+            yield k
+            yield from self._knopen(k.get("kinderen") or [])
+
+    def test_boom_geeft_regels_en_werkingsgebieden(self):
+        annotaties = [k["annotaties"] for k in self._knopen(self._boom()) if k.get("annotaties")]
+        assert annotaties
+        assert all(a["regels"] for a in annotaties if a["activiteiten"])
+        met_gebied = [a for a in annotaties if a["werkingsgebieden"]]
+        assert met_gebied
+        assert all(w["locatie_id"] for a in met_gebied for w in a["werkingsgebieden"])
+
+    def test_regel_zonder_activiteit_heeft_werkingsgebied(self):
+        kaal = [
+            k["annotaties"] for k in self._knopen(self._boom())
+            if k.get("annotaties") and k["annotaties"]["regels"] and not k["annotaties"]["activiteiten"]
+        ]
+        assert kaal, "dit omgevingsplan heeft regels zonder activiteit"
+        assert all(a["werkingsgebieden"] for a in kaal)
+
+    def test_artikel_annotaties_gelijk_aan_boom(self):
+        artikelen = [k for k in self._knopen(self._boom()) if k["type"] == "Artikel" and k.get("kinderen")]
+        art = next(k for k in artikelen if any((c.get("annotaties") or {}).get("regels") for c in k["kinderen"]))
+        lid = next(c for c in art["kinderen"] if (c.get("annotaties") or {}).get("regels"))
+        # Via het artikel en via een lid: hetzelfde antwoord.
+        via_art = client.get(f"/v1/viewer/regeling/{self.AMSTERDAM}/artikel-annotaties", params={"wid": art["wid"]}).json()
+        via_lid = client.get(f"/v1/viewer/regeling/{self.AMSTERDAM}/artikel-annotaties", params={"wid": lid["wid"]}).json()
+        assert via_art["artikel_wid"] == art["wid"] == via_lid["artikel_wid"]
+        assert via_art["annotaties"] == via_lid["annotaties"]
+        assert set(i["locatie_id"] for i in lid["annotaties"]["werkingsgebieden"]) <= set(
+            i["locatie_id"] for i in via_art["annotaties"]["werkingsgebieden"])
+
+    def test_artikel_annotaties_onbekend(self):
+        r = client.get(f"/v1/viewer/regeling/{self.AMSTERDAM}/artikel-annotaties", params={"wid": "bestaat_niet"})
+        assert r.status_code == 404
+
+
+class TestVerwijzing:
+    """Een IntRef wijst met zijn eId naar een artikel, lid, onderdeel of begrip in hetzelfde document."""
+
+    AMSTERDAM = TestArtikelAnnotaties.AMSTERDAM
+
+    def _doel(self, eid):
+        return client.get(f"/v1/viewer/regeling/{self.AMSTERDAM}/verwijzing", params={"eid": eid})
+
+    def _knopen(self):
+        r = client.get(f"/v1/viewer/regeling/{self.AMSTERDAM}/boom")
+        if r.status_code == 404:
+            pytest.skip("Deze versie van het omgevingsplan staat niet in de database")
+
+        def loop(lijst):
+            for k in lijst:
+                yield k
+                yield from loop(k.get("kinderen") or [])
+        return list(loop(r.json()["boom"]))
+
+    def test_artikel(self):
+        art = next(k for k in self._knopen() if k["type"] == "Artikel" and k.get("eid"))
+        d = self._doel(art["eid"]).json()
+        assert d["soort"] == "artikel" and d["lid_wid"] is None and d["artikel"]["wid"] == art["wid"]
+
+    def test_lid_landt_op_zijn_artikel(self):
+        art = next(k for k in self._knopen() if k["type"] == "Artikel"
+                   and any(c["type"] == "Lid" and c.get("eid") for c in k["kinderen"]))
+        lid = next(c for c in art["kinderen"] if c["type"] == "Lid" and c.get("eid"))
+        d = self._doel(lid["eid"]).json()
+        assert d["soort"] == "artikel" and d["artikel"]["wid"] == art["wid"] and d["lid_wid"] == lid["wid"]
+        assert lid["wid"] in [x["wid"] for x in d["artikel"]["leden"]]
+
+    def test_afdeling_geeft_de_artikelen(self):
+        afd = next(k for k in self._knopen() if k["type"] == "Afdeling" and k.get("eid"))
+        d = self._doel(afd["eid"]).json()
+        assert d["soort"] == "onderdeel" and d["artikelen"] and d["type"] == "Afdeling"
+
+    def test_begrip_is_tekst(self):
+        begrip = next((k for k in self._knopen() if k["type"] == "Begrip" and k.get("eid")), None)
+        if begrip:
+            assert self._doel(begrip["eid"]).json()["soort"] == "tekst"
+
+    def test_onbekend(self):
+        assert self._doel("bestaat_niet").status_code == 404
+
+
+class TestWroTekstAnnotaties:
+    PLAN = "NL.IMRO.0363.A1105BPSTD-VG03"   # Postcodegebied 1012: met planobjecten
+
+    def _plan(self, **params):
+        r = client.get(f"/v1/viewer/wro/{self.PLAN}/tekst-annotaties", params=params)
+        if r.status_code == 404:
+            pytest.skip("Dit plan staat niet in de database")
+        assert r.status_code == 200
+        return r.json()
+
+    def test_zonder_tekst_alleen_het_plan(self):
+        d = self._plan()
+        assert d["plan"]["naam"] and d["plangrens"]["coordinates"] and d["planbreed"] and not d["objecten"]
+
+    def test_tekst_met_bestemming(self):
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT l.tekst_id, ST_X(p), ST_Y(p)
+                           FROM wro.wro_tekst_link l
+                           JOIN wro.planobject po ON po.identificatie = l.planobject_id AND po.instrument_idn = l.instrument_idn,
+                                LATERAL ST_PointOnSurface(po.geometrie) p
+                           WHERE l.instrument_idn = %s LIMIT 1""", (self.PLAN,))
+            rij = cur.fetchone()
+        if not rij:
+            pytest.skip("Geen koppelingen voor dit plan")
+        tekst, x, y = rij["tekst_id"], rij["st_x"], rij["st_y"]
+        d = self._plan(tekst=tekst, x=x, y=y)
+        assert not d["planbreed"] and d["objecten"] and all(o["ids"] for o in d["objecten"])
+        assert any(o["op_punt"] for o in d["objecten"])
+
+    def test_onbekend_plan(self):
+        assert client.get("/v1/viewer/wro/NL.IMRO.bestaat.niet/tekst-annotaties").status_code == 404
+
+

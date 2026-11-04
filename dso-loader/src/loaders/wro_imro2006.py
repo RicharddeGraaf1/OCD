@@ -1,13 +1,13 @@
 """Laad oude IMRO2006/Artikel-10-plannen die wél in de planvoorraad
 (RP-Opvragen) staan maar niet in onze PDOK-geometrie-set.
 
-Deze plannen hebben geen machine-leesbare plangebied-geometrie (ze dateren van
-vóór de IMRO2012-GML die PDOK levert, en IHR serveert geen geometrie). We
-koppelen ze indicatief aan het **ambtsgebied** (gemeentegrens) van de bronhouder
-en taggen `geometrie_herkomst='ambtsgebied-imro2006'`, zodat viewer/bot ze apart
-tonen ("gemeentebreed, exacte begrenzing onbekend").
+De grens komt uit de IHR (`geometrie_herkomst='ihr-plangrens'`, zie wro_plangrens.py). Tot
+2026-11-03 kregen al deze plannen het ambtsgebied, omdat de IHR geen geometrie zou serveren;
+daardoor verschenen ze op elk adres in de gemeente (G-177). Alleen als de IHR geen grens
+heeft, valt het plan nog terug op het **ambtsgebied** van de bronhouder
+(`geometrie_herkomst='ambtsgebied-imro2006'`).
 
-Metadata + teksten uit IHR; geometrie uit core.gemeentegrens.
+Metadata + teksten + grens uit IHR; terugval uit core.gemeentegrens.
 Work-list = planvoorraad-diff (idns in de laatste snapshot, niet lokaal aanwezig).
 """
 
@@ -18,7 +18,7 @@ from rich.console import Console
 
 from src.config import cfg
 from src.db import get_conn, normalize_bronhouder_code
-from src.loaders.ihr_loader import _ihr_get
+from src.loaders import wro_plangrens
 from src.loaders import wro_teksten_keten
 
 console = Console()
@@ -120,7 +120,7 @@ def _missende_idns(conn, cbs_codes: list[str] | None) -> list[dict]:
 
 
 def load_imro2006_ambtsgebied(cbs_codes: list[str] | None = None) -> int:
-    """Laad missende IMRO2006-plannen met ambtsgebied-geometrie + teksten.
+    """Laad missende plannen met hun IHR-grens (anders het ambtsgebied) + teksten.
     Returnt het aantal geladen instrumenten."""
     if not cfg.IHR_API_KEY:
         console.print("[red]IHR_API_KEY niet gezet in .env[/red]")
@@ -136,10 +136,11 @@ def load_imro2006_ambtsgebied(cbs_codes: list[str] | None = None) -> int:
             idn = row["identificatie"]
             bron = normalize_bronhouder_code(row["bronhouder_code"] or "")
             try:
-                meta = _ihr_get(f"/plannen/{idn}")
+                meta = wro_plangrens.plan_met_grens(idn) or {}
             except httpx.HTTPError as e:
                 console.print(f"  [red]{idn}: IHR-fout {type(e).__name__}[/red]")
                 continue
+            grens = wro_plangrens.grens_als_json(meta)
             naam = (meta.get("naam") or row["titel"] or "onbekend")[:500]
             type_plan = row["plantype"] or "bestemmingsplan"
             planstatus = row["planstatus"] or "onbekend"
@@ -155,7 +156,23 @@ def load_imro2006_ambtsgebied(cbs_codes: list[str] | None = None) -> int:
                                 "VALUES (%s, %s) ON CONFLICT DO NOTHING", (bron, naam_overheid))
                     cur.execute("INSERT INTO wro.wro_dossier (dossiernummer, manifest_code, status) "
                                 "VALUES (%s, %s, NULL) ON CONFLICT DO NOTHING", (dossier, bron))
-                    # Geometrie = ambtsgebied van de bronhouder. INSERT..SELECT: als er
+                    if grens:
+                        cur.execute(f"""
+                            INSERT INTO wro.ruimtelijk_instrument
+                                (idn, dossier, type_plan, naam, planstatus, datum, bronhouder,
+                                 geometrie, gml_source, pons_status, geometrie_herkomst)
+                            VALUES (%s, %s, %s, %s, %s, NULL, %s,
+                                    {wro_plangrens.GEOMETRIE_SQL}, %s, 'actief', %s)
+                            ON CONFLICT (idn) DO NOTHING
+                        """, (idn, dossier, type_plan, naam, planstatus, bron, grens,
+                              wro_plangrens.GML_BRON_IHR, wro_plangrens.HERKOMST_IHR))
+                        geladen = cur.rowcount
+                        conn.commit()
+                        nieuw.append(idn)
+                        console.print(f"  [green]{idn}[/green] ({naam[:40]}) — grens uit de IHR")
+                        n += geladen
+                        continue
+                    # Terugval: het ambtsgebied van de bronhouder. INSERT..SELECT: als er
                     # geen gemeentegrens is (opgeheven gemeente) wordt niets ingevoegd.
                     # Ambtsgebied = huidige gemeentegrens, of anders de historische
                     # grens van een opgeheven gemeente (prio: huidig vóór historisch).

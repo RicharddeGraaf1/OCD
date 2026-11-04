@@ -51,7 +51,7 @@ def _load_existing(conn) -> dict[str, dict]:
     """Pak alle huidige plannen + datum/status uit de DB."""
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT idn, datum, planstatus, pons_status, bronhouder
+            SELECT idn, datum, planstatus, pons_status, bronhouder, geometrie_herkomst
             FROM wro.ruimtelijk_instrument
         """)
         return {r["idn"]: r for r in cur.fetchall()}
@@ -180,7 +180,9 @@ def main():
 
         # Vervallen plannen detecteren
         pdok_idns = {p["idn"] for p in pdok_plannen}
-        vervallen = [idn for idn in existing if idn not in pdok_idns]
+        # Plannen met een herkomst komen niet uit PDOK: dat ze daar niet staan zegt niets.
+        vervallen = [idn for idn, plan in existing.items()
+                     if idn not in pdok_idns and not plan["geometrie_herkomst"]]
 
         # Rapport
         tbl = Table(title="Wro-refresh classificatie")
