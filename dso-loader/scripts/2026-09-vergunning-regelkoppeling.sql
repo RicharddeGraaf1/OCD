@@ -135,3 +135,25 @@ SELECT vw.koop_id, vw.rang, vw.methode, vw.score, vw.marge, vw.bewijs,
   LEFT JOIN p2p.tekst_element ouder ON ouder.id = te.parent_id
                                    AND ouder.element_type = 'Artikel'
   LEFT JOIN p2p.regeling r ON r.frbr_expression = te.regeling_expression;
+
+-- ---------------------------------------------------------------- 2026-09-22
+-- Een vergunning bundelt vaak meerdere handelingen ("plaatsen dakopbouw op
+-- garage en dakkapel op zolder" is een dakopbouw EN een dakkapel). De eerste
+-- opzet had één juiste_urn per vergunning en dwong de beoordelaar er één te
+-- kiezen. Het productiemodel (vergunning_werkzaamheid) stond al M:N toe; alleen
+-- de gouden set ging uit van één antwoord.
+
+CREATE TABLE IF NOT EXISTS vth.gouden_set_werkzaamheid (
+  koop_id          TEXT NOT NULL REFERENCES vth.gouden_set(koop_id) ON DELETE CASCADE,
+  werkzaamheid_urn TEXT NOT NULL,
+  PRIMARY KEY (koop_id, werkzaamheid_urn)
+);
+
+COMMENT ON TABLE vth.gouden_set_werkzaamheid IS
+  'De juiste werkzaamheden per vergunning in de gouden set — een verzameling, '
+  'geen enkele waarde. Meet de matcher op precisie (welk deel van zijn '
+  'voorstellen staat hierin) en bereik (welk deel hiervan vond hij).';
+
+-- Het enkelvoudige veld is vervangen door de tabel hierboven. Er stond nog
+-- niets in, dus weghalen voorkomt twee bronnen van waarheid.
+ALTER TABLE vth.gouden_set DROP COLUMN IF EXISTS juiste_urn;
