@@ -158,6 +158,10 @@ de grootste openstaande tijdwinst (zie §5).
 `--vergelijk-prod` leest prod: open eerst de tunnel, in een eigen venster, en laat
 hem open tot en met stap 9 (`bash scripts/prod_tunnel.sh`; een Claude-sessie zet
 `OCD_TUNNEL_SLEUTEL=~/.ssh/claude-richard-locuslegis-hetzner`).
+De verbinding viel op 05-11 om 04:19:45 weg ("Connection reset by peer"), bij een
+gezonde server. De lus herstelt hem, maar een script dat op dat moment draait valt
+om met `server closed the connection`. Een droogloop draai je gewoon opnieuw; toets
+bij een schrijvende stap eerst wat er al op prod staat.
 
 ```bash
 cd c:/GIT/OCD/dso-loader
@@ -505,6 +509,9 @@ bronhouder zelf berekent.
    de loader herlaadt elk relevant besluit (nieuwe identity-id's), en de vingerafdruk
    ziet dat als gewijzigd. Gemeten 29/30-10: 194 + 38 relevant = 4 nieuw + 228
    gewijzigd. Geen fout, wel de grootste vaste post van deze stap.
+   **De prod-kant van die herbouw hoort ná `indeling_naar_productie.py` (stap 6c)**:
+   op 05-11 gaf hij hier 11.033 in het register en na stap 6c 11.060, gelijk aan
+   lokaal. Draai hem dus in stap 6c (nog eens), niet alleen hier.
 
 #### Gereedschap
 
@@ -1284,6 +1291,15 @@ Drie dingen die er niet toevallig zo in zitten:
    prompt. Zonder dat schreef op 17-10 een hertaal-agent zijn deelbestanden in een
    gedeelde tijdelijke map, waar een andere agent er één van overschreef; hij
    herstelde het zelf, de sleutelcontrole bleef schoon, maar het is geluk.
+6. **Stuur de batchgrootte op bytes, niet op het aantal** *(2026-11-05)*. Een set is
+   gemiddeld 2 kB (tier 2) tot 6,5 kB (`fase2`). Met de standaard 10 batches was een
+   tier-2-batch 240 kB en de enige `fase2`-batch 1,2 MB. Kies `--batches` zo dat de
+   `.txt` rond de 150 kB blijft: op 05-11 tier 2 in 20, `fase2` in 8 en doel in 7,
+   met `--opnieuw` na een eerste export. Dat werkte 1.590/1.590 zonder
+   herstelronde, in 70–230 s per agent en ~140.000 tokens per agent.
+   `batch_naar_txt.py` maakt alleen de `.txt`; `OPDRACHT-txt.md` komt uit de vorige
+   werkmap (met `sed` het mappad vervangen), want de export schrijft alleen
+   `OPDRACHT.md`.
 
 `tier2_fill.py` blijft bestaan voor een lokale run zonder abonnement, en is de
 referentie voor de prompt.
@@ -1310,7 +1326,7 @@ foutmelding.
 > op 110 unieke `bewijs_hash` zonder oordeel). Hij telt kennelijk per (regel,
 > doeltype) en niet gededupliceerd tegen `irm.judge_uniek`. Het verschil is het
 > verschil tussen vier subagents en honderdveertig — stuur op de export, niet op
-> de METING-regel.
+> de METING-regel. *(05-11: de teller is inmiddels gelijk, METING 218 = export 218.)*
 
 ### Stap 6bis — Begrijpelijke varianten (hertaling)
 
@@ -1653,6 +1669,13 @@ python scripts/diff_lokaal_prod.py                 # moet 0 AFWIJKEND tonen (~20
 > vorige). Reken er dus niet op dat de preview aan het eind 0 zegt; lees het
 > getal, en beslis of een tweede pas de resterende uren waard is. Vijf regelingen
 > kostten ruim 2 uur, vooral door de generalisatie van één waterschap.
+>
+> **Toets dit ook vóór stap 3, niet alleen hier** *(2026-11-05)*. Na run 60 meldde de
+> preview 3 nieuwe versies die die nacht verschenen waren. De tweede pas vóór de
+> replicatie (run 61, 1,6 uur) spaarde een tweede herbouw op prod. Geef daarna
+> `--sinds "<start van de eerste run>"` mee aan de replicatie én de hertaal-export:
+> de standaardscope valt anders terug op de laatste run, en de set van run 60 valt
+> er stil buiten.
 
 > **De tabelbrede diff is sinds 2026-08-29 onderdeel van deze stap.** Hij telt
 > élke tabel in `core`, `p2p`, `p2pwijziging`, `v2a`, `i2a`, `irm`, `mer`, `vth`,
@@ -1838,7 +1861,9 @@ commit, publiceert dus al.
 
 ### Stap 9 — Nazorg
 
-- **Tunnel sluiten** (Ctrl+C in het venster van `prod_tunnel.sh`). Tot Railway is
+- **Tunnel sluiten** (Ctrl+C in het venster van `prod_tunnel.sh`; vanuit een
+  Claude-sessie eerst de lus, dan `ssh.exe` stoppen, en natellen dat poort 15433 dicht
+  is). Tot Railway is
   opgeheven: ook de TCP-proxy van Railway dicht laten.
 - `VACUUM` op de lokale DB als er geprund is (dead tuples; lokaal 86,5 GB
   tegenover 59 GB op prod).
