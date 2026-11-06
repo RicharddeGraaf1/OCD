@@ -15,6 +15,12 @@ hele cache uit elkaar (3,87x dedup landelijk).
 Run:  python scripts/hertaal_fanout_export.py                  # scope = laatste sync
       python scripts/hertaal_fanout_export.py --batches 6
       python scripts/hertaal_fanout_export.py --sinds 2026-08-15T19:27:31Z
+
+Achterstand (docs/hertaal-achterstand-plan.md): de hele DB in porties, in plaats
+van alleen wat de laatste sync laadde.
+
+      python scripts/hertaal_fanout_export.py --alles --max 6000 --per-batch 120 \
+          --max-lengte 3000 --dir data/hertaal-achterstand/portie-01
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ import json
 import os
 import pathlib
 import sys
+import textwrap
 
 import psycopg
 from dotenv import load_dotenv
@@ -59,6 +66,29 @@ WHERE  NOT EXISTS (SELECT 1 FROM v2a.hertaling h
                    WHERE h.bron_hash = e.bh AND h.model = %(model)s
                      AND h.prompt_versie = %(pv)s)
 ORDER  BY e.bh, length(e.inhoud_plain)
+"""
+
+# --alles: alle actieve regelingen in plaats van de laatste sync. `prio` zet de
+# omgevingsplannen (gm) voorop, dan provincies, waterschappen en de rest: de
+# viewer en de bot lezen vooral gemeentelijke regels, dus die komen eerst aan de beurt.
+SQL_ALLES = """
+WITH elems AS (
+    SELECT te.inhoud_plain, v2a.norm_hash(te.inhoud_plain) AS bh,
+           CASE left(split_part(te.regeling_expression, '/', 5), 2)
+                WHEN 'gm' THEN 1 WHEN 'pv' THEN 2 WHEN 'ws' THEN 3 ELSE 4 END AS prio
+    FROM   p2p.tekst_element te
+    JOIN   p2p.regeling r ON r.frbr_expression = te.regeling_expression
+    WHERE  NOT coalesce(r.inactief, false)
+      AND  te.element_type = ANY(%(types)s)
+      AND  te.inhoud_plain IS NOT NULL AND length(te.inhoud_plain) > %(minlen)s
+      AND  length(te.inhoud_plain) <= %(maxlengte)s
+)
+SELECT DISTINCT ON (e.bh) e.bh, e.inhoud_plain, e.prio
+FROM   elems e
+WHERE  NOT EXISTS (SELECT 1 FROM v2a.hertaling h
+                   WHERE h.bron_hash = e.bh AND h.model = %(model)s
+                     AND h.prompt_versie = %(pv)s)
+ORDER  BY e.bh, e.prio
 """
 
 OPDRACHT = """\
@@ -148,7 +178,14 @@ def archiveer_vorige(werk):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sinds", help="ISO-tijdstip; default = start laatste geslaagde sync")
+    ap.add_argument("--alles", action="store_true",
+                    help="alle actieve regelingen, niet alleen de laatste sync (achterstand)")
+    ap.add_argument("--max", type=int, help="hooguit zoveel teksten (een portie)")
+    ap.add_argument("--max-lengte", type=int,
+                    help="langere teksten overslaan in plaats van afkappen (G-179); alleen met --alles")
     ap.add_argument("--batches", type=int, default=10)
+    ap.add_argument("--per-batch", type=int,
+                    help="aantal teksten per batch; bepaalt dan het aantal batches")
     ap.add_argument("--model", default="claude-sonnet-5")
     ap.add_argument("--dir", default=str(HIER / "data" / "hertaal"),
                     help="werkmap (default data/hertaal, staat in .gitignore)")
@@ -169,17 +206,27 @@ def main() -> None:
         print(f"vorige uitvoer gearchiveerd naar {oud.name}")
 
     with psycopg.connect(db_url(), row_factory=dict_row) as conn, conn.cursor() as cur:
-        sinds = args.sinds
-        if not sinds:
-            cur.execute("SELECT max(gestart_op) AS t FROM audit.sync_run WHERE klaar_op IS NOT NULL")
-            sinds = cur.fetchone()["t"]
-            print(f"scope: sinds de laatste sync-run ({sinds})")
         cur.execute("SET max_parallel_workers_per_gather = 0")
-        cur.execute(SQL, {"sinds": sinds, "types": list(ELEMENT_TYPES), "minlen": MIN_LEN,
-                          "model": args.model, "pv": PROMPT_VERSIE})
-        rijen = cur.fetchall()
+        if args.alles:
+            print("scope: alle actieve regelingen")
+            cur.execute(SQL_ALLES, {"types": list(ELEMENT_TYPES), "minlen": MIN_LEN,
+                                    "maxlengte": args.max_lengte or 10**9,
+                                    "model": args.model, "pv": PROMPT_VERSIE})
+            rijen = sorted(cur.fetchall(), key=lambda r: (r["prio"], r["bh"]))
+        else:
+            sinds = args.sinds
+            if not sinds:
+                cur.execute("SELECT max(gestart_op) AS t FROM audit.sync_run WHERE klaar_op IS NOT NULL")
+                sinds = cur.fetchone()["t"]
+                print(f"scope: sinds de laatste sync-run ({sinds})")
+            cur.execute(SQL, {"sinds": sinds, "types": list(ELEMENT_TYPES), "minlen": MIN_LEN,
+                              "model": args.model, "pv": PROMPT_VERSIE})
+            rijen = cur.fetchall()
 
     print(f"te hertalen: {len(rijen)} unieke teksten")
+    if args.max and len(rijen) > args.max:
+        rijen = rijen[:args.max]
+        print(f"  waarvan deze portie: {len(rijen)}")
     if not rijen:
         return
 
@@ -187,12 +234,27 @@ def main() -> None:
     # lengte gesorteerd, dus blokken zouden een agent alle korte en een ander
     # alle lange teksten geven.
     n = min(args.batches, len(rijen))
+    if args.per_batch:
+        n = -(-len(rijen) // args.per_batch)
     for i in range(n):
         deel = rijen[i::n]
         pad = werk / f"batch-{i + 1:02d}.json"
         pad.write_text(json.dumps(
             [{"bron_hash": r["bh"], "tekst": r["inhoud_plain"][:TRUNC]} for r in deel],
             ensure_ascii=False, indent=1), encoding="utf-8")
+        # De agents lezen de omgeslagen .txt: in de .json staan regels van
+        # duizenden tekens die afgekapt gelezen worden (runbook stap 6bis, 17-10).
+        # Tot 2026-11-06 werd die .txt elke sync met de hand gemaakt.
+        delen = []
+        for j, r in enumerate(deel, 1):
+            regels = []
+            for regel in r["inhoud_plain"][:TRUNC].splitlines() or [""]:
+                regels += textwrap.wrap(regel, 110, break_long_words=True,
+                                        break_on_hyphens=False) or [""]
+            delen.append(f"##### ITEM {j}/{len(deel)}\nSLEUTEL: {r['bh']}\nTEKST:\n"
+                         + "\n".join(regels))
+        pad.with_suffix(".txt").write_text("\n\n".join(delen) + "\n", encoding="utf-8")
+        (werk / f"tmp-{i + 1:02d}").mkdir(exist_ok=True)
         print(f"  {pad.name}: {len(deel)} teksten")
 
     opdracht = werk / "OPDRACHT.md"
