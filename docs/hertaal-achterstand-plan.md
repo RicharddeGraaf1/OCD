@@ -2,7 +2,9 @@
 
 *Opgesteld 2026-11-06 door Claude op verzoek van Richard. Startwoord in een sessie:
 **"loop verder met het plan"** (of "volgende hertaal-portie"). Claude leest dan dit
-bestand, neemt de eerste open portie uit de tabel onder §4 en werkt §3 af.*
+bestand in `c:/GIT/OCD-vergunningen/docs/` (main, de bijgewerkte versie), neemt de
+eerste open portie uit de tabel onder §4 en werkt §3 af. Scripts en data draaien in
+`c:/GIT/OCD/dso-loader` (daar staat `.env`).*
 
 ## 1. Waarom en wat
 
@@ -34,8 +36,9 @@ de sync. Geen tweede soort hertaling onder dezelfde `prompt_versie`.
   **6.000** per portie; de laatste neemt de rest. Dat is 10 porties.
 - **Batch = één Sonnet-agent, 120 teksten** (~100 kB `.txt`, net als de sync van
   04-11 met 86 teksten op 97 kB). Een portie van 6.000 is dus 50 agents.
-- **Tien agents tegelijk**, in golven. Runbook: ~1 uur per 2.600 teksten bij tien
-  tegelijk, dus ~1,2 uur voor de meetnacht en ~2,5 uur voor een volle portie.
+- **Tien agents tegelijk**; start een nieuwe zodra er een klaar is. Gemeten in
+  portie 1: 3 tot 4,5 minuut per agent, 3.000 teksten in 12 minuten. De tijd is dus
+  geen beperking, de gebruikslimiet wel.
 - **Volgorde**: eerst teksten uit omgevingsplannen (gm), dan provincies (pv),
   waterschappen (ws) en de rest. Binnen een groep op hash, dus kort en lang door elkaar.
 - **Elke portie haalt zelf op wat nog open is.** De export sluit uit wat al in de
@@ -117,7 +120,7 @@ python scripts/hertaal_fanout_laad.py --dir data/hertaal-achterstand/portie-NN -
 
 **4. Naar prod** (~3 min, schrijft naar productie; dit plan is de toestemming)
 ```bash
-bash scripts/prod_tunnel.sh      # eigen venster; Claude: OCD_TUNNEL_SLEUTEL=~/.ssh/claude-richard-locuslegis-hetzner
+bash scripts/prod_tunnel.sh      # eigen venster; Claude: OCD_TUNNEL_SLEUTEL=~/.ssh/claude-richard-locuslegis-hetzner, op de achtergrond
 set -a; . ./.env; set +a
 powershell -File scripts/sync-hertaling-to-prod.ps1 -All -ProdUrl "$PROD_DB_URL" \
     > data/hertaal-achterstand/portie-NN.prod.log 2>&1
@@ -130,13 +133,15 @@ eerst de lus, dan `ssh.exe` stoppen, en natellen dat poort 15433 dicht is.
 - Eén regel in het vault-log (`query | Hertaal-achterstand portie NN`) en het
   dashboard (`c:/GIT/ProjectenDashboard/projecten/OCD.md`: laatste activiteit en
   volgende stap).
-- Commit dit planbestand op main, alleen met de voortgang (geen data).
+- Werk dit planbestand bij in de **main-worktree** `c:/GIT/OCD-vergunningen` (de kopie
+  in `c:/GIT/OCD` loopt mee zodra main daar weer wordt binnengehaald) en commit en push
+  alleen de voortgang, geen data.
 
 ## 4. Voortgang
 
 | Portie | Grootte | Datum | Geladen | Cache lokaal / prod | Opmerkingen |
 |---|---|---|---|---|---|
-| 1 | 3.000 (meetnacht) | | | | |
+| 1 | 3.000 (meetnacht) | 2026-11-06 | 3.000/3.000, geen herstel | 53.692 / 53.692 | 25 agents in 12 min (23:15–23:27), ~148k tokens per agent, ~3,7 mln samen; 3.000 uniek, geen sjabloon; steekproef 10/10 goed |
 | 2 | 6.000 | | | | |
 | 3 | 6.000 | | | | |
 | 4 | 6.000 | | | | |
