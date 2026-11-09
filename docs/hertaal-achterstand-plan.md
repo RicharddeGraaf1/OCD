@@ -144,7 +144,7 @@ eerst de lus, dan `ssh.exe` stoppen, en natellen dat poort 15433 dicht is.
 | 1 | 3.000 (meetnacht) | 2026-11-06 | 3.000/3.000, geen herstel | 53.692 / 53.692 | 25 agents in 12 min (23:15–23:27), ~148k tokens per agent, ~3,7 mln samen; 3.000 uniek, geen sjabloon; steekproef 10/10 goed |
 | 2 | 9.000 | 2026-11-07 | 9.000/9.000, geen herstel | 62.692 / 62.692 | 75 agents in ~25 min (22:41–23:06), ~148k tokens per agent, ~11 mln samen; 8.992 uniek, geen sjabloon; steekproef 9/10 goed, 1 onnauwkeurig (batch 71: "bij de genoemde plekken" waar de bron een soort bouwwerk bedoelt). Wees-ssh van portie 1 hield de tunnel een etmaal open; gebruikt en daarna gestopt |
 | 3 | 9.000 | 2026-11-09 | 9.000/9.000, geen herstel | 72.640 / 72.640 | 75 agents in ~29 min (22:14–22:43), ~148k tokens per agent, ~11 mln samen; 8.988 uniek, geen sjabloon; steekproef 10/10 inhoudelijk goed, 1 kromme zin (batch 70: "mag je gebruiken voor winkels"). Startcache 63.640, 948 boven het eind van portie 2 (vermoedelijk tussentijdse sync) |
-| 4 | 9.000 | | | | |
+| 4 | 9.000 | 2026-11-09 | 9.000/9.000, geen herstel | 81.640 / 81.640 | 75 agents in ~33 min (22:45–23:18), ~148k tokens per agent, ~11 mln samen; 8.993 uniek, geen sjabloon; steekproef 10/10 inhoudelijk goed, 1 kromme zin (batch 39). 2 bronteksten bevatten alleen witruimte (batch 20 en 50); die hebben als hertaling "geen tekst" / "leeg" gekregen |
 | 5 | 9.000 | | | | |
 | 6 | 9.000 | | | | |
 | 7 | 9.000 | | | | |
