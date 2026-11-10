@@ -146,7 +146,7 @@ eerst de lus, dan `ssh.exe` stoppen, en natellen dat poort 15433 dicht is.
 | 3 | 9.000 | 2026-11-09 | 9.000/9.000, geen herstel | 72.640 / 72.640 | 75 agents in ~29 min (22:14–22:43), ~148k tokens per agent, ~11 mln samen; 8.988 uniek, geen sjabloon; steekproef 10/10 inhoudelijk goed, 1 kromme zin (batch 70: "mag je gebruiken voor winkels"). Startcache 63.640, 948 boven het eind van portie 2 (vermoedelijk tussentijdse sync) |
 | 4 | 9.000 | 2026-11-09 | 9.000/9.000, geen herstel | 81.640 / 81.640 | 75 agents in ~33 min (22:45–23:18), ~148k tokens per agent, ~11 mln samen; 8.993 uniek, geen sjabloon; steekproef 10/10 inhoudelijk goed, 1 kromme zin (batch 39). 2 bronteksten bevatten alleen witruimte (batch 20 en 50); die hebben als hertaling "geen tekst" / "leeg" gekregen |
 | 5 | 9.000 | 2026-11-09 | 9.000/9.000, geen herstel | 90.640 / 90.640 | 75 agents in ~32 min (23:20–23:52), ~148k tokens per agent, ~11 mln samen; 8.993 uniek, geen sjabloon; steekproef 10/10 inhoudelijk goed. Batch 68: bron noemt 170 en 280 dB(A), vermoedelijk typefouten voor 70 en 80; letterlijk overgenomen met "volgens de tekst" |
-| 6 | 9.000 | | | | |
+| 6 | 9.000 | 2026-11-10 | 9.000/9.000, geen herstel | 99.640 / 99.640 | 75 agents in ~31 min (02:12–02:43), ~146k tokens per agent, ~11 mln samen; 8.964 uniek (de 36 dubbele zijn bronnen die alleen in een kaartverwijzing verschillen), geen sjabloon; steekproef 10/10 inhoudelijk goed, 3 afgekapte paren nagelezen tegen de volledige bron. 991 van 9.000 hertalingen hebben meer dan 4 zinnen (portie 5: 1.096), vooral lange toelichtingen |
 | 7 | 9.000 | | | | |
 | 8 | rest (~350) | | | | |
 
@@ -158,6 +158,8 @@ vol en portie 8 de rest.
 
 2026-11-09: Richard staat toe door te gaan tot 30% van het weektotaal, dus portie 3 t/m 5 achter elkaar
 (geschat ~26%). Geen meter beschikbaar; bij een andere stand het aantal porties bijstellen. Na portie 3 nog 36.352 open.
+
+2026-11-10: volgens Richard stond het weektotaal na portie 5 op 17%, dus door met portie 6, 7 en de rest binnen dezelfde grens van 30%.
 
 ## 5. Buiten dit plan
 
