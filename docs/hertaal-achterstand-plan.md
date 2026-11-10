@@ -148,7 +148,7 @@ eerst de lus, dan `ssh.exe` stoppen, en natellen dat poort 15433 dicht is.
 | 5 | 9.000 | 2026-11-09 | 9.000/9.000, geen herstel | 90.640 / 90.640 | 75 agents in ~32 min (23:20–23:52), ~148k tokens per agent, ~11 mln samen; 8.993 uniek, geen sjabloon; steekproef 10/10 inhoudelijk goed. Batch 68: bron noemt 170 en 280 dB(A), vermoedelijk typefouten voor 70 en 80; letterlijk overgenomen met "volgens de tekst" |
 | 6 | 9.000 | 2026-11-10 | 9.000/9.000, geen herstel | 99.640 / 99.640 | 75 agents in ~31 min (02:12–02:43), ~146k tokens per agent, ~11 mln samen; 8.964 uniek (de 36 dubbele zijn bronnen die alleen in een kaartverwijzing verschillen), geen sjabloon; steekproef 10/10 inhoudelijk goed, 3 afgekapte paren nagelezen tegen de volledige bron. 991 van 9.000 hertalingen hebben meer dan 4 zinnen (portie 5: 1.096), vooral lange toelichtingen |
 | 7 | 9.000 | 2026-11-10 | 9.000/9.000, geen herstel | 108.640 / 108.640 | 75 agents in ~33 min (02:45–03:18), ~148k tokens per agent, ~11 mln samen; 8.977 uniek, geen sjabloon; steekproef 10/10 goed op 1 na: batch 40 noemt een categorie A-water "kleiner water", wat niet in de bron staat. 1.423 van 9.000 hertalingen hebben meer dan 4 zinnen, meest Natura 2000-toelichtingen |
-| 8 | rest (~350) | | | | |
+| 8 | rest: 352 | 2026-11-10 | 352/352, geen herstel | 108.992 / 108.992 | 3 agents in ~5 min (03:19–03:24); 351 uniek, geen sjabloon; steekproef 10/10 inhoudelijk goed, batch 01 schrijft twee keer "dieren" waar diersoorten bedoeld zijn. Export meldt daarna 0 open teksten: **achterstand weg** |
 
 Startstand 2026-11-06: cache lokaal 50.692 rijen, prod 50.692.
 
