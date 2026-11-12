@@ -3,9 +3,10 @@
 Contract: c:/GIT/Locus/docs/plans/transitieplan/plan-1-voorraad-uit-ocd.md (contractversie 1).
 Plan aan deze kant: docs/transitie-export-plan.md.
 
-Drie endpoints, alleen met de privésleutel:
+Vier endpoints, alleen met de privésleutel:
     GET /v1/transitie/{gemeentecode}/voorraad      plannen, artikelen, tegels (H), bruidsschat
     GET /v1/transitie/{gemeentecode}/geometrie     plangebied en geldend deel per plan, en de pons
+    GET /v1/transitie/{gemeentecode}/ponshistorie  de pons door de tijd, sinds 2024-01-01
     GET /v1/transitie/plan/{idn}/artikel/{tekst}   één artikel met zijn onderdelen en tekst
 
 Sleutels over de grens zijn natuurlijk: `idn` en `(idn, tekstobjectId)`. Nooit een id-kolom.
@@ -457,6 +458,43 @@ def geometrie(
         "contractversie": CONTRACTVERSIE,
         "precisie": precisie,
         "features": features,
+    }
+
+
+@router.get("/{gemeentecode}/ponshistorie", dependencies=[Depends(alleen_prive)])
+def ponshistorie(gemeentecode: str) -> dict[str, Any]:
+    """De pons van het omgevingsplan door de tijd, sinds 2024-01-01, oplopend op datum.
+
+    Elke stap geldt vanaf `geldigVanaf` tot de volgende stap. `geometrie` is null als er toen geen
+    pons was. Gevuld door dso-loader/scripts/pons_historie.py; een gemeente die nog niet gepeild
+    is, geeft `gepeild: false` en geen stappen (geen 404: de afnemer moet het verschil kunnen
+    tonen tussen "geen pons" en "niet bekend").
+
+    Let op: de DSO geeft de pons per versie zoals hij in die versie staat. Dat is niet altijd
+    groeiend (Haarlem 30-9-2026: 12 ha tussen 181 en 193 ha in). Wie "omgezet sinds" wil, neemt
+    de vereniging van alle stappen tot een datum.
+    """
+    gm = _gemeente(gemeentecode)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('p2p.pons_historie') IS NOT NULL AS er")
+        rijen = []
+        if cur.fetchone()["er"]:
+            cur.execute(f"""
+                SELECT geldig_vanaf, geometrie_identificatie, gepeild_op,
+                       CASE WHEN geometrie IS NOT NULL THEN ST_AsGeoJSON(ST_MakeValid(
+                           ST_SimplifyPreserveTopology(geometrie, {VEREENVOUDIGING_M})))::json END AS g
+                  FROM p2p.pons_historie WHERE gemeentecode = %s ORDER BY geldig_vanaf""", (gm,))
+            rijen = cur.fetchall()
+    gepeild_op = max((r["gepeild_op"] for r in rijen), default=None)
+    return {
+        "contractversie": CONTRACTVERSIE,
+        "gemeentecode": gm,
+        "gepeild": bool(rijen),
+        "gepeildOp": gepeild_op.isoformat() if gepeild_op else None,
+        "crs": "EPSG:28992",
+        "stappen": [{"geldigVanaf": r["geldig_vanaf"].isoformat(),
+                     "geometrieIdentificatie": r["geometrie_identificatie"],
+                     "geometrie": r["g"]} for r in rijen],
     }
 
 

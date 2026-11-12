@@ -179,3 +179,41 @@ inpassingsplannen). Tests: `pytest test_transitie.py`, 12 groen, waaronder de ve
 - **Nieuwe velden ten opzichte van het contract:** `uitgesloten` (plan, naam, reden), `signalen` per plan,
   `bron.ponsIdentificaties`, `bron.curatieVersie` en `bron.indeling`. Het Locus-plan is bijgewerkt.
 
+
+## Pons-geschiedenis (2026-11-12)
+
+Locus wil in de tab Gebieden laten zien wat er sinds 1-1-2024 is omgezet. `p2p.pons` kent alleen de
+pons van de geldende versie, dus komt er een vierde endpoint bij:
+`GET /v1/transitie/{gm}/ponshistorie` (privésleutel).
+
+```json
+{"contractversie": 1, "gemeentecode": "gm0392", "gepeild": true,
+ "gepeildOp": "2026-11-12T19:58:00+00:00", "crs": "EPSG:28992",
+ "stappen": [{"geldigVanaf": "2024-01-01", "geometrieIdentificatie": null, "geometrie": null},
+             {"geldigVanaf": "2026-01-01", "geometrieIdentificatie": "e72f…", "geometrie": {"type": "MultiPolygon", "…": "…"}}]}
+```
+
+Een stap geldt vanaf `geldigVanaf` tot de volgende. Een gemeente die nog niet gepeild is, geeft
+`gepeild: false` en een lege lijst, geen 404.
+
+**Hoe.** De DSO heeft geen lijst met versiedata, maar geeft de pons op een datum terug met `geldigOp`
+en `inWerkingOp` (`beschikbaarOp` = nu). `dso-loader/scripts/pons_historie.py` peilt de 1e van elke
+maand vanaf 2024-01-01 en zoekt bij een wijziging met bisectie de eerste dag. Opslag in
+`p2p.pons_historie` (DDL `dso-loader/scripts/2026-11-12-add-pons-historie.sql`). Peilingen met een
+datum gaven die avond reeksen 503's waar een gewone call slaagde; het script wacht dan langer.
+
+**Gemeten (lokaal en prod gelijk):**
+
+| Gemeente | Peilingen | Stappen |
+|---|---|---|
+| Nunspeet (gm0302) | 36 | 2024-01-01: geen pons, en sindsdien niet |
+| Haarlem (gm0392) | 51 | 2024-01-01 geen pons · 2026-01-01 180,7 ha · 2026-09-30 12,1 ha · 2026-10-23 192,9 ha |
+
+De laatste stap van Haarlem is gelijk aan de huidige pons in `p2p.pons` (192,9 ha). De stap van
+30-9-2026 is kleiner dan de stap ervoor: de DSO geeft de pons zoals hij in die versie staat, en die is
+dus niet altijd groeiend. Voor "omgezet sinds" neemt de afnemer de vereniging van de stappen tot een
+datum. Of die versie een fout van de bronhouder is of een bewuste terugzetting, is niet uitgezocht.
+
+**Vervolg.** De overige gemeenten zijn niet gepeild: alle 342 zijn ruim 12.000 calls, dus bulk, en
+alleen 22:00-06:00 serieel. Opnemen in de nachtelijke sync als Locus het voor meer gemeenten nodig
+heeft.

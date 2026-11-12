@@ -131,3 +131,31 @@ def test_geometrie_exact_vraagt_idn():
     assert c.get("/v1/transitie/gm0302/geometrie?precisie=exact").status_code == 400
     r = c.get("/v1/transitie/gm0302/geometrie?precisie=exact&idn=NL.IMRO.0302.BP01101-vg01")
     assert r.status_code == 200 and len(r.json()["features"]) == 1
+
+
+# ── pons-geschiedenis ────────────────────────────────────────────────────────────────────────────
+
+def test_ponshistorie_publieke_sleutel_wordt_geweigerd():
+    assert _client("public").get("/v1/transitie/gm0392/ponshistorie").status_code == 403
+
+
+def test_ponshistorie_contract_haarlem():
+    d = _client("private").get("/v1/transitie/gm0392/ponshistorie").json()
+    assert d["contractversie"] == transitie.CONTRACTVERSIE and d["gemeentecode"] == "gm0392"
+    assert d["gepeild"] is True and d["gepeildOp"]
+    data = [s["geldigVanaf"] for s in d["stappen"]]
+    assert data == sorted(data) and data[0] == "2024-01-01"
+    assert d["stappen"][0]["geometrie"] is None, "Haarlem had op 1-1-2024 nog geen pons"
+    laatste = d["stappen"][-1]
+    assert laatste["geometrieIdentificatie"] and laatste["geometrie"]["type"] in ("Polygon", "MultiPolygon")
+
+
+def test_ponshistorie_nunspeet_zonder_pons():
+    d = _client("private").get("/v1/transitie/gm0302/ponshistorie").json()
+    assert d["gepeild"] is True
+    assert all(s["geometrie"] is None for s in d["stappen"])
+
+
+def test_ponshistorie_niet_gepeilde_gemeente():
+    d = _client("private").get("/v1/transitie/gm9999/ponshistorie").json()
+    assert d["gepeild"] is False and d["stappen"] == [] and d["gepeildOp"] is None
