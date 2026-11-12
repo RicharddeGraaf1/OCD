@@ -3,10 +3,12 @@
 Contract: c:/GIT/Locus/docs/plans/transitieplan/plan-1-voorraad-uit-ocd.md (contractversie 1).
 Plan aan deze kant: docs/transitie-export-plan.md.
 
-Vier endpoints, alleen met de privésleutel:
+Vijf endpoints, alleen met de privésleutel:
     GET /v1/transitie/{gemeentecode}/voorraad      plannen, artikelen, tegels (H), bruidsschat
     GET /v1/transitie/{gemeentecode}/geometrie     plangebied en geldend deel per plan, en de pons
     GET /v1/transitie/{gemeentecode}/ponshistorie  de pons door de tijd, sinds 2024-01-01
+    GET /v1/transitie/{gemeentecode}/omgevingsplan de indeling van het omgevingsplan (hoofdstukken
+                                                   tot en met subparagrafen), voor de landingsplek
     GET /v1/transitie/plan/{idn}/artikel/{tekst}   één artikel met zijn onderdelen en tekst
 
 Sleutels over de grens zijn natuurlijk: `idn` en `(idn, tekstobjectId)`. Nooit een id-kolom.
@@ -495,6 +497,76 @@ def ponshistorie(gemeentecode: str) -> dict[str, Any]:
         "stappen": [{"geldigVanaf": r["geldig_vanaf"].isoformat(),
                      "geometrieIdentificatie": r["geometrie_identificatie"],
                      "geometrie": r["g"]} for r in rijen],
+    }
+
+
+# De structuurelementen boven het artikel. Een landingsplek in Locus is er één van; Locus gebruikt
+# de wId als uId, want bij een import uit de DSO krijgt een onderdeel zijn wId als uId.
+STRUCTUUR = ("Hoofdstuk", "Titel", "Afdeling", "Paragraaf", "Subparagraaf", "Subsubparagraaf")
+
+
+def _structuur(rijen: list[dict]) -> list[dict]:
+    """Zet de platte elementen van het lichaam om in de structuur, in documentvolgorde. Een element
+    hangt aan zijn dichtstbijzijnde structuur-voorouder; het lichaam zelf telt niet mee."""
+    per_id = {r["id"]: r for r in rijen}
+    kinderen = defaultdict(list)
+    for r in rijen:
+        kinderen[r["parent_id"]].append(r)
+    for lijst in kinderen.values():
+        lijst.sort(key=lambda r: (r["volgorde"] if r["volgorde"] is not None else 1 << 30, r["id"]))
+    artikelen = Counter()
+    for r in rijen:
+        if r["element_type"] != "Artikel":
+            continue
+        ouder = per_id.get(r["parent_id"])
+        while ouder is not None:
+            if ouder["element_type"] in STRUCTUUR:
+                artikelen[ouder["id"]] += 1
+            ouder = per_id.get(ouder["parent_id"])
+
+    uit = []
+
+    def loop(r: dict, ouder_wid: str | None, diepte: int) -> None:
+        if r["element_type"] in STRUCTUUR and r["wid"]:
+            uit.append({
+                "wId": r["wid"],
+                "type": r["element_type"],
+                "nummer": r["nummer"],
+                "kop": r["opschrift"],
+                "parent": ouder_wid,
+                "diepte": diepte,
+                "aantalArtikelen": artikelen[r["id"]],
+            })
+            ouder_wid, diepte = r["wid"], diepte + 1
+        for k in kinderen.get(r["id"], []):
+            loop(k, ouder_wid, diepte)
+
+    for r in rijen:
+        if r["element_type"] == "Lichaam":
+            loop(r, None, 0)
+    return uit
+
+
+@router.get("/{gemeentecode}/omgevingsplan", dependencies=[Depends(alleen_prive)])
+def omgevingsplan(gemeentecode: str) -> dict[str, Any]:
+    gm = _gemeente(gemeentecode)
+    with get_conn() as conn, conn.cursor() as cur:
+        werk, expressie = _omgevingsplan_expressie(cur, gm)
+        if not expressie:
+            raise HTTPException(status_code=404, detail=f"Geen omgevingsplan voor {gm}")
+        cur.execute("""
+            SELECT id, parent_id, element_type, nummer, opschrift, wid, volgorde
+              FROM p2p.tekst_element
+             WHERE regeling_expression = %(e)s
+               AND element_type = ANY(%(typen)s)""",
+                    {"e": expressie, "typen": ["Lichaam", "Artikel", *STRUCTUUR]})
+        rijen = cur.fetchall()
+    return {
+        "contractversie": CONTRACTVERSIE,
+        "gemeentecode": gm,
+        "regeling": werk,
+        "expressie": expressie,
+        "onderdelen": _structuur(rijen),
     }
 
 

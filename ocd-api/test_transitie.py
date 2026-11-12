@@ -35,6 +35,22 @@ def test_tam_op_naam_en_identificatie():
     assert transitie.RE_TAM.search("NL.IMRO.0302.TAM0022n-vg01")
 
 
+def test_structuur_hangt_aan_de_dichtstbijzijnde_structuur():
+    rijen = [
+        {"id": 1, "parent_id": None, "element_type": "Lichaam", "nummer": None, "opschrift": None, "wid": "x__body", "volgorde": 1},
+        {"id": 3, "parent_id": 1, "element_type": "Hoofdstuk", "nummer": "2", "opschrift": "Twee", "wid": "x__chp_2", "volgorde": 2},
+        {"id": 2, "parent_id": 1, "element_type": "Hoofdstuk", "nummer": "1", "opschrift": "Een", "wid": "x__chp_1", "volgorde": 1},
+        {"id": 4, "parent_id": 2, "element_type": "Afdeling", "nummer": "1.1", "opschrift": "A", "wid": "x__chp_1__subchp_1.1", "volgorde": 1},
+        {"id": 5, "parent_id": 4, "element_type": "Artikel", "nummer": "1.1", "opschrift": None, "wid": "x__art_1.1", "volgorde": 1},
+        {"id": 6, "parent_id": 2, "element_type": "Artikel", "nummer": "1.2", "opschrift": None, "wid": "x__art_1.2", "volgorde": 2},
+    ]
+    uit = transitie._structuur(rijen)
+    assert [o["wId"] for o in uit] == ["x__chp_1", "x__chp_1__subchp_1.1", "x__chp_2"]
+    assert [o["parent"] for o in uit] == [None, "x__chp_1", None]
+    assert [o["diepte"] for o in uit] == [0, 1, 0]
+    assert [o["aantalArtikelen"] for o in uit] == [2, 1, 0]
+
+
 def test_plangrens():
     assert transitie._plangrens(None) == "pdok"
     assert transitie._plangrens("ihr-plangrens") == "ihr"
@@ -159,3 +175,28 @@ def test_ponshistorie_nunspeet_zonder_pons():
 def test_ponshistorie_niet_gepeilde_gemeente():
     d = _client("private").get("/v1/transitie/gm9999/ponshistorie").json()
     assert d["gepeild"] is False and d["stappen"] == [] and d["gepeildOp"] is None
+
+
+# ── structuur van het omgevingsplan ──────────────────────────────────────────────────────────────
+
+def test_omgevingsplan_publieke_sleutel_wordt_geweigerd():
+    assert _client("public").get("/v1/transitie/gm0392/omgevingsplan").status_code == 403
+
+
+@pytest.mark.parametrize("gm", ["gm0302", "gm0392"])
+def test_omgevingsplan_structuur(gm):
+    d = _client("private").get(f"/v1/transitie/{gm}/omgevingsplan").json()
+    assert d["contractversie"] == transitie.CONTRACTVERSIE and d["expressie"].startswith(f"/akn/nl/act/{gm}/")
+    onderdelen = d["onderdelen"]
+    wids = [o["wId"] for o in onderdelen]
+    assert len(wids) == len(set(wids)), "dubbele wId"
+    gezien = set()
+    for o in onderdelen:
+        assert o["parent"] is None or o["parent"] in gezien, "ouder na kind"
+        gezien.add(o["wId"])
+    assert any("__chp_22" in w for w in wids), "hoofdstuk 22 (bruidsschat) ontbreekt"
+    assert all(o["type"] in transitie.STRUCTUUR for o in onderdelen)
+
+
+def test_omgevingsplan_onbekende_gemeente():
+    assert _client("private").get("/v1/transitie/gm9999/omgevingsplan").status_code == 404

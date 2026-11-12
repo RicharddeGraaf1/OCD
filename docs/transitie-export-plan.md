@@ -217,3 +217,23 @@ datum. Of die versie een fout van de bronhouder is of een bewuste terugzetting, 
 **Vervolg.** De overige gemeenten zijn niet gepeild: alle 342 zijn ruim 12.000 calls, dus bulk, en
 alleen 22:00-06:00 serieel. Opnemen in de nachtelijke sync als Locus het voor meer gemeenten nodig
 heeft.
+
+
+## Indeling van het omgevingsplan (2026-11-12)
+
+Locus laat de gemeente per thema een landingsplek kiezen: het hoofdstuk, de afdeling of de paragraaf
+in het omgevingsplan waar de omgezette regels komen. Een uId intypen is onwerkbaar, dus kiest de
+gebruiker uit de indeling. Vijfde endpoint: `GET /v1/transitie/{gm}/omgevingsplan` (privésleutel).
+
+```json
+{"contractversie": 1, "gemeentecode": "gm0392",
+ "regeling": "/akn/nl/act/gm0392/2020/omgevingsplan",
+ "expressie": "/akn/nl/act/gm0392/2020/omgevingsplan/nld@2026-10-20;12171495",
+ "onderdelen": [{"wId": "gm0392_…__chp_24", "type": "Hoofdstuk", "nummer": "1", "kop": "Algemene regels",
+                 "parent": null, "diepte": 0, "aantalArtikelen": 1}]}
+```
+
+De onderdelen staan in documentvolgorde: hoofdstuk, titel, afdeling, paragraaf, subparagraaf en
+subsubparagraaf; een ouder staat altijd vóór zijn kinderen. `aantalArtikelen` telt alle artikelen
+eronder. De sleutel is de wId: bij een import uit de DSO krijgt een onderdeel in Locus zijn wId als
+uId. Geen omgevingsplan in OCD geeft een 404.
