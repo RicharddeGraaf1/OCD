@@ -185,3 +185,108 @@ def test_etag_verschilt_per_tegel():
     a = client.get("/v1/tiles/locaties/12/2000/1500.mvt").headers["ETag"]
     b = client.get("/v1/tiles/locaties/12/2001/1500.mvt").headers["ETag"]
     assert a != b
+
+
+# ── Filter op identificatie (?ids=) ────────────────────────────────────
+#
+# Uitgezoomd tekent de viewer alleen de locaties van de gekozen plek. Een
+# ongefilterde tegel draagt dan honderdduizenden vlakken voor een handvol dat
+# getekend wordt; met het filter komt alleen de selectie mee.
+
+def test_ids_parser_sorteert_en_ontdubbelt():
+    assert mod._ids_uit(None) is None
+    assert mod._ids_uit("") == []
+    assert mod._ids_uit("b, a,,b") == ["a", "b"]
+
+
+def test_ids_parser_weigert_te_veel_en_te_lang():
+    with pytest.raises(mod.HTTPException) as e:
+        mod._ids_uit(",".join(f"id{i}" for i in range(mod.MAX_IDS + 1)))
+    assert e.value.status_code == 400
+    with pytest.raises(mod.HTTPException) as e:
+        mod._ids_uit("x" * (mod.MAX_ID_LENGTE + 1))
+    assert e.value.status_code == 400
+
+
+def _ids_in_tegel(laag_tabel: str, niveau: int, z: int, n: int) -> list[str]:
+    """n identificaties die in de tegel rond Utrecht op zoom z liggen."""
+    x, y = _tegel_van(UTR_X, UTR_Y, z)
+    minx, miny, maxx, maxy = mod.envelope(z, x, y)
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT DISTINCT identificatie FROM {laag_tabel} "  # noqa: S608 — vaste tabelnaam
+            "WHERE niveau = %s AND geometrie && ST_MakeEnvelope(%s,%s,%s,%s,28992) "
+            "ORDER BY identificatie LIMIT %s",
+            (niveau, minx, miny, maxx, maxy, n),
+        )
+        return [r["identificatie"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+
+
+def test_filter_levert_alleen_de_selectie():
+    """De identificatie staat als tekst in de MVT, dus dit is zonder decoder te
+    toetsen: de gekozen ids zitten erin, een id buiten de selectie niet."""
+    gekozen, buiten = _ids_in_tegel("p2p.locatie_generalisatie", 8, 8, 4)[:3], None
+    alle = _ids_in_tegel("p2p.locatie_generalisatie", 8, 8, 50)
+    buiten = next(i for i in alle if i not in gekozen)
+    x, y = _tegel_van(UTR_X, UTR_Y, 8)
+
+    r = client.get(f"/v1/tiles/locaties/8/{x}/{y}.mvt", params={"ids": ",".join(gekozen)})
+    assert r.status_code == 200
+    assert r.headers["X-Tegel-Filter"] == "3"
+    for i in gekozen:
+        assert i.encode() in r.content
+    assert buiten.encode() not in r.content
+
+    ongefilterd = client.get(f"/v1/tiles/locaties/8/{x}/{y}.mvt")
+    assert buiten.encode() in ongefilterd.content
+    assert len(r.content) < len(ongefilterd.content)
+
+
+def test_filter_werkt_op_lage_zoom_zonder_de_hele_tegel_te_lezen():
+    """z3 rond Utrecht: ongefilterd ruim 300.000 vlakken en minuten rekenwerk.
+    Gefilterd moet dit binnen de gewone statement-timeout blijven, en dat lukt
+    alleen als de selectie vóór de envelope komt (MATERIALIZED in _sql)."""
+    gekozen = _ids_in_tegel("p2p.locatie_generalisatie", 6, 6, 5)
+    x, y = _tegel_van(UTR_X, UTR_Y, 3)
+    r = client.get(f"/v1/tiles/locaties/3/{x}/{y}.mvt", params={"ids": ",".join(gekozen)})
+    assert r.status_code == 200
+    assert r.headers["X-Tegel-Bron"] == "generalisatie-n6"
+    assert len(r.content) > 0
+    assert all(i.encode() in r.content for i in gekozen)
+
+
+def test_filter_op_niets_geeft_een_lege_tegel():
+    x, y = _tegel_van(UTR_X, UTR_Y, 8)
+    r = client.get(f"/v1/tiles/locaties/8/{x}/{y}.mvt", params={"ids": ""})
+    assert r.status_code == 200
+    assert r.content == b""
+
+
+def test_filter_werkt_ook_op_de_brontabel():
+    """Vanaf z11 komt de geometrie uit locatie_subdiv; het filter moet daar net
+    zo goed werken."""
+    gekozen = _ids_in_tegel("p2p.locatie_generalisatie", 10, 12, 2)
+    x, y = _tegel_van(UTR_X, UTR_Y, 12)
+    r = client.get(f"/v1/tiles/locaties/12/{x}/{y}.mvt", params={"ids": ",".join(gekozen)})
+    assert r.status_code == 200
+    assert r.headers["X-Tegel-Bron"] == "subdiv"
+    assert all(i.encode() in r.content for i in gekozen)
+
+
+def test_filter_werkt_op_de_wro_laag():
+    gekozen = _ids_in_tegel("wro.planobject_generalisatie", 8, 8, 3)
+    x, y = _tegel_van(UTR_X, UTR_Y, 8)
+    r = client.get(f"/v1/tiles/planobjecten/8/{x}/{y}.mvt", params={"ids": ",".join(gekozen)})
+    assert r.status_code == 200
+    assert all(i.encode() in r.content for i in gekozen)
+
+
+def test_etag_hangt_af_van_de_selectie_niet_van_de_volgorde():
+    x, y = _tegel_van(UTR_X, UTR_Y, 8)
+    url = f"/v1/tiles/locaties/8/{x}/{y}.mvt"
+    zonder = client.get(url).headers["ETag"]
+    ab = client.get(url, params={"ids": "a,b"}).headers["ETag"]
+    ba = client.get(url, params={"ids": "b,a"}).headers["ETag"]
+    ac = client.get(url, params={"ids": "a,c"}).headers["ETag"]
+    assert ab == ba
+    assert len({zonder, ab, ac}) == 3

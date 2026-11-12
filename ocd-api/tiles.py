@@ -13,13 +13,20 @@ onderscheiden van elk MVT-voorbeeld dat je online vindt:
    rechtstreeks uit `p2p.locatie_subdiv`. Voorberekenen levert zowel de
    kleinere tegel als de snellere query; live generaliseren ruilt het een
    tegen het ander in.
+
+Daarnaast een optioneel **filter op identificatie** (`?ids=a,b,c`). De viewer
+tekent alleen de locaties van de gekozen plek, maar een gewone tegel bevat alles
+in dat stuk kaart. Uitgezoomd is dat het verschil tussen een handvol vlakken en
+honderdduizenden: rond Utrecht op z4 is een ongefilterde tegel 3,6 MB gzip
+(278.335 vlakken), het hele schermbeeld gefilterd op de ~50 locaties van één
+adres 179 kB. Gemeten 2026-11-12, zie docs/plans/vector-tiles.md in de viewer.
 """
 
 from __future__ import annotations
 
 import hashlib
 
-from fastapi import APIRouter, HTTPException, Path, Request, Response
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 
 from db import get_conn
 
@@ -95,22 +102,63 @@ def _tegels_op_zoom(z: int) -> int:
     return 2**z
 
 
-def _sql(laag: dict, niveau: int | None) -> str:
+def _sql(laag: dict, niveau: int | None, gefilterd: bool = False) -> str:
     tabel = laag["bron"] if niveau is None else laag["generalisatie"]
     niveau_filter = "" if niveau is None else f"AND b.niveau = {niveau}"
+    sleutel = laag["sleutel"]
+    if gefilterd:
+        # Eerst de selectie, dan pas de envelope. MATERIALIZED is hier de kern:
+        # zonder die hint mag de planner de CTE inlinen en dan kiezen voor de
+        # GIST-index op de envelope. Op lage zoom beslaat die envelope een
+        # provincie of heel Nederland, en dan scant hij honderdduizenden rijen om
+        # er vijftig over te houden -- gemeten: een schermbeeld liep zo tegen een
+        # timeout van 10 minuten, en met de selectie eerst in 0,1-0,6 s.
+        bron = f"""
+        sel AS MATERIALIZED (
+          SELECT b.{sleutel}, b.geometrie
+            FROM {tabel} b
+           WHERE b.{sleutel} = ANY(%(ids)s) {niveau_filter}
+        ),"""
+        van, waar = "sel b, env", "b.geometrie && env.b"
+    else:
+        bron = ""
+        van, waar = f"{tabel} b, env", f"b.geometrie && env.b {niveau_filter}"
     return f"""
         WITH env AS (
           SELECT ST_MakeEnvelope(%(minx)s, %(miny)s, %(maxx)s, %(maxy)s, 28992) AS b
-        ),
+        ),{bron}
         mvt AS (
-          SELECT b.{laag["sleutel"]} AS id,
+          SELECT b.{sleutel} AS id,
                  ST_AsMVTGeom(b.geometrie, env.b, {MVT_EXTENT}, {MVT_BUFFER}, true) AS geom
-            FROM {tabel} b, env
-           WHERE b.geometrie && env.b {niveau_filter}
+            FROM {van}
+           WHERE {waar}
         )
         SELECT ST_AsMVT(mvt, %(laagnaam)s, {MVT_EXTENT}, 'geom') AS tegel
           FROM mvt WHERE geom IS NOT NULL
     """  # noqa: S608 — tabel/niveau komen uit LAGEN resp. _niveau_voor, niet uit de request
+
+
+# Grenzen aan het filter. Een adres heeft er in de praktijk 40-60 (gemeten op
+# vijf punten, 2026-11-12); de bovengrens houdt de URL onder de 16 kB die
+# Cloudflare en uvicorn doorlaten, met ruimte voor identificaties van ~50 tekens.
+MAX_IDS = 250
+MAX_ID_LENGTE = 200
+
+
+def _ids_uit(ids: str | None) -> list[str] | None:
+    """Ontleed `?ids=`. None = geen filter; een lege lijst = filter op niets.
+
+    Gesorteerd en ontdubbeld, zodat dezelfde selectie in een andere volgorde
+    dezelfde ETag krijgt."""
+    if ids is None:
+        return None
+    lijst = sorted({i.strip() for i in ids.split(",") if i.strip()})
+    if len(lijst) > MAX_IDS:
+        raise HTTPException(
+            400, f"Te veel identificaties in ids: {len(lijst)} (max {MAX_IDS}).")
+    if any(len(i) > MAX_ID_LENGTE for i in lijst):
+        raise HTTPException(400, f"Identificatie langer dan {MAX_ID_LENGTE} tekens in ids.")
+    return lijst
 
 
 # Tabellen waarvan we al weten dat ze bestaan. Alleen positieve uitkomsten
@@ -165,6 +213,11 @@ def tegel(
     z: int = Path(ge=0, le=MAX_ZOOM),
     x: int = Path(ge=0),
     y: int = Path(ge=0),
+    ids: str | None = Query(
+        None,
+        description="Komma-gescheiden identificaties. Alleen deze komen in de tegel. "
+                    f"Zonder: alles in het tegelgebied. Max {MAX_IDS}.",
+    ),
 ) -> Response:
     """Eén vector tile. Leeg gebied levert een lege tegel (200, 0 bytes),
     geen 404 — dat is voor een tegelbron een geldig antwoord."""
@@ -175,13 +228,18 @@ def tegel(
     if x >= grens or y >= grens:
         raise HTTPException(404, f"Tegel buiten de RD-piramide op z{z} (max {grens - 1})")
 
+    selectie = _ids_uit(ids)
     niveau = _niveau_voor(z)
     minx, miny, maxx, maxy = envelope(z, x, y)
 
     with get_conn() as conn:
+        # De selectie hoort in de cache-sleutel: zelfde tegel, andere ids is
+        # een andere inhoud. Gehasht, want de lijst zelf kan kilobytes zijn.
+        filter_sleutel = "" if selectie is None else hashlib.sha1(  # noqa: S324
+            ",".join(selectie).encode()).hexdigest()
         etag = 'W/"{}"'.format(
             hashlib.sha1(  # noqa: S324 — cache-sleutel, geen beveiliging
-                f"{_versie(conn)}|{laag}|{z}/{x}/{y}".encode()
+                f"{_versie(conn)}|{laag}|{z}/{x}/{y}|{filter_sleutel}".encode()
             ).hexdigest()
         )
         if request.headers.get("if-none-match") == etag:
@@ -190,26 +248,28 @@ def tegel(
         if niveau is not None:
             _eis_generalisatie(conn, LAGEN[laag]["generalisatie"])
 
-        with conn.cursor() as cur:
-            cur.execute(
-                _sql(LAGEN[laag], niveau),
-                {
-                    "minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy,
-                    "laagnaam": laag,
-                },
-            )
-            rij = cur.fetchone()
+        if selectie == []:
+            rij = None  # filter op niets: geen query nodig
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    _sql(LAGEN[laag], niveau, gefilterd=selectie is not None),
+                    {
+                        "minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy,
+                        "laagnaam": laag, "ids": selectie,
+                    },
+                )
+                rij = cur.fetchone()
 
     inhoud = bytes(rij["tegel"]) if rij and rij["tegel"] is not None else b""
-    return Response(
-        content=inhoud,
-        media_type=MEDIATYPE,
-        headers={
-            "ETag": etag,
-            # Tegels zijn stabiel tussen twee sync-runs; de ETag vangt de
-            # revalidatie af, dus een korte max-age volstaat.
-            "Cache-Control": "public, max-age=3600",
-            # Voor diagnose in de netwerk-tab: uit welke tabel kwam dit?
-            "X-Tegel-Bron": "subdiv" if niveau is None else f"generalisatie-n{niveau}",
-        },
-    )
+    kop = {
+        "ETag": etag,
+        # Tegels zijn stabiel tussen twee sync-runs; de ETag vangt de
+        # revalidatie af, dus een korte max-age volstaat.
+        "Cache-Control": "public, max-age=3600",
+        # Voor diagnose in de netwerk-tab: uit welke tabel kwam dit?
+        "X-Tegel-Bron": "subdiv" if niveau is None else f"generalisatie-n{niveau}",
+    }
+    if selectie is not None:
+        kop["X-Tegel-Filter"] = str(len(selectie))
+    return Response(content=inhoud, media_type=MEDIATYPE, headers=kop)
