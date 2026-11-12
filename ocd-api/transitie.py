@@ -357,7 +357,8 @@ def voorraad(gemeentecode: str) -> dict[str, Any]:
         bruidsschat = _bruidsschat(cur, expressie)
         cur.execute("SELECT max(datum) AS d FROM wro.wro_snapshot")
         wro_stand = cur.fetchone()["d"]
-        cur.execute("SELECT max(curatie_versie) AS v FROM v2a.artikel_indeling")
+        cur.execute("SELECT max(curatie_versie) AS v FROM v2a.artikel_indeling WHERE regeling_expression = %s",
+                    (expressie,))
         curatie = cur.fetchone()["v"]
         cur.execute("SELECT array_agg(identificatie ORDER BY identificatie) AS ids FROM p2p.pons WHERE identificatie LIKE %s",
                     (f"nl.imow-{gm}.%",))
