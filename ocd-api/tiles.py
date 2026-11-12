@@ -102,11 +102,28 @@ def _tegels_op_zoom(z: int) -> int:
     return 2**z
 
 
-def _sql(laag: dict, niveau: int | None, gefilterd: bool = False) -> str:
+# Tot en met deze zoom haalt een gefilterde tegel eerst de selectie op en knipt
+# daarna; daarboven andersom. Gemeten (EXPLAIN BUFFERS, Utrecht, ~49 ids) in
+# gelezen pagina's, tegel-eerst / selectie-eerst:
+#   z5   109.116 /   906    -- tegel-eerst leest een provincie aan vlakken
+#   z7     2.727 / 1.058
+#   z9       612 / 1.272    -- selectie-eerst leest elk stukje van elk
+#   z11      910 / 6.261       provinciaal object, door de hele provincie
+SELECTIE_EERST_TOT_ZOOM = 8
+
+
+def _sql(laag: dict, niveau: int | None, gefilterd: bool = False,
+         selectie_eerst: bool = True) -> str:
     tabel = laag["bron"] if niveau is None else laag["generalisatie"]
     niveau_filter = "" if niveau is None else f"AND b.niveau = {niveau}"
     sleutel = laag["sleutel"]
-    if gefilterd:
+    if gefilterd and not selectie_eerst:
+        # Ingezoomd: de envelope is klein, dus eerst de GIST-index en dan op id
+        # zeven. Dezelfde pagina's als een ongefilterde tegel.
+        bron = ""
+        van = f"{tabel} b, env"
+        waar = f"b.geometrie && env.b AND b.{sleutel} = ANY(%(ids)s) {niveau_filter}"
+    elif gefilterd:
         # Eerst de selectie, dan pas de envelope. MATERIALIZED is hier de kern:
         # zonder die hint mag de planner de CTE inlinen en dan kiezen voor de
         # GIST-index op de envelope. Op lage zoom beslaat die envelope een
@@ -253,7 +270,8 @@ def tegel(
         else:
             with conn.cursor() as cur:
                 cur.execute(
-                    _sql(LAGEN[laag], niveau, gefilterd=selectie is not None),
+                    _sql(LAGEN[laag], niveau, gefilterd=selectie is not None,
+                         selectie_eerst=z <= SELECTIE_EERST_TOT_ZOOM),
                     {
                         "minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy,
                         "laagnaam": laag, "ids": selectie,

@@ -290,3 +290,15 @@ def test_etag_hangt_af_van_de_selectie_niet_van_de_volgorde():
     ac = client.get(url, params={"ids": "a,c"}).headers["ETag"]
     assert ab == ba
     assert len({zonder, ab, ac}) == 3
+
+
+def test_selectie_eerst_alleen_uitgezoomd():
+    """Uitgezoomd eerst de selectie (anders leest z5 852 MB aan pagina's),
+    ingezoomd eerst de envelope (anders leest z11 elk stukje van elk
+    provinciaal object: 49 MB tegen 7 MB). Zie SELECTIE_EERST_TOT_ZOOM."""
+    laag = mod.LAGEN["locaties"]
+    assert "MATERIALIZED" in mod._sql(laag, 6, gefilterd=True, selectie_eerst=True)
+    ingezoomd = mod._sql(laag, None, gefilterd=True, selectie_eerst=False)
+    assert "MATERIALIZED" not in ingezoomd
+    assert "= ANY(%(ids)s)" in ingezoomd
+    assert mod.SELECTIE_EERST_TOT_ZOOM == 8
