@@ -24,6 +24,7 @@ from keywords import router as keywords_router
 from planvoorraad import router as planvoorraad_router
 from vergunningcheck import router as vergunningcheck_router
 from ponsenkaart import router as ponsenkaart_router
+from transitie import router as transitie_router
 from regelteksten_bij_vraag import (
     VRIJETEKST_DOCUMENTTYPES,
     router as regelteksten_router,
@@ -216,6 +217,7 @@ app.include_router(instructieregels_router, dependencies=[Depends(verify_key)])
 app.include_router(planvoorraad_router, dependencies=[Depends(verify_key)])
 app.include_router(vergunningcheck_router, dependencies=[Depends(verify_key)])
 app.include_router(ponsenkaart_router, dependencies=[Depends(verify_key)])
+app.include_router(transitie_router, dependencies=[Depends(verify_key)])
 app.include_router(expand_router, dependencies=[Depends(verify_key)])
 app.include_router(kennis_router, dependencies=[Depends(verify_key)])
 app.include_router(tiles_router, dependencies=[Depends(verify_key)])
