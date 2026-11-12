@@ -419,6 +419,7 @@ de omvang zit in afgeleide objecten die je nooit over de lijn moet sturen.
 | **Herbouwen** | de drieslag-MV's (`naammatch_signaal`, `naammatch_signaal_intra`, `mv_regel_op_locatie`, `tekst_object_consistentie_mv`, `gio_locatie`, `gio_referentie_consistentie_mv`, `ala_punt`) | `refresh_drieslag.py` tegen prod |
 | **Herbouwen** | health + stats (`core.mv_bronhouder_health`, `core.mv_geo_health`, `v2a.ponsenkaart_gemeente_stats`) | idem |
 | **Herbouwen** | `p2p.locatie_generalisatie` (vector-tile-lagen, gelezen door `ocd-api/tiles.py` voor z0–z10) | `vul_locatie_generalisatie.py --bronhouder <code…>` — zie hieronder |
+| **Herbouwen** | `p2p.locatie_rand` (randen in de tegels, z0–z10, sinds 2026-11-12) | `vul_locatie_generalisatie.py --bron ow-rand --bronhouder <code…>` — draait in `fase_post` direct na de generalisatie |
 
 > **De vector-tile-generalisatie draait sinds 2026-09-01 mee in de sync.**
 > `ocd-api/tiles.py` leest `p2p.locatie_generalisatie` voor z0–z10. Tot die datum
@@ -450,6 +451,21 @@ de omvang zit in afgeleide objecten die je nooit over de lijn moet sturen.
 > 24 rijen: de database draait op `en_US.utf8` en onder die collatie kan de
 > planner van `identificatie LIKE 'nl.imow-gm0995.%'` niet bewijzen dat het een
 > prefix is, dus scant hij de hele tabel. Mét de index is het 0,035 ms.
+>
+> **De randen (`p2p.locatie_rand`, sinds 2026-11-12)** horen er direct achter en
+> draaien in `fase_post` mee. De tabel is de omtrek van `p2p.locatie` (de hele
+> vorm, zonder de naden van `locatie_subdiv`), vereenvoudigd op dezelfde drie
+> niveaus. `ocd-api/tiles.py` leest hem voor de randlaag op z0–z10 (`?rand=1`);
+> vanaf z11 voegt het endpoint de stukjes live samen. Ontbreekt de tabel, dan
+> komen de tegels zonder rand (`X-Tegel-Rand: ontbreekt`), niet met een fout.
+>
+> ```bash
+> python scripts/vul_locatie_generalisatie.py --bron ow-rand --bronhouder gm0995   # na een sync, los
+> python scripts/vul_locatie_generalisatie.py --bron ow-rand                       # volledig
+> ```
+>
+> Eerst `scripts/2026-11-12-add-locatie-rand.sql` (tabel, indexen, en de
+> prefix-index op `p2p.locatie` die de per-bronhouder-route nodig heeft).
 >
 > Wat níét werkt, voor wie het wil verkorten: de bereik-truc
 > `>= 'nl.imow-gm0995.' AND < 'nl.imow-gm0995/'` geeft onder deze collatie het

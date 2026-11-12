@@ -208,26 +208,40 @@ def test_ids_parser_weigert_te_veel_en_te_lang():
     assert e.value.status_code == 400
 
 
-def _ids_in_tegel(laag_tabel: str, niveau: int, z: int, n: int) -> list[str]:
-    """n identificaties die in de tegel rond Utrecht op zoom z liggen."""
+def _ids_in_tegel(laag_tabel: str, niveau: int | None, z: int, n: int,
+                  binnen: bool = False) -> list[str]:
+    """n identificaties die in de tegel rond Utrecht op zoom z liggen.
+
+    `binnen`: alleen objecten die helemaal in de tegel vallen -- nodig voor de
+    randtests, want de omtrek van een object dat de hele tegel bedekt (een
+    ambtsgebied) loopt er niet doorheen.
+
+    Geen DISTINCT/ORDER BY: daarmee leest de query elke rij in de envelope, en
+    met een koude lokale cache liep dat tegen de statement-timeout. Een ruime
+    LIMIT en ontdubbelen in Python is genoeg."""
     x, y = _tegel_van(UTR_X, UTR_Y, z)
     minx, miny, maxx, maxy = mod.envelope(z, x, y)
+    rel = "@" if binnen else "&&"
+    niveau_filter = "TRUE" if niveau is None else f"niveau = {int(niveau)}"
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            f"SELECT DISTINCT identificatie FROM {laag_tabel} "  # noqa: S608 — vaste tabelnaam
-            "WHERE niveau = %s AND geometrie && ST_MakeEnvelope(%s,%s,%s,%s,28992) "
-            "ORDER BY identificatie LIMIT %s",
-            (niveau, minx, miny, maxx, maxy, n),
+            f"SELECT identificatie FROM {laag_tabel} "  # noqa: S608 — vaste tabelnaam
+            f"WHERE {niveau_filter} AND geometrie {rel} ST_MakeEnvelope(%s,%s,%s,%s,28992) "
+            "LIMIT %s",
+            (minx, miny, maxx, maxy, n * 20),
         )
-        return [r["identificatie"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+        ids = [r["identificatie"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+    return list(dict.fromkeys(ids))[:n]
 
 
 def test_filter_levert_alleen_de_selectie():
     """De identificatie staat als tekst in de MVT, dus dit is zonder decoder te
     toetsen: de gekozen ids zitten erin, een id buiten de selectie niet."""
-    gekozen, buiten = _ids_in_tegel("p2p.locatie_generalisatie", 8, 8, 4)[:3], None
-    alle = _ids_in_tegel("p2p.locatie_generalisatie", 8, 8, 50)
-    buiten = next(i for i in alle if i not in gekozen)
+    alle = _ids_in_tegel("p2p.locatie_generalisatie", 8, 8, 50, binnen=True)
+    gekozen = alle[:3]
+    # Een id die ook geen deel is van een gekozen id: de toets zoekt op bytes,
+    # en `…BepGebHoofdspoorweg` zit letterlijk in `…BepGebHoofdspoorwegKernZ`.
+    buiten = next(i for i in alle if all(i not in g and g not in i for g in gekozen))
     x, y = _tegel_van(UTR_X, UTR_Y, 8)
 
     r = client.get(f"/v1/tiles/locaties/8/{x}/{y}.mvt", params={"ids": ",".join(gekozen)})
@@ -302,3 +316,80 @@ def test_selectie_eerst_alleen_uitgezoomd():
     assert "MATERIALIZED" not in ingezoomd
     assert "= ANY(%(ids)s)" in ingezoomd
     assert mod.SELECTIE_EERST_TOT_ZOOM == 8
+
+
+# ── Randen (?rand=1) ───────────────────────────────────────────────────
+#
+# Een tweede MVT-laag `<laag>_rand` met de echte omtrek: uit p2p.locatie_rand op
+# z0-z10, samengevoegd per tegel vanaf z11, en voor Wro de omtrek van de rij
+# zelf. De laagnaam staat als tekst in de MVT, dus ook dit is zonder decoder te
+# toetsen.
+
+def _get(laag: str, z: int, ids: list[str], **params):
+    x, y = _tegel_van(UTR_X, UTR_Y, z)
+    return client.get(f"/v1/tiles/{laag}/{z}/{x}/{y}.mvt",
+                      params={"ids": ",".join(ids), **params})
+
+
+def test_rand_uit_de_randtabel_op_lage_zoom():
+    gekozen = _ids_in_tegel("p2p.locatie_generalisatie", 8, 8, 5, binnen=True)
+    r = _get("locaties", 8, gekozen, rand=1)
+    assert r.status_code == 200
+    assert r.headers["X-Tegel-Rand"] == "tabel"
+    assert b"locaties_rand" in r.content
+    assert b"locaties" in r.content.replace(b"locaties_rand", b"")
+
+
+def test_rand_samengevoegd_vanaf_z11():
+    # Objecten waarvan de omtrek door deze tegel loopt -- een object dat de hele
+    # tegel bedekt heeft er terecht geen rand.
+    gekozen = _ids_in_tegel("p2p.locatie_rand", 10, 12, 5)
+    r = _get("locaties", 12, gekozen, rand=1)
+    assert r.status_code == 200
+    assert r.headers["X-Tegel-Rand"] == "samenvoegen"
+    assert b"locaties_rand" in r.content
+
+
+def test_rand_op_de_wro_laag_is_de_omtrek():
+    # z10: in de z12-tegel van Utrecht-centrum (215 m) ligt geen planobject in
+    # zijn geheel.
+    gekozen = _ids_in_tegel("wro.planobject_generalisatie", 10, 10, 5, binnen=True)
+    assert gekozen
+    r = _get("planobjecten", 10, gekozen, rand=1)
+    assert r.status_code == 200
+    assert r.headers["X-Tegel-Rand"] == "omtrek"
+    assert b"planobjecten_rand" in r.content
+
+
+def test_zonder_rand_geen_randlaag():
+    gekozen = _ids_in_tegel("p2p.locatie_generalisatie", 8, 8, 5)
+    r = _get("locaties", 8, gekozen)
+    assert b"locaties_rand" not in r.content
+    assert "X-Tegel-Rand" not in r.headers
+
+
+def test_rand_zonder_filter_wordt_genegeerd():
+    """Ongefilterd zou het de omtrek van alles in beeld zijn."""
+    x, y = _tegel_van(UTR_X, UTR_Y, 12)
+    r = client.get(f"/v1/tiles/locaties/12/{x}/{y}.mvt", params={"rand": 1})
+    assert r.status_code == 200
+    assert r.headers["X-Tegel-Rand"] == "geen"
+    assert b"locaties_rand" not in r.content
+
+
+def test_ontbrekende_randtabel_geeft_tegel_zonder_rand(monkeypatch):
+    """Een fout hier zou de viewer de hele tegel-weg laten opgeven. Dus: de
+    vlakken gewoon leveren, en in de header zeggen dat de rand ontbreekt."""
+    monkeypatch.setattr(mod, "RAND_TABEL", "p2p.bestaat_niet_rand")
+    gekozen = _ids_in_tegel("p2p.locatie_generalisatie", 8, 8, 5)
+    r = _get("locaties", 8, gekozen, rand=1)
+    assert r.status_code == 200
+    assert r.headers["X-Tegel-Rand"] == "ontbreekt"
+    assert b"locaties_rand" not in r.content
+    assert len(r.content) > 0
+
+
+def test_etag_verschilt_met_en_zonder_rand():
+    gekozen = _ids_in_tegel("p2p.locatie_generalisatie", 8, 8, 3)
+    assert _get("locaties", 8, gekozen).headers["ETag"] != \
+        _get("locaties", 8, gekozen, rand=1).headers["ETag"]

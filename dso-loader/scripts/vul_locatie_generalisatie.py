@@ -90,16 +90,32 @@ BLOKKEN_PER_CHUNK = 20_000  # ~6,5 rijen per pagina → ~130.000 rijen per chunk
 # draagt de hele vorm) en bevat naast vlakken ook lijnen — voor het
 # vereenvoudigen en de sub-pixeltoets maakt dat niet uit: een lijn die binnen
 # één pixel past is even onzichtbaar als een vlakje.
-BRONNEN: dict[str, dict[str, str]] = {
+#
+# De derde, `ow-rand`, is een andere bewerking op dezelfde niveaus: niet het
+# vlak vereenvoudigen maar zijn omtrek, als lijnen, uit p2p.locatie (de hele
+# vorm, zonder de naden van locatie_subdiv). Zie 2026-11-12-add-locatie-rand.sql.
+# p2p.locatie heeft maar ~323.000 rijen met de geometrie in TOAST, dus een
+# klein heap-bestand: met 20.000 blokken per chunk zou alles in één chunk
+# vallen en draaide er maar één verbinding.
+BRONNEN: dict[str, dict] = {
     "ow": {
         "bron": "p2p.locatie_subdiv",
         "doel": "p2p.locatie_generalisatie",
         "prefix": "idx_locatie_gen",
+        "soort": "vlak",
     },
     "wro": {
         "bron": "wro.planobject",
         "doel": "wro.planobject_generalisatie",
         "prefix": "idx_planobject_gen",
+        "soort": "vlak",
+    },
+    "ow-rand": {
+        "bron": "p2p.locatie",
+        "doel": "p2p.locatie_rand",
+        "prefix": "idx_locatie_rand",
+        "soort": "rand",
+        "blokken_per_chunk": 200,
     },
 }
 
@@ -208,6 +224,94 @@ SELECT identificatie, %(niveau)s, g, bron_hash
 """
 
 
+# ── Randen (`--bron ow-rand`) ────────────────────────────────────────────────
+#
+# Zelfde niveaus, zelfde sub-pixelzeef, maar de uitkomst is de omtrek als lijnen
+# en niet het vlak.
+#
+# Eerst de omtrek, dan ST_Simplify op die lijnen -- NIET eerst het vlak met
+# ST_SimplifyPreserveTopology. Die bewaakt de topologie van het hele vlak en
+# schaalt slecht op provinciale vormen: op de vijf zwaarste locaties (4-5,3
+# mln punten) 6-12 s per stuk tegen 0,2-0,4 s voor ST_Simplify op de omtrek, en
+# een proefbouw op 400 van de 60.437 pagina's stond na 9 minuten nog te rekenen.
+# Een rand heeft die bewaking niet nodig: een lijn mag een fractie van een pixel
+# over zichzelf vallen. Ringen die onder de tolerantie inklappen laat ST_Simplify
+# weg, en dat is hier gewenst (de helft minder punten). De rand wijkt zo hooguit
+# één pixel af van de vulling uit de generalisatie.
+#
+# Alleen vlakken: ~400 van de ~323.000 locaties zijn een lijn of punt, en die
+# hebben geen omtrek (ST_Boundary van een lijn is zijn eindpunten).
+#
+# ST_Subdivide(…, 256) maakt van één lange omtrek rijen van max 256 punten. Het
+# is een set-returning functie in de select-lijst: één bronrij levert er dus
+# meerdere op, en dat is precies de bedoeling.
+#
+# Eén keer uitpakken. p2p.locatie houdt grote geometrieën in TOAST (de zwaarste
+# zijn 4-5 mln punten), en PostgreSQL pakt zo'n waarde bij élke functieaanroep
+# opnieuw uit: type, vier keer de bbox, de omtrek in filter en uitvoer, de hash.
+# ST_Force2D in een binnenste subquery levert één uitgepakte kopie, en OFFSET 0
+# houdt de planner ervan af die subqueries weer plat te slaan. Gemeten op 200
+# pagina's: 0,7 s tegen 2,0-2,6 s.
+#
+# Opdelen en weer bundelen. De omtrek van een versnipperd object is een
+# MultiLineString van tienduizenden ringetjes (gemeten: één waterschapsgebied
+# 80.876 ringen van 4 punten), en ST_Subdivide zet elk onderdeel van een
+# collectie in een eigen rij -- de proefbouw gaf 1,8 mln rijen van gemiddeld 6
+# punten voor 3% van de tabel. Daarom:
+#   1. ringen kleiner dan een pixel weg (dezelfde zeef als de vulling, die laat
+#      die snippers ook weg);
+#   2. lange lijnen opknippen tot max 256 punten (ST_Subdivide per onderdeel);
+#   3. de stukken per object weer bundelen per vak ter grootte van één tegel op
+#      de hoogste zoom die het niveau bedient (tolerantie x 256 px). Een tegel
+#      leest dan per object ongeveer één rij.
+def _rand_sql(waar: str) -> str:
+    return f"""
+INSERT INTO {{doel}} (identificatie, niveau, geometrie, bron_hash)
+SELECT identificatie, %(niveau)s, ST_Collect(d), bron_hash
+  FROM (
+    -- ST_SetSRID: de eerste volledige bouw (2026-11-12) viel op niveau 10 om
+    -- op "mixed SRID geometries LineString 64 != 28992" in ST_Collect, terwijl
+    -- elke bronrij 28992 heeft. Een uitvoerstuk van ST_Subdivide kwam dus
+    -- zonder geldige SRID terug. Vastzetten kost niets.
+    SELECT s.identificatie, s.bron_hash, ST_SetSRID(sd.d, 28992) AS d,
+           floor((ST_XMin(sd.d) + ST_XMax(sd.d)) / 2 / (%(tol)s * 256)) AS vx,
+           floor((ST_YMin(sd.d) + ST_YMax(sd.d)) / 2 / (%(tol)s * 256)) AS vy
+      FROM (
+        SELECT identificatie,
+               ST_Simplify(ST_Boundary(g), %(tol)s) AS r,
+               md5(ST_AsBinary(g))::uuid            AS bron_hash
+          FROM (SELECT identificatie, ST_Force2D(geometrie) AS g
+                  FROM {{bron}}
+                 WHERE {waar}
+                OFFSET 0) l
+         WHERE GeometryType(g) IN ('POLYGON', 'MULTIPOLYGON')
+           AND NOT (ST_XMax(g) - ST_XMin(g) < %(tol)s
+                AND ST_YMax(g) - ST_YMin(g) < %(tol)s)
+        OFFSET 0
+      ) s,
+      LATERAL ST_Dump(s.r) AS dd,
+      LATERAL ST_Subdivide(dd.geom, 256) AS sd(d)
+     WHERE s.r IS NOT NULL
+       AND NOT (ST_XMax(dd.geom) - ST_XMin(dd.geom) < %(tol)s
+            AND ST_YMax(dd.geom) - ST_YMin(dd.geom) < %(tol)s)
+  ) q
+ GROUP BY identificatie, bron_hash, vx, vy
+"""
+
+
+RAND_INSERT_SQL = _rand_sql("ctid >= %(van)s::tid AND ctid < %(tot)s::tid")
+RAND_BRONHOUDER_SQL = _rand_sql("identificatie LIKE %(pat)s")
+
+
+def _sql(cfg: dict, per_bronhouder: bool) -> str:
+    """De INSERT voor deze bron: vlak (generalisatie) of rand."""
+    if cfg.get("soort") == "rand":
+        sjabloon = RAND_BRONHOUDER_SQL if per_bronhouder else RAND_INSERT_SQL
+    else:
+        sjabloon = BRONHOUDER_SQL if per_bronhouder else INSERT_SQL
+    return sjabloon.format(**cfg)
+
+
 def inhaal_kandidaten(cfg: dict[str, str], prod_dsn: str,
                       drempel_abs: int, drempel_pct: float) -> list[str]:
     """Bronhouders waar prod echt achterloopt — niet die waar het ruis is.
@@ -271,7 +375,7 @@ def bouw_bronhouders(cfg: dict[str, str], niveaus: dict[int, float],
     bronhouders blijven ondertussen gewoon staan.
     """
     conn = get_conn()
-    sql = BRONHOUDER_SQL.format(**cfg)
+    sql = _sql(cfg, per_bronhouder=True)
     totaal_rijen, t_totaal = 0, time.monotonic()
     try:
         for code in codes:
@@ -300,10 +404,11 @@ def bouw_bronhouders(cfg: dict[str, str], niveaus: dict[int, float],
 def _bouw_niveau(
     cfg: dict[str, str], niveau: int, tol: float, laatste_blok: int, vanaf: int, workers: int
 ) -> None:
-    sql = INSERT_SQL.format(**cfg)
+    sql = _sql(cfg, per_bronhouder=False)
+    blokken = cfg.get("blokken_per_chunk", BLOKKEN_PER_CHUNK)
     chunks = [
-        (b, min(b + BLOKKEN_PER_CHUNK, laatste_blok + 1))
-        for b in range(vanaf, laatste_blok + 1, BLOKKEN_PER_CHUNK)
+        (b, min(b + blokken, laatste_blok + 1))
+        for b in range(vanaf, laatste_blok + 1, blokken)
     ]
     console.print(
         f"\n[bold cyan]Niveau {niveau}[/bold cyan] — tolerantie {tol:.2f} m, "
@@ -416,9 +521,10 @@ def _met_indexen(conn, cfg: dict[str, str], indexen: list[tuple[str, str]]) -> N
 @click.option("--workers", type=int, default=6, help="Parallelle verbindingen.")
 @click.option(
     "--bron",
-    type=click.Choice(["ow", "wro"]),
+    type=click.Choice(["ow", "wro", "ow-rand"]),
     default="ow",
-    help="ow = p2p.locatie_subdiv, wro = wro.planobject.",
+    help="ow = p2p.locatie_subdiv, wro = wro.planobject, "
+         "ow-rand = omtrek van p2p.locatie (randen in de tegels).",
 )
 def main(
     niveau: int | None,

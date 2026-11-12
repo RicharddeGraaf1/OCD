@@ -629,6 +629,20 @@ def fase_post(run_start: datetime.datetime, gewijzigd: set[str] | None = None):
         except Exception as e:
             fouten.append(f"locatie_generalisatie: {e}")
             log(f"locatie_generalisatie MISLUKT: {str(e)[:100]}")
+
+        # De randen in de tegels (sinds 2026-11-12) komen uit p2p.locatie_rand,
+        # afgeleid van p2p.locatie. Zelfde regime als de generalisatie: per
+        # bronhouder, geen TRUNCATE. Ontbreekt de tabel op een database, dan
+        # levert tiles.py de tegels zonder rand -- dit faalt dan hier, niet bij
+        # de bezoeker.
+        try:
+            from vul_locatie_generalisatie import BRONNEN, NIVEAUS, bouw_bronhouders
+            with load_run("locatie-rand", scope=f"bronhouders:{len(gewijzigd)}") as run:
+                bouw_bronhouders(BRONNEN["ow-rand"], NIVEAUS, sorted(gewijzigd))
+                run.set(n_verwerkt=len(gewijzigd))
+        except Exception as e:
+            fouten.append(f"locatie_rand: {e}")
+            log(f"locatie_rand MISLUKT: {str(e)[:100]}")
         rapporteer("locatie_subdiv (uitgesteld naar post)", [
             f"- {len(gewijzigd)} bronhouders herbouwd, {totaal} stukjes",
         ])

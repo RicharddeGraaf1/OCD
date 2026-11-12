@@ -112,8 +112,81 @@ def _tegels_op_zoom(z: int) -> int:
 SELECTIE_EERST_TOT_ZOOM = 8
 
 
+# ── Randen (`?rand=1`) ────────────────────────────────────────────────
+#
+# Een tweede MVT-laag `<laag>_rand` met de omtrek als lijnen. Niet de rand om
+# elk opgeslagen vlak: de Ow-locaties staan als ST_Subdivide-stukjes in de
+# database, dus dat tekent het hele knipraster mee (en de tegel knipt elk vlak
+# nog eens af op de tegelgrens). Drie manieren, naar wat de bron toelaat:
+#
+#   tabel        Ow z0-z10: p2p.locatie_rand, de vooraf vereenvoudigde omtrek
+#                van de héle locatie. Live samenvoegen kostte op z5 7,7 s per
+#                schermbeeld, dit is een gewone indexlookup.
+#   samenvoegen  Ow z11+: de stukjes per object in deze tegel samenvoegen en
+#                daarvan de omtrek nemen. Op die zoom zijn het er weinig: +0,2 s
+#                per schermbeeld. Stukjes die net buiten de tegel liggen doen mee
+#                als hun bbox de tegel raakt, en hun naden vallen buiten de tegel
+#                en worden weggeknipt.
+#   omtrek       Wro: planobjecten zijn niet opgedeeld, dus ST_Boundary van de
+#                rij zelf volstaat.
+RAND_TABEL = "p2p.locatie_rand"
+
+
+def _rand_wijze(laag: str, niveau: int | None) -> str:
+    if laag == "planobjecten":
+        return "omtrek"
+    return "samenvoegen" if niveau is None else "tabel"
+
+
+def _rand_cte(wijze: str, sleutel: str, van: str, waar: str, niveau: int | None,
+              selectie_eerst: bool) -> str:
+    """De CTE `rand`. `van`/`waar` zijn die van de vlakkenlaag, zodat omtrek en
+    samenvoegen precies dezelfde rijen gebruiken als de vulling."""
+    geom = f"ST_AsMVTGeom({{g}}, {{env}}, {MVT_EXTENT}, {MVT_BUFFER}, true)"
+    if wijze == "omtrek":
+        return f""",
+        rand AS (
+          SELECT b.{sleutel} AS id, {geom.format(g="ST_Boundary(b.geometrie)", env="env.b")} AS geom
+            FROM {van}
+           WHERE {waar} AND ST_Dimension(b.geometrie) = 2
+        )"""
+    if wijze == "samenvoegen":
+        # gridSize schakelt OverlayNG met snap-rounding in: robuust tegen de
+        # TopologyException die een gewone union op deze stukjes kan geven.
+        unie = "ST_Boundary(ST_UnaryUnion(ST_Collect(b.geometrie), %(grid)s))"
+        return f""",
+        rand AS (
+          SELECT b.{sleutel} AS id, {geom.format(g=unie, env="(SELECT b FROM env)")} AS geom
+            FROM {van}
+           WHERE {waar}
+           GROUP BY b.{sleutel}
+        )"""
+    # tabel -- dezelfde afweging selectie-eerst/envelope-eerst als de vlakken
+    if selectie_eerst:
+        return f""",
+        randsel AS MATERIALIZED (
+          SELECT r.identificatie, r.geometrie
+            FROM {RAND_TABEL} r
+           WHERE r.identificatie = ANY(%(ids)s) AND r.niveau = {niveau}
+        ),
+        rand AS (
+          SELECT r.identificatie AS id, {geom.format(g="r.geometrie", env="env.b")} AS geom
+            FROM randsel r, env
+           WHERE r.geometrie && env.b
+        )"""
+    return f""",
+        rand AS (
+          SELECT r.identificatie AS id, {geom.format(g="r.geometrie", env="env.b")} AS geom
+            FROM {RAND_TABEL} r, env
+           WHERE r.geometrie && env.b AND r.identificatie = ANY(%(ids)s)
+             AND r.niveau = {niveau}
+        )"""
+
+
 def _sql(laag: dict, niveau: int | None, gefilterd: bool = False,
-         selectie_eerst: bool = True) -> str:
+         selectie_eerst: bool = True, rand: str | None = None) -> str:
+    """`rand`: None = alleen vlakken; anders de wijze uit `_rand_wijze`.
+    Randen bestaan alleen bij een gefilterde tegel."""
     tabel = laag["bron"] if niveau is None else laag["generalisatie"]
     niveau_filter = "" if niveau is None else f"AND b.niveau = {niveau}"
     sleutel = laag["sleutel"]
@@ -140,7 +213,7 @@ def _sql(laag: dict, niveau: int | None, gefilterd: bool = False,
     else:
         bron = ""
         van, waar = f"{tabel} b, env", f"b.geometrie && env.b {niveau_filter}"
-    return f"""
+    kop = f"""
         WITH env AS (
           SELECT ST_MakeEnvelope(%(minx)s, %(miny)s, %(maxx)s, %(maxy)s, 28992) AS b
         ),{bron}
@@ -149,10 +222,21 @@ def _sql(laag: dict, niveau: int | None, gefilterd: bool = False,
                  ST_AsMVTGeom(b.geometrie, env.b, {MVT_EXTENT}, {MVT_BUFFER}, true) AS geom
             FROM {van}
            WHERE {waar}
-        )
+        )"""
+    if rand is None or not gefilterd:
+        return kop + f"""
         SELECT ST_AsMVT(mvt, %(laagnaam)s, {MVT_EXTENT}, 'geom') AS tegel
           FROM mvt WHERE geom IS NOT NULL
     """  # noqa: S608 — tabel/niveau komen uit LAGEN resp. _niveau_voor, niet uit de request
+    # Twee lagen in één tegel: MVT-lagen zijn los te encoderen en achter elkaar
+    # te plakken. Lege laag = lege bytea, zodat een tegel zonder randen (of
+    # zonder vlakken) gewoon de andere laag draagt.
+    return kop + _rand_cte(rand, sleutel, van, waar, niveau, selectie_eerst) + f"""
+        SELECT COALESCE((SELECT ST_AsMVT(mvt, %(laagnaam)s, {MVT_EXTENT}, 'geom')
+                           FROM mvt WHERE geom IS NOT NULL), ''::bytea)
+            || COALESCE((SELECT ST_AsMVT(rand, %(randnaam)s, {MVT_EXTENT}, 'geom')
+                           FROM rand WHERE geom IS NOT NULL), ''::bytea) AS tegel
+    """  # noqa: S608
 
 
 # Grenzen aan het filter. Een adres heeft er in de praktijk 40-60 (gemeten op
@@ -184,6 +268,19 @@ def _ids_uit(ids: str | None) -> list[str] | None:
 _BESTAAT: set[str] = set()
 
 
+def _bestaat(conn, tabel: str) -> bool:
+    """Bestaat deze tabel? Alleen een ja wordt onthouden (zie `_BESTAAT`)."""
+    if tabel in _BESTAAT:
+        return True
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s) IS NOT NULL AS bestaat", (tabel,))
+        rij = cur.fetchone()
+    if rij and rij["bestaat"]:
+        _BESTAAT.add(tabel)
+        return True
+    return False
+
+
 def _eis_generalisatie(conn, tabel: str) -> None:
     """503 als de generalisatietabel ontbreekt.
 
@@ -193,13 +290,7 @@ def _eis_generalisatie(conn, tabel: str) -> None:
     een 'relation does not exist'. Een 500 met een psycopg-stacktrace vertelt de
     aanroeper niet wat er moet gebeuren; dit wel.
     """
-    if tabel in _BESTAAT:
-        return
-    with conn.cursor() as cur:
-        cur.execute("SELECT to_regclass(%s) IS NOT NULL AS bestaat", (tabel,))
-        rij = cur.fetchone()
-    if rij and rij["bestaat"]:
-        _BESTAAT.add(tabel)
+    if _bestaat(conn, tabel):
         return
     raise HTTPException(
         503,
@@ -235,6 +326,10 @@ def tegel(
         description="Komma-gescheiden identificaties. Alleen deze komen in de tegel. "
                     f"Zonder: alles in het tegelgebied. Max {MAX_IDS}.",
     ),
+    rand: bool = Query(
+        False,
+        description="Met ids: ook een laag `<laag>_rand` met de omtrek als lijnen.",
+    ),
 ) -> Response:
     """Eén vector tile. Leeg gebied levert een lege tegel (200, 0 bytes),
     geen 404 — dat is voor een tegelbron een geldig antwoord."""
@@ -254,9 +349,18 @@ def tegel(
         # een andere inhoud. Gehasht, want de lijst zelf kan kilobytes zijn.
         filter_sleutel = "" if selectie is None else hashlib.sha1(  # noqa: S324
             ",".join(selectie).encode()).hexdigest()
+        # Randen alleen bij een gefilterde tegel: ongefilterd zou het de hele
+        # omtrek van alles in beeld zijn, en dat tekent niemand.
+        rand_wijze = _rand_wijze(laag, niveau) if rand and selectie is not None else None
+        # Ontbreekt de randtabel (een database waar hij nog niet gebouwd is),
+        # dan de tegel zónder randen in plaats van een fout: een mislukte tegel
+        # laat de viewer de hele tegel-weg opgeven en terugvallen op GeoJSON.
+        rand_status = None
+        if rand_wijze == "tabel" and not _bestaat(conn, RAND_TABEL):
+            rand_wijze, rand_status = None, "ontbreekt"
         etag = 'W/"{}"'.format(
             hashlib.sha1(  # noqa: S324 — cache-sleutel, geen beveiliging
-                f"{_versie(conn)}|{laag}|{z}/{x}/{y}|{filter_sleutel}".encode()
+                f"{_versie(conn)}|{laag}|{z}/{x}/{y}|{filter_sleutel}|{rand_wijze}".encode()
             ).hexdigest()
         )
         if request.headers.get("if-none-match") == etag:
@@ -271,10 +375,12 @@ def tegel(
             with conn.cursor() as cur:
                 cur.execute(
                     _sql(LAGEN[laag], niveau, gefilterd=selectie is not None,
-                         selectie_eerst=z <= SELECTIE_EERST_TOT_ZOOM),
+                         selectie_eerst=z <= SELECTIE_EERST_TOT_ZOOM, rand=rand_wijze),
                     {
                         "minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy,
-                        "laagnaam": laag, "ids": selectie,
+                        "laagnaam": laag, "randnaam": f"{laag}_rand", "ids": selectie,
+                        # snap-raster voor het samenvoegen: een kwart pixel
+                        "grid": RES_Z0 / 2**z / 4,
                     },
                 )
                 rij = cur.fetchone()
@@ -290,4 +396,6 @@ def tegel(
     }
     if selectie is not None:
         kop["X-Tegel-Filter"] = str(len(selectie))
+    if rand:
+        kop["X-Tegel-Rand"] = rand_status or rand_wijze or "geen"
     return Response(content=inhoud, media_type=MEDIATYPE, headers=kop)
