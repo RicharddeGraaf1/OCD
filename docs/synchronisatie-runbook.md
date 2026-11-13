@@ -594,6 +594,11 @@ OCD_DB_URL="$PROD_DB_URL" python -c "import sys;sys.path.insert(0,'.');from src.
 
 # subdiv voor de geraakte bronhouders
 OCD_DB_URL="$PROD_DB_URL" python -m src.cli refresh-subdiv -b gm0160   # per code
+# dan de tegellagen, per bronhouder (geen TRUNCATE) — de generalisatie én de randen.
+# Stond hier tot 2026-11-13 niet; fase_post doet het lokaal wel. Gemeten 13-11 op
+# 14 bronhouders: generalisatie 2,3 min, randen 0,4 min (--workers 4).
+OCD_DB_URL="$PROD_DB_URL" python scripts/vul_locatie_generalisatie.py --bron ow --bronhouder gm0160 --workers 4
+OCD_DB_URL="$PROD_DB_URL" python scripts/vul_locatie_generalisatie.py --bron ow-rand --bronhouder gm0160 --workers 4
 # dan de MV's
 OCD_DB_URL="$PROD_DB_URL" python scripts/refresh_drieslag.py
 # health-MV's: zet parallellisme UIT in dezelfde sessie
